@@ -31,6 +31,8 @@ export default defineConfig({
     optimizeDeps: {
       exclude: ['@huggingface/transformers']
     },
-    assetsInclude: ['**/*.wasm']
+    assetsInclude: ['**/*.wasm'],
+    // Voice workers are module workers, and the recognition worker loads Whisper lazily.
+    worker: { format: 'es' }
   }
 })

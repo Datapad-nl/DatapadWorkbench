@@ -3,7 +3,7 @@ import { loadSupertonic, synthesize } from './supertonic'
 
 type InMessage =
   | { type: 'load' }
-  | { type: 'synth'; id: number; text: string; lang: VoiceLanguage; voice: string; speed: number }
+  | { type: 'synth'; id: number; text: string; lang: VoiceLanguage; voice: string; speed: number; urgent?: boolean }
 
 type OutMessage =
   | { type: 'ready' }
@@ -20,14 +20,28 @@ function fail(id: number | undefined, error: unknown): void {
   scope.postMessage(id === undefined ? { type: 'error', message } : { type: 'error', id, message })
 }
 
-let chain: Promise<unknown> = Promise.resolve()
+type Task = () => Promise<void>
 
-function enqueue(task: () => Promise<void>): void {
-  const run = chain.then(task, task)
-  chain = run.then(
-    () => undefined,
-    () => undefined
-  )
+// One model serves replies and status lines. A status line goes ahead of reply sentences still waiting.
+const urgentTasks: Task[] = []
+const tasks: Task[] = []
+let running = false
+
+function enqueue(task: Task, urgent = false): void {
+  ;(urgent ? urgentTasks : tasks).push(task)
+  void pump()
+}
+
+async function pump(): Promise<void> {
+  if (running) return
+  running = true
+  try {
+    for (let task = urgentTasks.shift() ?? tasks.shift(); task; task = urgentTasks.shift() ?? tasks.shift()) {
+      await task()
+    }
+  } finally {
+    running = false
+  }
 }
 
 scope.onmessage = (event) => {
@@ -54,5 +68,5 @@ scope.onmessage = (event) => {
     } catch (error) {
       fail(message.id, error)
     }
-  })
+  }, message.urgent)
 }

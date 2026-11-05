@@ -1,5 +1,6 @@
 import type { VoiceLanguage, VoiceSettings } from '../../../shared/types'
 import { loadSupertonic, synthesize } from './supertonic'
+import { getAsr } from './whisper'
 
 const SAMPLE_RATE = 16000
 const SILENCE_MS = 1400
@@ -8,8 +9,6 @@ const MAX_MS = 60_000
 const PARTIAL_MS = 1600
 const PARTIAL_MAX_SEC = 6
 const ASR_MAX_SEC = 8
-
-type AsrPipeline = (audio: Float32Array, options?: Record<string, unknown>) => Promise<{ text?: string }>
 
 export type TtsVoice = { voiceURI: string; name: string }
 
@@ -26,9 +25,6 @@ export const TTS_VOICES: TtsVoice[] = [
   { voiceURI: 'F5', name: 'Female 5' }
 ]
 
-let asr: AsrPipeline | null = null
-let asrLoading: Promise<AsrPipeline> | null = null
-let transformersReady: Promise<typeof import('@huggingface/transformers')> | null = null
 let speakGen = 0
 let ttsContext: AudioContext | null = null
 let ttsGain: GainNode | null = null
@@ -47,26 +43,6 @@ function resample(input: Float32Array, fromRate: number, toRate: number): Float3
     output[i] = input[i0] * (1 - t) + input[i1] * t
   }
   return output
-}
-
-async function transformersEnv(): Promise<typeof import('@huggingface/transformers')> {
-  if (transformersReady) return transformersReady
-  transformersReady = (async () => {
-    const [tf, { ortMjs, ortWasm }] = await Promise.all([
-      import('@huggingface/transformers'),
-      import('./ortAssets')
-    ])
-    tf.env.allowRemoteModels = false
-    tf.env.allowLocalModels = true
-    tf.env.useBrowserCache = false
-    tf.env.localModelPath = 'workbench-model://models/'
-    const onnxWasm = tf.env.backends.onnx.wasm as { wasmPaths?: { mjs: string; wasm: string } } | undefined
-    if (onnxWasm) {
-      onnxWasm.wasmPaths = { mjs: ortMjs, wasm: ortWasm }
-    }
-    return tf
-  })()
-  return transformersReady
 }
 
 let onnxChain: Promise<unknown> = Promise.resolve()
@@ -100,26 +76,6 @@ export async function loadAsr(): Promise<void> {
 
 export async function loadTts(): Promise<void> {
   await withOnnx(getTts)
-}
-
-async function getAsr(): Promise<AsrPipeline> {
-  if (asr) return asr
-  if (asrLoading) return asrLoading
-  asrLoading = (async () => {
-    const { pipeline } = await transformersEnv()
-    const pipe = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en', {
-      device: 'wasm',
-      dtype: { model: 'fp32', decoder_model_merged: 'q4' }
-    })
-    asr = ((audio, options) => pipe(audio, options)) as AsrPipeline
-    return asr
-  })()
-  try {
-    return await asrLoading
-  } catch (error) {
-    asrLoading = null
-    throw error
-  }
 }
 
 async function getTts(): Promise<void> {
@@ -470,16 +426,39 @@ let replyHeld = false
 let replyHoldWait: Array<() => void> = []
 const asideSources = new Set<AudioBufferSourceNode>()
 
-type AsideOut =
+type TtsOut =
   | { type: 'ready' }
   | { type: 'audio'; id: number; samples: Float32Array; sampleRate: number }
   | { type: 'error'; id?: number; message: string }
 
-let asideWorker: Worker | null = null
-let asideWorkerBroken = false
-let asideLoad: Promise<void> | null = null
-let asideSeq = 0
-const asidePending = new Map<number, { resolve: (audio: Pcm) => void; reject: (error: Error) => void }>()
+/**
+ * One worker holds the speech model for replies and status lines, so the model is in memory
+ * once and synthesis stays off the UI thread. The UI thread loads its own copy only when the
+ * worker cannot run.
+ */
+let ttsWorker: Worker | null = null
+let ttsWorkerBroken = false
+let ttsWorkerReady: Promise<void> | null = null
+let ttsReadyWait: { resolve: () => void; reject: (error: Error) => void } | null = null
+let ttsSeq = 0
+const ttsPending = new Map<number, { resolve: (audio: Pcm) => void; reject: (error: Error) => void }>()
+/** The model takes several hundred MB. After this long without speech the worker goes; loading again takes under a second. */
+const TTS_IDLE_MS = 3 * 60_000
+let ttsIdleTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleTtsRelease(): void {
+  if (ttsIdleTimer) clearTimeout(ttsIdleTimer)
+  ttsIdleTimer = setTimeout(() => {
+    ttsIdleTimer = null
+    if (ttsPending.size > 0 || ttsReadyWait) {
+      scheduleTtsRelease()
+      return
+    }
+    ttsWorker?.terminate()
+    ttsWorker = null
+    ttsWorkerReady = null
+  }, TTS_IDLE_MS)
+}
 
 function waitReplyFree(): Promise<void> {
   return new Promise((resolve) => {
@@ -565,64 +544,94 @@ function asideError(error: unknown): Error {
   return error instanceof Error ? error : new Error('Status voice failed')
 }
 
-function asideWorkerHandle(): Worker {
-  if (asideWorker) return asideWorker
+function rejectTtsJobs(error: Error): void {
+  ttsReadyWait?.reject(error)
+  ttsReadyWait = null
+  for (const pending of ttsPending.values()) pending.reject(error)
+  ttsPending.clear()
+}
+
+function failTtsWorker(error: Error): void {
+  ttsWorkerBroken = true
+  rejectTtsJobs(error)
+}
+
+/** Drop a stuck worker. The next request starts a fresh one. */
+function resetTtsWorker(error: Error): void {
+  ttsWorker?.terminate()
+  ttsWorker = null
+  ttsWorkerReady = null
+  rejectTtsJobs(error)
+}
+
+function ttsWorkerHandle(): Worker {
+  if (ttsWorker) return ttsWorker
   const worker = new Worker(new URL('./asideTts.worker.ts', import.meta.url), { type: 'module' })
-  worker.onmessage = (event: MessageEvent<AsideOut>) => {
+  worker.onmessage = (event: MessageEvent<TtsOut>) => {
     const message = event.data
-    if (message.type === 'ready') return
+    scheduleTtsRelease()
+    if (message.type === 'ready') {
+      ttsReadyWait?.resolve()
+      ttsReadyWait = null
+      return
+    }
     if (message.type === 'error') {
       const id = message.id
       if (id === undefined) {
-        asideWorkerBroken = true
-        for (const pending of asidePending.values()) pending.reject(new Error(message.message))
-        asidePending.clear()
+        failTtsWorker(new Error(message.message))
         return
       }
-      asidePending.get(id)?.reject(new Error(message.message))
-      asidePending.delete(id)
+      ttsPending.get(id)?.reject(new Error(message.message))
+      ttsPending.delete(id)
       return
     }
-    const pending = asidePending.get(message.id)
+    const pending = ttsPending.get(message.id)
     if (!pending) return
-    asidePending.delete(message.id)
+    ttsPending.delete(message.id)
     pending.resolve({ samples: message.samples, sampleRate: message.sampleRate })
   }
-  worker.onerror = (event) => {
-    asideWorkerBroken = true
-    const error = new Error(event.message || 'Status voice failed')
-    for (const pending of asidePending.values()) pending.reject(error)
-    asidePending.clear()
-  }
-  asideWorker = worker
+  worker.onerror = (event) => failTtsWorker(new Error(event.message || 'Speech worker failed'))
+  ttsWorker = worker
   return worker
 }
 
-export function warmAsideVoice(): void {
-  if (asideWorkerBroken) return
-  try {
-    const worker = asideWorkerHandle()
-    if (asideLoad) return
-    asideLoad = Promise.resolve()
-    worker.postMessage({ type: 'load' })
-  } catch (error) {
-    asideWorkerBroken = true
-    console.error('aside voice', error)
-  }
+/** Load the model on the worker once. Resolves when it can synthesize. */
+function loadTtsWorker(): Promise<void> {
+  if (ttsWorkerReady) return ttsWorkerReady
+  const ready = (async () => {
+    const model = await window.workbench.ensureVoiceModel()
+    if (!model.ready) throw new Error(model.error || 'Speech model is not ready')
+    let worker: Worker
+    try {
+      worker = ttsWorkerHandle()
+    } catch (error) {
+      failTtsWorker(error instanceof Error ? error : new Error('Speech worker failed'))
+      throw error
+    }
+    await new Promise<void>((resolve, reject) => {
+      ttsReadyWait = { resolve, reject }
+      worker.postMessage({ type: 'load' })
+    })
+  })()
+  ttsWorkerReady = ready
+  ready.catch(() => {
+    if (ttsWorkerReady === ready) ttsWorkerReady = null
+  })
+  return ready
 }
 
-function synthAsideOnWorker(text: string, settings: VoiceSettings): Promise<Pcm> {
-  const worker = asideWorkerHandle()
-  const id = ++asideSeq
+export function warmAsideVoice(): void {
+  if (ttsWorkerBroken) return
+  loadTtsWorker().catch((error: unknown) => console.error('voice worker', error))
+}
+
+async function synthOnWorker(text: string, lang: VoiceLanguage, settings: VoiceSettings, urgent: boolean): Promise<Pcm> {
+  await loadTtsWorker()
+  const worker = ttsWorkerHandle()
+  const id = ++ttsSeq
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      asidePending.delete(id)
-      asideWorker?.terminate()
-      asideWorker = null
-      asideLoad = null
-      reject(new Error('Status voice timed out'))
-    }, 30_000)
-    asidePending.set(id, {
+    const timer = setTimeout(() => resetTtsWorker(new Error('Speech timed out')), 30_000)
+    ttsPending.set(id, {
       resolve: (audio) => {
         clearTimeout(timer)
         resolve(audio)
@@ -632,26 +641,21 @@ function synthAsideOnWorker(text: string, settings: VoiceSettings): Promise<Pcm>
         reject(error)
       }
     })
-    worker.postMessage({
-      type: 'synth',
-      id,
-      text,
-      lang: speechLanguage(text, settings),
-      voice: voiceId(settings),
-      speed: speechSpeed(settings)
-    })
+    worker.postMessage({ type: 'synth', id, text, lang, voice: voiceId(settings), speed: speechSpeed(settings), urgent })
   })
 }
 
-async function synthAside(text: string, settings: VoiceSettings): Promise<Pcm> {
-  if (!asideWorkerBroken) {
+/** Synthesize on the shared worker. Falls back to the UI thread only when the worker cannot run. */
+async function synth(text: string, lang: VoiceLanguage, settings: VoiceSettings, urgent: boolean): Promise<Pcm> {
+  if (!ttsWorkerBroken) {
     try {
-      return await synthAsideOnWorker(text, settings)
+      return await synthOnWorker(text, lang, settings, urgent)
     } catch (error) {
-      console.error('aside voice', error)
+      if (!ttsWorkerBroken) throw error
+      console.error('voice worker', error)
     }
   }
-  return synthHere(text, speechLanguage(text, settings), settings)
+  return synthHere(text, lang, settings)
 }
 
 async function playAside(samples: Float32Array, sampleRate: number, gen: number): Promise<void> {
@@ -700,7 +704,7 @@ export async function speakAside(text: string, settings: VoiceSettings): Promise
   if (!spoken || asideJob) return
   const gen = asideGen
   const run = (async () => {
-    const audio = await synthAside(spoken, settings)
+    const audio = await synth(spoken, speechLanguage(spoken, settings), settings, true)
     if (gen !== asideGen) return
     await playAside(audio.samples, audio.sampleRate, gen)
   })()
@@ -730,7 +734,7 @@ function drainQueue(): Promise<void> {
         const job = speakQueue.shift()
         if (!job) break
         try {
-          const { samples, sampleRate } = await synthHere(job.text, job.lang, job.settings)
+          const { samples, sampleRate } = await synth(job.text, job.lang, job.settings, false)
           if (gen !== speakGen) return
           if (samples.length === 0) continue
           await playPcm(samples, sampleRate, gen)
@@ -867,6 +871,52 @@ function cleanTranscript(text: string, heardSpeech: boolean): string {
   return trimmed
 }
 
+type AsrOut = { id: number; text: string } | { id: number; error: string }
+
+/** Recognition runs on its own worker so the UI keeps moving. The UI thread runs it only when the worker cannot. */
+let asrWorker: Worker | null = null
+let asrWorkerBroken = false
+let asrSeq = 0
+const asrPending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
+
+function asrWorkerHandle(): Worker {
+  if (asrWorker) return asrWorker
+  let worker: Worker
+  try {
+    worker = new Worker(new URL('./asr.worker.ts', import.meta.url), { type: 'module' })
+  } catch (error) {
+    asrWorkerBroken = true
+    throw error
+  }
+  worker.onmessage = (event: MessageEvent<AsrOut>) => {
+    const message = event.data
+    const pending = asrPending.get(message.id)
+    if (!pending) return
+    asrPending.delete(message.id)
+    if ('error' in message) pending.reject(new Error(message.error))
+    else pending.resolve(message.text)
+  }
+  worker.onerror = (event) => {
+    asrWorkerBroken = true
+    const error = new Error(event.message || 'Speech recognition worker failed')
+    for (const pending of asrPending.values()) pending.reject(error)
+    asrPending.clear()
+  }
+  asrWorker = worker
+  return worker
+}
+
+function transcribeOnWorker(audio: Float32Array): Promise<string> {
+  const worker = asrWorkerHandle()
+  const id = ++asrSeq
+  // A copy, so transferring it never detaches the caller's samples.
+  const copy = audio.slice()
+  return new Promise((resolve, reject) => {
+    asrPending.set(id, { resolve, reject })
+    worker.postMessage({ id, audio: copy }, [copy.buffer])
+  })
+}
+
 export async function transcribePcm(
   samples: Float32Array,
   sampleRate: number,
@@ -875,6 +925,14 @@ export async function transcribePcm(
   const audio = resample(samples, sampleRate, SAMPLE_RATE)
   const max = SAMPLE_RATE * ASR_MAX_SEC
   const clipped = audio.length > max ? audio.subarray(audio.length - max) : audio
+  if (!asrWorkerBroken) {
+    try {
+      return cleanTranscript(await transcribeOnWorker(clipped), heardSpeech)
+    } catch (error) {
+      if (!asrWorkerBroken) throw error
+      console.error('speech recognition worker', error)
+    }
+  }
   return withOnnx(async () => {
     const pipe = await getAsr()
     const result = await pipe(clipped)
