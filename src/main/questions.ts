@@ -76,33 +76,71 @@ function parseQuestion(value: unknown): UserQuestion | null {
   }
 }
 
-function parseElicitationQuestions(schema: unknown): UserQuestion[] {
-  const record = asRecord(schema)
-  const properties = asRecord(record?.properties)
-  if (!properties) return []
+/** Where a question's answer goes in an elicitation response. */
+export type AnswerField = {
+  key: string
+  /** The free-text companion field ("Other") the Claude adapter adds per question. */
+  customKey: string | null
+  /** Option label shown to the user → the value the schema expects. */
+  values: Record<string, string>
+}
+
+export type ParsedAsk = { questions: UserQuestion[]; fields: AnswerField[] }
+
+const OPTION_META_KEY = '_claude/askUserQuestionOption'
+
+/** Options from `enum`, or from titled `oneOf` / `anyOf` entries, on the field or its array items. */
+function fieldOptions(field: Record<string, unknown>): Pick<UserQuestion, 'options'> & { values: Record<string, string> } {
+  const items = asRecord(field.items)
+  const titled = [field.oneOf, field.anyOf, items?.oneOf, items?.anyOf].find(Array.isArray) as unknown[] | undefined
+  const values: Record<string, string> = {}
+  if (!titled) {
+    const options = parseOptions(Array.isArray(field.enum) ? field.enum : Array.isArray(items?.enum) ? items.enum : [])
+    for (const option of options) values[option.label] = option.label
+    return { options, values }
+  }
+  const options: UserQuestion['options'] = []
+  for (const entry of titled) {
+    const record = asRecord(entry)
+    const raw = record?.const
+    if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean') continue
+    const value = String(raw)
+    const label = asString(record?.title) ?? value
+    values[label] = value
+    options.push({
+      label,
+      description: asString(record?.description),
+      preview: asString(asRecord(asRecord(record?._meta)?.[OPTION_META_KEY])?.preview)
+    })
+  }
+  return { options, values }
+}
+
+function parseElicitation(record: Record<string, unknown>): ParsedAsk {
+  const properties = asRecord(asRecord(record.requestedSchema ?? record.schema)?.properties) ?? {}
+  const isCompanion = (key: string): boolean =>
+    key.endsWith('_custom') && asRecord(properties[key.slice(0, -'_custom'.length)]) !== null
+  const keys = Object.keys(properties).filter((key) => asRecord(properties[key]) && !isCompanion(key))
   const questions: UserQuestion[] = []
-  for (const [key, spec] of Object.entries(properties)) {
-    const field = asRecord(spec)
-    if (!field) continue
-    const items = asRecord(field.items)
-    const enums = Array.isArray(field.enum)
-      ? field.enum
-      : Array.isArray(items?.enum)
-        ? items.enum
-        : []
-    const options = parseOptions(enums)
-    const question = asString(field.title) ?? asString(field.description) ?? key
+  const fields: AnswerField[] = []
+  for (const key of keys) {
+    const field = properties[key] as Record<string, unknown>
+    const { options, values } = fieldOptions(field)
+    // With one question the adapter puts its text in `message`, not in the field.
+    const message = keys.length === 1 ? asString(record.message) : null
     questions.push({
-      question,
+      question: asString(field.description) ?? message ?? asString(field.title) ?? key,
       header: asString(field.title),
       multiSelect: field.type === 'array',
       options
     })
+    const customKey = `${key}_custom`
+    fields.push({ key, customKey: isCompanion(customKey) ? customKey : null, values })
   }
-  return questions
+  return { questions, fields }
 }
 
-export function parseQuestions(params: unknown): UserQuestion[] | null {
+export function parseAsk(params: unknown): ParsedAsk | null {
   const record = asRecord(params)
   if (!record) return null
   const toolCall = asRecord(record.toolCall)
@@ -114,10 +152,15 @@ export function parseQuestions(params: unknown): UserQuestion[] | null {
     asRecord(toolCall?.rawInput)?.questions
   if (Array.isArray(nested)) {
     const questions = nested.map(parseQuestion).filter((item): item is UserQuestion => Boolean(item))
-    return questions.length > 0 ? questions : null
+    const fields = questions.map((_, index) => ({ key: `q${index}`, customKey: null, values: {} }))
+    return questions.length > 0 ? { questions, fields } : null
   }
-  const fromSchema = parseElicitationQuestions(record.requestedSchema ?? record.schema)
-  return fromSchema.length > 0 ? fromSchema : null
+  const parsed = parseElicitation(record)
+  return parsed.questions.length > 0 ? parsed : null
+}
+
+export function parseQuestions(params: unknown): UserQuestion[] | null {
+  return parseAsk(params)?.questions ?? null
 }
 
 export function isUserQuestionMethod(method: string | undefined): boolean {
@@ -142,15 +185,29 @@ export function skipOutcome(): QuestionOutcome {
   return { type: 'SkipInterview' }
 }
 
+/**
+ * Skip declines, which tells the agent the user skipped; cancel would abort its tool call.
+ * Picked labels go back as their schema values, typed text into the question's "Other" field.
+ */
 export function elicitationResult(
   outcome: QuestionOutcome,
-  questions: UserQuestion[]
-): { action: 'accept' | 'cancel'; content?: Record<string, string | string[]> } {
-  if (outcome.type !== 'Accepted') return { action: 'cancel' }
+  fields: AnswerField[]
+): { action: 'accept' | 'decline'; content?: Record<string, string | string[]> } {
+  if (outcome.type !== 'Accepted') return { action: 'decline' }
   const content: Record<string, string | string[]> = {}
-  for (let index = 0; index < questions.length; index += 1) {
-    content[`q${index}`] = outcome.partial_answers[index] ?? ''
-  }
+  fields.forEach((field, index) => {
+    const answer = outcome.partial_answers[index] ?? ''
+    const items = (Array.isArray(answer) ? answer : [answer]).filter((item) => item !== '')
+    const picks = items.filter((item) => item in field.values).map((item) => field.values[item])
+    const typed = items.filter((item) => !(item in field.values))
+    const toCustom = field.customKey !== null && typed.length > 0
+    if (Array.isArray(answer)) {
+      content[field.key] = toCustom ? picks : [...picks, ...typed]
+    } else if (picks.length > 0 || !toCustom) {
+      content[field.key] = picks[0] ?? typed[0] ?? ''
+    }
+    if (toCustom) content[field.customKey as string] = typed.join(', ')
+  })
   return { action: 'accept', content }
 }
 

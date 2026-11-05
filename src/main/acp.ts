@@ -28,7 +28,7 @@ import {
   isElicitationMethod,
   isUserQuestionMethod,
   looksLikeUserQuestion,
-  parseQuestions,
+  parseAsk,
   skipOutcome
 } from './questions'
 import { tmpdir } from 'os'
@@ -518,8 +518,8 @@ async function settleExitPlan(conn: Conn, message: JsonRpc): Promise<void> {
 
 async function settleUserQuestion(conn: Conn, message: JsonRpc, kind: 'ext' | 'elicitation'): Promise<void> {
   if (message.id === undefined) return
-  const questions = parseQuestions(message.params)
-  if (!questions) {
+  const parsed = parseAsk(message.params)
+  if (!parsed) {
     const skipped = skipOutcome()
     send(conn, {
       jsonrpc: '2.0',
@@ -529,8 +529,8 @@ async function settleUserQuestion(conn: Conn, message: JsonRpc, kind: 'ext' | 'e
     return
   }
   const sessionId = sessionIdFrom(message.params)
-  const outcome = await askUserQuestions(promptRequestId(conn, message.id), sessionId, questions, kind)
-  const result = kind === 'elicitation' ? elicitationResult(outcome, questions) : outcome
+  const outcome = await askUserQuestions(promptRequestId(conn, message.id), sessionId, parsed.questions, kind)
+  const result = kind === 'elicitation' ? elicitationResult(outcome, parsed.fields) : outcome
   send(conn, { jsonrpc: '2.0', id: message.id, result })
 }
 
@@ -1183,13 +1183,12 @@ export async function promptIsolated(
       looksLikeUserQuestion(message.params)
     ) {
       if (message.id !== undefined) {
-        const questions = parseQuestions(message.params) ?? []
         const skipped = skipOutcome()
         write({
           jsonrpc: '2.0',
           id: message.id,
           result: isElicitationMethod(message.method)
-            ? elicitationResult(skipped, questions)
+            ? elicitationResult(skipped, [])
             : skipped
         })
       }
