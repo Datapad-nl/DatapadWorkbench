@@ -11,6 +11,7 @@ import {
 import type {
   Attachment,
   Chat,
+  ChatAgent,
   ChatEvent,
   ChatSummary,
   FileMention,
@@ -47,21 +48,24 @@ type WorkspaceContextValue = {
   activeProjectId: string | null
   chatsById: Record<string, Chat>
   showNewProject: boolean
-  showSettings: boolean
+  /** `'mcp'` opens Settings on the MCP tab. */
+  showSettings: boolean | 'mcp'
   showUsage: boolean
   showActivity: boolean
   showBrowser: boolean
   showGit: boolean
   showKnowledge: boolean
+  showSidebar: boolean
   gitSummaries: Record<string, GitSummary>
   rightPaneOrder: RightPaneId[]
   setShowNewProject: (open: boolean) => void
-  setShowSettings: (open: boolean) => void
+  setShowSettings: (open: boolean | 'mcp') => void
   setShowUsage: (open: boolean) => void
   setShowActivity: (open: boolean) => void
   setShowBrowser: (open: boolean) => void
   setShowGit: (open: boolean) => void
   setShowKnowledge: (open: boolean) => void
+  setShowSidebar: (open: boolean) => void
   swapRightPanes: () => void
   selectProject: (projectId: string) => void
   openChat: (chatId: string) => Promise<void>
@@ -75,6 +79,7 @@ type WorkspaceContextValue = {
   createChat: (projectId: string) => Promise<void>
   deleteChat: (chatId: string) => Promise<void>
   renameChat: (chatId: string, title: string) => Promise<void>
+  setChatAgent: (chatId: string, agent: ChatAgent) => Promise<void>
   sendMessage: (
     chatId: string,
     content: string,
@@ -97,6 +102,8 @@ type WorkspaceContextValue = {
     model?: string
     effort?: string | null
     voice?: Partial<VoiceSettings>
+    defaultAgent?: ChatAgent
+    claudeModel?: string
   }) => Promise<void>
   refresh: () => Promise<WorkspaceSnapshot>
 }
@@ -108,8 +115,8 @@ const emptyStream: StreamState = { status: 'idle', draft: '', error: null }
 
 export type RightPaneId = 'git' | 'browser' | 'activity' | 'knowledge'
 
-const SESSION_KEY = 'grokcode.session'
-const PANE_ORDER_KEY = 'grokcode.rightPaneOrder'
+const SESSION_KEY = 'workbench.session'
+const PANE_ORDER_KEY = 'workbench.rightPaneOrder'
 const DEFAULT_PANE_ORDER: RightPaneId[] = ['git', 'browser', 'activity', 'knowledge']
 
 function isPaneId(value: string): value is RightPaneId {
@@ -176,6 +183,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   const streamsRef = useRef(streams)
   streamsRef.current = streams
   const sending = useRef(new Set<string>())
+  const openChatRef = useRef<((chatId: string) => Promise<void>) | null>(null)
   const deltaBuf = useRef<Record<string, string>>({})
   const asideBuf = useRef<Record<string, { messageId: string; text: string }>>({})
   const streamFlush = useRef(0)
@@ -233,35 +241,42 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   const [permissions, setPermissions] = useState<Record<string, PermissionRequest>>({})
   const [questions, setQuestions] = useState<Record<string, UserQuestionRequest>>({})
   const [showNewProject, setShowNewProject] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
+  const [showSettings, setShowSettings] = useState<boolean | 'mcp'>(false)
   const [showUsage, setShowUsage] = useState(false)
   const [showActivity, setShowActivityState] = useState(() => {
-    return localStorage.getItem('grokcode.showActivity') === '1'
+    return localStorage.getItem('workbench.showActivity') === '1'
   })
   const setShowActivity = useCallback((open: boolean) => {
     setShowActivityState(open)
-    localStorage.setItem('grokcode.showActivity', open ? '1' : '0')
+    localStorage.setItem('workbench.showActivity', open ? '1' : '0')
   }, [])
   const [showBrowser, setShowBrowserState] = useState(() => {
-    return localStorage.getItem('grokcode.showBrowser') === '1'
+    return localStorage.getItem('workbench.showBrowser') === '1'
   })
   const setShowBrowser = useCallback((open: boolean) => {
     setShowBrowserState(open)
-    localStorage.setItem('grokcode.showBrowser', open ? '1' : '0')
+    localStorage.setItem('workbench.showBrowser', open ? '1' : '0')
   }, [])
   const [showGit, setShowGitState] = useState(() => {
-    return localStorage.getItem('grokcode.showGit') === '1'
+    return localStorage.getItem('workbench.showGit') === '1'
   })
   const setShowGit = useCallback((open: boolean) => {
     setShowGitState(open)
-    localStorage.setItem('grokcode.showGit', open ? '1' : '0')
+    localStorage.setItem('workbench.showGit', open ? '1' : '0')
   }, [])
   const [showKnowledge, setShowKnowledgeState] = useState(() => {
-    return localStorage.getItem('grokcode.showKnowledge') === '1'
+    return localStorage.getItem('workbench.showKnowledge') === '1'
   })
   const setShowKnowledge = useCallback((open: boolean) => {
     setShowKnowledgeState(open)
-    localStorage.setItem('grokcode.showKnowledge', open ? '1' : '0')
+    localStorage.setItem('workbench.showKnowledge', open ? '1' : '0')
+  }, [])
+  const [showSidebar, setShowSidebarState] = useState(() => {
+    return localStorage.getItem('workbench.showSidebar') !== '0'
+  })
+  const setShowSidebar = useCallback((open: boolean) => {
+    setShowSidebarState(open)
+    localStorage.setItem('workbench.showSidebar', open ? '1' : '0')
   }, [])
   const [gitSummaries, setGitSummaries] = useState<Record<string, GitSummary>>({})
   const [rightPaneOrder, setRightPaneOrder] = useState<RightPaneId[]>(readPaneOrder)
@@ -274,13 +289,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   }, [])
 
   const refresh = useCallback(async () => {
-    const snapshot = (await window.grokcode.getWorkspace()) as WorkspaceSnapshot
+    const snapshot = (await window.workbench.getWorkspace()) as WorkspaceSnapshot
     applySnapshot(snapshot, setProjects, setChats, setSettings, setIndexes)
     return snapshot
   }, [])
 
   useEffect(
-    () => window.grokcode.onBrowserRequestShow?.(() => setShowBrowser(true)),
+    () => window.workbench.onBrowserRequestShow?.(() => setShowBrowser(true)),
     [setShowBrowser]
   )
 
@@ -300,7 +315,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return
       if (url.origin === window.location.origin) return
       event.preventDefault()
-      void window.grokcode.navigateBrowser(url.href)
+      void window.workbench.navigateBrowser(url.href)
     }
 
     document.addEventListener('click', onClick, true)
@@ -308,8 +323,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   }, [])
 
   useEffect(() => {
-    void window.grokcode.getGitSummaries().then(setGitSummaries)
-    return window.grokcode.onGitSummaries(setGitSummaries)
+    void window.workbench.getGitSummaries().then(setGitSummaries)
+    return window.workbench.onGitSummaries(setGitSummaries)
   }, [])
 
   useEffect(() => {
@@ -331,7 +346,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         null
 
       if (open.length > 0) {
-        const loaded = await Promise.all(open.map((id) => window.grokcode.getChat(id)))
+        const loaded = await Promise.all(open.map((id) => window.workbench.getChat(id)))
         setChatsById((current) => {
           const next = { ...current }
           for (const chat of loaded) next[chat.id] = chat
@@ -364,13 +379,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   }, [])
 
   useEffect(() => {
-    return window.grokcode.onIndexEvent((event: IndexEvent) => {
+    return window.workbench.onIndexEvent((event: IndexEvent) => {
       setIndexes((current) => ({ ...current, [event.projectId]: event.index }))
     })
   }, [])
 
   useEffect(() => {
-    return window.grokcode.onChatEvent((event: ChatEvent) => {
+    return window.workbench.onChatEvent((event: ChatEvent) => {
+      // ChatPane reads the agent's commands itself.
+      if (event.type === 'commands') return
+      if (event.type === 'open') {
+        void openChatRef.current?.(event.chatId)
+        return
+      }
       if (event.type === 'delta') {
         deltaBuf.current[event.chatId] = (deltaBuf.current[event.chatId] ?? '') + event.text
         queueStreamFlush()
@@ -471,16 +492,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   }, [flushStreamBuf, queueStreamFlush, refresh])
 
   const openChat = useCallback(async (chatId: string) => {
-    const chat = chatsById[chatId] ?? (await window.grokcode.getChat(chatId))
+    const chat = chatsById[chatId] ?? (await window.workbench.getChat(chatId))
     setChatsById((current) => ({ ...current, [chatId]: chat }))
     setActiveChatId(chatId)
     setActiveProjectId(chat.projectId)
     setOpenChatIds((current) => (current.includes(chatId) ? current : [...current, chatId]))
   }, [chatsById])
+  useEffect(() => {
+    openChatRef.current = openChat
+  }, [openChat])
 
   useEffect(() => {
     if (!ready || !activeChatId || !activeProjectId) return
-    void window.grokcode.ensureProjectIntake(activeProjectId, activeChatId)
+    void window.workbench.ensureProjectIntake(activeProjectId, activeChatId)
   }, [ready, activeChatId, activeProjectId])
 
   const closeTab = useCallback((chatId: string) => {
@@ -500,7 +524,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const createProject = useCallback(
     async (name: string, path: string | null) => {
-      const { project, chat } = await window.grokcode.createProject({ name, path })
+      const { project, chat } = await window.workbench.createProject({ name, path })
       await refresh()
       setActiveProjectId(project.id)
       setChatsById((current) => ({ ...current, [chat.id]: chat }))
@@ -512,26 +536,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   )
 
   const updateProject = useCallback(async (input: UpdateProjectInput) => {
-    const project = await window.grokcode.updateProject(input)
+    const project = await window.workbench.updateProject(input)
     setProjects((current) => current.map((item) => (item.id === project.id ? project : item)))
   }, [])
 
   const pickFolder = useCallback(async () => {
-    return window.grokcode.pickFolder()
+    return window.workbench.pickFolder()
   }, [])
 
   const indexProject = useCallback(async (projectId: string) => {
-    await window.grokcode.indexProject(projectId)
+    await window.workbench.indexProject(projectId)
   }, [])
 
   const getOrientation = useCallback(async (projectId: string) => {
-    return window.grokcode.getOrientation(projectId)
+    return window.workbench.getOrientation(projectId)
   }, [])
 
   const deleteProject = useCallback(
     async (projectId: string) => {
       const removed = chats.filter((chat) => chat.projectId === projectId).map((chat) => chat.id)
-      await window.grokcode.deleteProject(projectId)
+      await window.workbench.deleteProject(projectId)
       setOpenChatIds((current) => current.filter((id) => !removed.includes(id)))
       setChatsById((current) => {
         const next = { ...current }
@@ -548,7 +572,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const createChat = useCallback(
     async (projectId: string) => {
-      const chat = await window.grokcode.createChat(projectId)
+      const chat = await window.workbench.createChat(projectId)
       await refresh()
       setChatsById((current) => ({ ...current, [chat.id]: chat }))
       setOpenChatIds((current) => [...current, chat.id])
@@ -560,7 +584,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const deleteChat = useCallback(
     async (chatId: string) => {
-      await window.grokcode.deleteChat(chatId)
+      await window.workbench.deleteChat(chatId)
       closeTab(chatId)
       setChatsById((current) => {
         const next = { ...current }
@@ -573,9 +597,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   )
 
   const renameChat = useCallback(async (chatId: string, title: string) => {
-    const chat = await window.grokcode.renameChat(chatId, title)
+    const chat = await window.workbench.renameChat(chatId, title)
     setChatsById((current) => ({ ...current, [chatId]: chat }))
     setChats((current) => current.map((item) => (item.id === chatId ? { ...item, title: chat.title } : item)))
+  }, [])
+
+  const setChatAgent = useCallback(async (chatId: string, agent: ChatAgent) => {
+    const chat = await window.workbench.setChatAgent(chatId, agent)
+    setChatsById((current) => ({ ...current, [chatId]: chat }))
+    setChats((current) => current.map((item) => (item.id === chatId ? { ...item, agent: chat.agent } : item)))
   }, [])
 
   const sendMessage = useCallback(
@@ -590,7 +620,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         }))
       }
       try {
-        const chat = await window.grokcode.sendMessage(chatId, content, attachments, mentions)
+        const chat = await window.workbench.sendMessage(chatId, content, attachments, mentions)
         setChatsById((current) => ({ ...current, [chatId]: chat }))
         if (!asAside) await refresh()
       } catch (error) {
@@ -609,7 +639,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   )
 
   const stopChat = useCallback(async (chatId: string) => {
-    await window.grokcode.stopChat(chatId)
+    await window.workbench.stopChat(chatId)
     setStreams((current) => ({ ...current, [chatId]: emptyStream }))
     setPermissions((current) => {
       if (!current[chatId]) return current
@@ -627,7 +657,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const setChatMode = useCallback(async (chatId: string, mode: PermissionMode) => {
     const next = normalizePermissionMode(mode)
-    const chat = await window.grokcode.setChatMode(chatId, next)
+    const chat = await window.workbench.setChatMode(chatId, next)
     setChatsById((current) => ({ ...current, [chatId]: chat }))
     setChats((current) =>
       current.map((item) => (item.id === chatId ? { ...item, mode: chat.mode } : item))
@@ -636,8 +666,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const approvePlan = useCallback(
     async (chatId: string, verdict: PlanVerdict = 'approve') => {
-      const continued = await window.grokcode.resolvePlanApproval(chatId, verdict)
-      const chat = await window.grokcode.getChat(chatId)
+      const continued = await window.workbench.resolvePlanApproval(chatId, verdict)
+      const chat = await window.workbench.getChat(chatId)
       setChatsById((current) => ({ ...current, [chatId]: chat }))
       setChats((current) =>
         current.map((item) =>
@@ -658,7 +688,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   )
 
   const resolvePermission = useCallback(async (requestId: string, decision: 'allow' | 'deny') => {
-    await window.grokcode.resolvePermission(requestId, decision)
+    await window.workbench.resolvePermission(requestId, decision)
   }, [])
 
   const resolveQuestion = useCallback(
@@ -666,13 +696,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       requestId: string,
       decision: { type: 'skip' } | { type: 'submit'; answers: string[][] }
     ) => {
-      await window.grokcode.resolveQuestion(requestId, decision)
+      await window.workbench.resolveQuestion(requestId, decision)
     },
     []
   )
 
   const rewindChat = useCallback(async (chatId: string, checkpointId: string) => {
-    const chat = await window.grokcode.rewindChat(chatId, checkpointId)
+    const chat = await window.workbench.rewindChat(chatId, checkpointId)
     setChatsById((current) => ({ ...current, [chatId]: chat }))
     setStreams((current) => ({ ...current, [chatId]: emptyStream }))
     setPermissions((current) => {
@@ -696,8 +726,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       model?: string
       effort?: string | null
       voice?: Partial<VoiceSettings>
+      defaultAgent?: ChatAgent
+      claudeModel?: string
     }) => {
-      const next = await window.grokcode.setSettings(input)
+      const next = await window.workbench.setSettings(input)
       setSettings(
         input.voice
           ? { ...next, voice: { ...next.voice, ...input.voice } }
@@ -725,6 +757,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       showBrowser,
       showGit,
       showKnowledge,
+      showSidebar,
       gitSummaries,
       rightPaneOrder,
       setShowNewProject,
@@ -734,6 +767,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       setShowBrowser,
       setShowGit,
       setShowKnowledge,
+      setShowSidebar,
       swapRightPanes,
       selectProject,
       openChat,
@@ -747,6 +781,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       createChat,
       deleteChat,
       renameChat,
+      setChatAgent,
       sendMessage,
       stopChat,
       setChatMode,
@@ -776,12 +811,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       showBrowser,
       showGit,
       showKnowledge,
+      showSidebar,
       gitSummaries,
       rightPaneOrder,
       setShowActivity,
       setShowBrowser,
       setShowGit,
       setShowKnowledge,
+      setShowSidebar,
       swapRightPanes,
       selectProject,
       openChat,
@@ -795,6 +832,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       createChat,
       deleteChat,
       renameChat,
+      setChatAgent,
       sendMessage,
       stopChat,
       setChatMode,

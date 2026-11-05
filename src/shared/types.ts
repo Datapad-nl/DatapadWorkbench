@@ -5,6 +5,8 @@ export type Project = {
   color?: string
   createdAt: string
   updatedAt: string
+  /** Set when the project was removed from the sidebar. Its chats are kept for when it is added again. */
+  removedAt?: string
 }
 
 export type Attachment = {
@@ -111,10 +113,23 @@ export type Checkpoint = {
   files: string[]
 }
 
+export type ChatAgent = 'grok' | 'claude'
+
+export function normalizeChatAgent(value: unknown): ChatAgent {
+  return value === 'claude' ? 'claude' : 'grok'
+}
+
+export function chatAgentLabel(agent: ChatAgent): string {
+  return agent === 'claude' ? 'Claude' : 'Grok'
+}
+
 export type Chat = {
   id: string
   projectId: string
   title: string
+  /** Which coding agent runs this chat. Missing means Grok. */
+  agent?: ChatAgent
+  /** ACP session id of the chat's agent (Grok or Claude). */
   grokSessionId: string | null
   createdAt: string
   updatedAt: string
@@ -139,7 +154,16 @@ export type VoiceSettings = {
   voiceURI: string
   micDeviceId: string
   rate: number
+  /** A Supertonic language code, or 'auto' to pick one per reply. */
+  language: string
 }
+
+/** The languages Supertonic 3 speaks. `na` reads text without a language. */
+export const VOICE_LANGUAGES = [
+  'en', 'ko', 'ja', 'ar', 'bg', 'cs', 'da', 'de', 'el', 'es', 'et', 'fi', 'fr', 'hi', 'hr', 'hu',
+  'id', 'it', 'lt', 'lv', 'nl', 'pl', 'pt', 'ro', 'ru', 'sk', 'sl', 'sv', 'tr', 'uk', 'vi', 'na'
+] as const
+export type VoiceLanguage = (typeof VOICE_LANGUAGES)[number]
 
 export const DEFAULT_VOICE: VoiceSettings = {
   enabled: false,
@@ -149,7 +173,8 @@ export const DEFAULT_VOICE: VoiceSettings = {
   conversation: false,
   voiceURI: 'M1',
   micDeviceId: '',
-  rate: 1
+  rate: 1,
+  language: 'auto'
 }
 
 const NEURAL_VOICE = /^(F|M)[1-5]$/
@@ -172,24 +197,52 @@ export type GrokCliInfo = {
   models: string[]
 }
 
-export const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const
+export const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** Grok Build stops at Extra high. Claude Code adds Max on the models that support it. */
+export const GROK_REASONING_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
+
+/** The models and effort levels Claude Code offers this account, as its picker shows them. */
+export type ClaudeOptions = {
+  models: Array<{ value: string; name: string; description?: string }>
+  efforts: ReasoningEffort[]
+}
 
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
 
 export function normalizeReasoningEffort(value: unknown): ReasoningEffort | null {
   if (typeof value !== 'string') return null
   const id = value.trim().toLowerCase().replace(/[\s_-]+/g, '')
-  if (id === 'low' || id === 'medium' || id === 'high' || id === 'xhigh') return id
+  if (id === 'low' || id === 'medium' || id === 'high' || id === 'xhigh' || id === 'max') return id
   if (id === 'extrahigh') return 'xhigh'
   return null
 }
 
 export function reasoningEffortLabel(effort: ReasoningEffort): string {
   if (effort === 'xhigh') return 'Extra high'
+  if (effort === 'max') return 'Max'
   return effort.slice(0, 1).toUpperCase() + effort.slice(1)
 }
 
+export type ClaudeCliInfo = {
+  signedIn: boolean
+  subscription: string | null
+  email: string | null
+}
+
+/** Claude Code model aliases. Empty means Claude Code's own default for the plan. */
+export const CLAUDE_MODELS: Array<{ value: string; label: string }> = [
+  { value: '', label: 'Default' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'haiku', label: 'Haiku' },
+  { value: 'fable', label: 'Fable' }
+]
+
 export type PublicSettings = {
+  defaultAgent: ChatAgent
+  claude: ClaudeCliInfo
+  claudeModel: string
   hasKey: boolean
   keyPreview: string | null
   model: string
@@ -208,6 +261,12 @@ export function formatGrokCli(cli: GrokCliInfo): string {
 }
 
 export type UsagePeriodKind = 'weekly' | 'monthly' | 'unknown'
+
+/** Claude plan limits, one row per window (5-hour, weekly, per model). */
+export type ClaudeUsage = {
+  plan: string | null
+  limits: Array<{ label: string; usedPercent: number; resets: string | null }>
+}
 
 export type UsageSnapshot = {
   tier: string | null
@@ -232,7 +291,11 @@ export function normalizeVoiceSettings(value: unknown): VoiceSettings {
     conversation: Boolean(raw.conversation),
     voiceURI: typeof raw.voiceURI === 'string' && NEURAL_VOICE.test(raw.voiceURI) ? raw.voiceURI : DEFAULT_VOICE.voiceURI,
     micDeviceId: typeof raw.micDeviceId === 'string' ? raw.micDeviceId : '',
-    rate: Math.min(2, Math.max(0.7, rate))
+    rate: Math.min(2, Math.max(0.7, rate)),
+    language:
+      typeof raw.language === 'string' && (VOICE_LANGUAGES as readonly string[]).includes(raw.language)
+        ? raw.language
+        : 'auto'
   }
 }
 
@@ -294,6 +357,12 @@ export type ChatEvent =
   | { type: 'chat'; chatId: string; chat: Chat }
   | { type: 'aside-delta'; chatId: string; messageId: string; text: string }
   | { type: 'aside-done'; chatId: string; chat: Chat }
+  /** The user clicked a notification for this chat. */
+  | { type: 'open'; chatId: string }
+  /** The slash commands the chat's agent offers, as it announced them. */
+  | { type: 'commands'; chatId: string; commands: AgentCommand[] }
+
+export type AgentCommand = { name: string; description: string; hint?: string }
 
 export function normalizePermissionMode(value: unknown): PermissionMode {
   if (value === 'ask' || value === 'accept' || value === 'plan') return value
@@ -329,6 +398,8 @@ export type ActivityEvent = {
   toolKind?: string | null
   diffs?: ActivityDiff[]
   coalesceKey?: string
+  /** When a running event finished; absent for events that never ran. */
+  endedAt?: string
 }
 
 export type ActivityFeed =
@@ -427,6 +498,8 @@ export type GitSnapshot = {
   dirtyCount: number
   files: GitFile[]
   graph: GitGraphNode[]
+  /** For a chat in its own worktree: the project checkout's branch and how many commits it lacks. */
+  merge: { into: string; commits: number } | null
 }
 
 export type GitSummary = {

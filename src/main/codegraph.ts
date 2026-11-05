@@ -60,7 +60,7 @@ export function isUnsafeProjectPath(path: string): boolean {
   if (parts[0] === 'Volumes' && parts.length <= 2) return true
   if (parts[0] === 'Users' && parts.length <= 2) return true
   // /btw asides use a throwaway cwd; never import or index it as a project
-  if (basename(resolved).startsWith('grokcode-btw-')) return true
+  if (basename(resolved).startsWith('workbench-btw-')) return true
   const tmp = resolve(tmpdir())
   if (resolved === tmp || resolved.startsWith(`${tmp}/`) || resolved.startsWith(`${tmp}\\`)) return true
   return false
@@ -84,7 +84,10 @@ export function augmentPath(): void {
   const extras = [
     join(homedir(), '.local/bin'),
     join(homedir(), '.codegraph/current/bin'),
-    join(homedir(), '.grok/bin')
+    join(homedir(), '.grok/bin'),
+    // Opened from Finder, the app gets a bare PATH. MCP servers often run through Homebrew's npx or node.
+    '/opt/homebrew/bin',
+    '/usr/local/bin'
   ]
   const current = process.env.PATH ?? ''
   const parts = current.split(delimiter)

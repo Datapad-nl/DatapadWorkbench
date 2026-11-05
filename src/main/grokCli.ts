@@ -82,7 +82,7 @@ export function parseModelsList(text: string): string[] {
   const ids: string[] = []
   const seen = new Set<string>()
   for (const line of text.split('\n')) {
-    const match = /^\s*[*\-]\s+(\S+)/.exec(line)
+    const match = /^\s*[*-]\s+(\S+)/.exec(line)
     if (!match) continue
     const id = match[1]
     if (seen.has(id)) continue

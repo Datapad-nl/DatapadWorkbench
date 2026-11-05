@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * Stdio MCP for the Grok Build Workbench BrowserPane.
+ * Stdio MCP for the Datapad Workbench BrowserPane.
  * Talks to the loopback HTTP API started by the Workbench main process.
  * Messages are newline-delimited JSON-RPC (MCP stdio), not LSP Content-Length.
  */
 
-const BASE = process.env.GROKCODE_BROWSER_URL
-const TOKEN = process.env.GROKCODE_BROWSER_TOKEN
+const BASE = process.env.WORKBENCH_BROWSER_URL
+const TOKEN = process.env.WORKBENCH_BROWSER_TOKEN
 
 if (!BASE || !TOKEN) {
-  console.error('GROKCODE_BROWSER_URL and GROKCODE_BROWSER_TOKEN are required')
+  console.error('WORKBENCH_BROWSER_URL and WORKBENCH_BROWSER_TOKEN are required')
   process.exit(1)
 }
 
@@ -17,13 +17,13 @@ const TOOLS = [
   {
     name: 'get_state',
     description:
-      'Get the Grok Build Workbench in-app BrowserPane state: url, title, loading, visible, canGoBack, canGoForward, error. Use this after navigate to verify the page loaded.',
+      'Get the Datapad Workbench in-app BrowserPane state: url, title, loading, visible, canGoBack, canGoForward, error. Use this after navigate to verify the page loaded.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
   },
   {
     name: 'navigate',
     description:
-      'Open a URL in the Grok Build Workbench BrowserPane — the in-app browser. Always use this instead of an external browser. Shows the pane if it is hidden. Use http or https only.',
+      'Open a URL in the Datapad Workbench BrowserPane — the in-app browser. Always use this instead of an external browser. Shows the pane if it is hidden. Use http or https only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -129,7 +129,7 @@ async function handle(message) {
     reply(id, {
       protocolVersion: params?.protocolVersion ?? '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'grokcode-browser', version: '0.1.0' }
+      serverInfo: { name: 'workbench-browser', version: '0.1.0' }
     })
     return
   }

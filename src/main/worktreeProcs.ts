@@ -3,7 +3,7 @@ import { promisify } from 'util'
 
 const execFileAsync = promisify(execFile)
 
-const WORKTREE_MARKER = '/.grokcode-worktrees/'
+const WORKTREE_MARKER = '/.workbench-worktrees/'
 const REAP_MS = 30_000
 const CPU_HITS = 2
 const CPU_LIMIT = 80

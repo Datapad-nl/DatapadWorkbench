@@ -10,7 +10,7 @@ This app is unofficial. Bugs in Grok Build itself belong with SpaceXAI / xAI, no
 
 ## What this app stores
 
-- Settings and chat metadata live in Electron `userData/grokcode`
+- Settings and chat metadata live in Electron `userData/workbench`
 - An API key may be stored there, or read from `XAI_API_KEY` / `grok login`
 - The in-app browser uses a persistent partition under that same folder
 

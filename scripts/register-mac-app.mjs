@@ -28,14 +28,20 @@ if (existsSync(electronInstall)) {
 
 if (process.platform !== 'darwin') process.exit(0)
 
-const BUNDLE_ID = 'com.datapad.grokcode'
-const APP_NAME = 'Grok Build Workbench'
+const BUNDLE_ID = 'com.datapad.workbench'
+const APP_NAME = 'Datapad Workbench'
 const MIC_USAGE =
-  'Grok Build Workbench listens on this Mac so you can talk to Grok in conversation mode.'
+  'Datapad Workbench listens on this Mac so you can talk to Grok in conversation mode.'
 
 const distDir = join(electronDir, 'dist')
 const distApp = join(distDir, 'Electron.app')
 const installedApp = join(homedir(), 'Applications', `${APP_NAME}.app`)
+// Shells registered under the app's previous name. They are replaced by the
+// renamed shell and removed once it is installed.
+const legacyApps = ['Grok Build Workbench'].flatMap((name) => [
+  join(homedir(), 'Applications', `${name}.app`),
+  join('/Applications', `${name}.app`)
+])
 const entitlements = join(root, 'resources/mac/entitlements.mac.plist')
 const icon = join(root, 'resources/icon.icns')
 
@@ -132,8 +138,12 @@ function signApp(appPath, identity) {
   signTarget(identity, appPath, true)
 }
 
-const sourceApp = existsSync(distApp) && !lstatSync(distApp).isSymbolicLink() ? distApp : installedApp
-if (!existsSync(join(sourceApp, 'Contents/Info.plist'))) {
+const hasInfo = (appPath) => existsSync(join(appPath, 'Contents/Info.plist'))
+const sourceApp =
+  existsSync(distApp) && !lstatSync(distApp).isSymbolicLink()
+    ? distApp
+    : [installedApp, ...legacyApps].find(hasInfo) ?? installedApp
+if (!hasInfo(sourceApp)) {
   console.warn('register-mac-app: no packable Electron.app')
   process.exit(0)
 }
@@ -141,20 +151,33 @@ if (!existsSync(join(sourceApp, 'Contents/Info.plist'))) {
 const identity = signingIdentity()
 console.log(`register-mac-app: signing as ${identity}`)
 
-patchApp(sourceApp)
 mkdirSync(dirname(installedApp), { recursive: true })
 if (sourceApp !== installedApp) {
   execFileSync('ditto', [sourceApp, installedApp], { stdio: 'inherit' })
 }
+patchApp(installedApp)
 signApp(installedApp, identity)
 const systemApp = join('/Applications', `${APP_NAME}.app`)
-try {
-  execFileSync('ditto', [installedApp, systemApp], { stdio: 'inherit' })
-} catch {
-  console.warn('register-mac-app: could not copy to /Applications (permissions?)')
+// An installer from GitHub Releases puts the real app there. Never copy the dev shell over it.
+const releaseInstalled = existsSync(join(systemApp, 'Contents/Resources/app.asar'))
+if (!releaseInstalled) {
+  try {
+    execFileSync('ditto', [installedApp, systemApp], { stdio: 'inherit' })
+  } catch {
+    console.warn('register-mac-app: could not copy to /Applications (permissions?)')
+  }
+}
+const useSystemApp = !releaseInstalled && existsSync(systemApp)
+
+for (const legacy of legacyApps) {
+  try {
+    rmSync(legacy, { recursive: true, force: true })
+  } catch {
+    console.warn(`register-mac-app: could not remove ${legacy}`)
+  }
 }
 
-const launchApp = existsSync(systemApp) ? systemApp : installedApp
+const launchApp = useSystemApp ? systemApp : installedApp
 if (!existsSync(distApp) || !lstatSync(distApp).isSymbolicLink() || realpathSync(distApp) !== realpathSync(launchApp)) {
   rmSync(distApp, { recursive: true, force: true })
   symlinkSync(launchApp, distApp)
@@ -164,7 +187,7 @@ const lsregister =
   '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
 if (existsSync(lsregister)) {
   run(lsregister, ['-f', installedApp])
-  if (existsSync(systemApp)) run(lsregister, ['-f', systemApp])
+  if (useSystemApp) run(lsregister, ['-f', systemApp])
 }
 
 execFileSync('codesign', ['--verify', '--deep', '--strict', installedApp], { stdio: 'inherit' })

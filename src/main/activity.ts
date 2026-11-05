@@ -238,7 +238,11 @@ function emitActivity(
         status: incoming.status ?? previous.status,
         detail: mergeDetail(previous, incoming),
         diffs:
-          incoming.diffs && incoming.diffs.length > 0 ? incoming.diffs : previous.diffs
+          incoming.diffs && incoming.diffs.length > 0 ? incoming.diffs : previous.diffs,
+        endedAt:
+          previous.status === 'running' && incoming.status && incoming.status !== 'running'
+            ? now()
+            : previous.endedAt
       }
       events[index] = merged
       publish(merged)
@@ -304,6 +308,12 @@ export function startTurn(input: {
 }): void {
   bindSession(input.sessionId, { id: input.chatId, title: input.chatTitle })
   turnStartedAt.set(input.chatId, Date.now())
+  // Each turn gets its own events: stop the last turn's rows from absorbing this one.
+  for (const event of events) {
+    if (event.chatId === input.chatId && event.coalesceKey && !event.coalesceKey.startsWith('goal:')) {
+      event.coalesceKey = undefined
+    }
+  }
   emitActivity({
     kind: 'turn',
     chatId: input.chatId,

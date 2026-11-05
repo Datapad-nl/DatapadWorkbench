@@ -1,6 +1,7 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
+import { autoUpdater } from 'electron-updater'
 import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
 import { attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
@@ -15,11 +16,15 @@ import {
   sweepWorktreeProcessesSync
 } from './worktreeProcs'
 import { registerIpc } from './ipc'
-import { ensureStore, purgeUnsafeProjects, syncGrokSessions } from './store'
+import { ensureStore, purgeUnsafeProjects, syncClaudeSessions, syncGrokSessions } from './store'
 import { applyWindowChrome, getThemeState } from './themes'
 import { attachMediaProtocol } from './media'
 import { attachVoiceProtocol, ensureMicAccess, getMicAccess, registerVoiceScheme } from './voice'
 import { loadWindowState, trackWindowState } from './windowState'
+
+// Installed builds would name this folder after the product. Keep the one `npm run dev` uses
+// so chats, projects and downloaded voice models carry over.
+app.setPath('userData', join(app.getPath('appData'), 'datapad-workbench'))
 
 registerVoiceScheme()
 
@@ -38,7 +43,7 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#141414',
-    title: 'Grok Build Workbench',
+    title: 'Datapad Workbench',
     icon,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 18 },
@@ -114,8 +119,8 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   loadDotEnv()
   augmentPath()
-  app.setName('Grok Build Workbench')
-  electronApp.setAppUserModelId('com.datapad.grokcode')
+  app.setName('Datapad Workbench')
+  electronApp.setAppUserModelId('com.datapad.workbench')
   if (process.platform === 'darwin') {
     app.dock?.setIcon(icon)
   }
@@ -125,6 +130,7 @@ app.whenReady().then(async () => {
   await ensureStore()
   await purgeUnsafeProjects()
   await syncGrokSessions()
+  await syncClaudeSessions()
   attachVoiceProtocol()
   attachMediaProtocol()
   void ensureMicAccess()
@@ -135,6 +141,8 @@ app.whenReady().then(async () => {
   void sweepWorktreeProcesses()
   startWorktreeReaper()
   createWindow()
+  // Installed builds fetch new GitHub releases in the background and install them on quit.
+  if (app.isPackaged) void autoUpdater.checkForUpdatesAndNotify().catch(() => undefined)
   const { active } = await getThemeState()
   applyWindowChrome(active)
 

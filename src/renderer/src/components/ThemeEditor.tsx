@@ -147,7 +147,7 @@ export function ThemeEditor(): React.JSX.Element {
 
   useEffect(() => {
     return () => {
-      void window.grokcode.getThemeState().then((state) => {
+      void window.workbench.getThemeState().then((state) => {
         applyTheme(state.active)
       })
     }
@@ -253,7 +253,7 @@ export function ThemeEditor(): React.JSX.Element {
   return (
     <div className="flex min-h-0 flex-1 gap-4">
       <aside className="flex w-[200px] shrink-0 flex-col">
-        <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-muted">Themes</div>
+        <div className="text-[11px] font-medium text-muted">Themes</div>
         <div className="mt-2 min-h-0 flex-1 space-y-0.5 overflow-y-auto">
           {themes.map((theme) => {
             const selected = theme.id === activeId
@@ -267,7 +267,7 @@ export function ThemeEditor(): React.JSX.Element {
                 }`}
               >
                 <span className="truncate text-[12px] font-medium">{theme.name}</span>
-                <span className="truncate font-mono text-[9px] uppercase tracking-[0.1em] opacity-70">
+                <span className="truncate text-[11px] opacity-70">
                   {theme.builtIn ? 'Built-in' : 'User'}
                 </span>
               </button>
@@ -313,7 +313,7 @@ export function ThemeEditor(): React.JSX.Element {
 
         {COLOR_GROUPS.map((group) => (
           <section key={group.label} className="mt-4">
-            <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.12em] text-muted">
+            <div className="mb-2 text-[11px] font-medium text-muted">
               {group.label}
             </div>
             <div className="space-y-1.5">
@@ -330,7 +330,7 @@ export function ThemeEditor(): React.JSX.Element {
         ))}
 
         <section className="mt-4">
-          <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.12em] text-muted">Type</div>
+          <div className="mb-2 text-[11px] font-medium text-muted">Type</div>
           <label className="block text-[11px] text-muted">Sans</label>
           <input
             value={draft.fonts.sans}
@@ -389,7 +389,7 @@ export function ThemeEditor(): React.JSX.Element {
         </section>
 
         <section className="mt-4">
-          <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.12em] text-muted">Radii</div>
+          <div className="mb-2 text-[11px] font-medium text-muted">Radii</div>
           <div className="grid grid-cols-3 gap-2">
             {(['sm', 'md', 'lg'] as const).map((key) => (
               <label key={key} className="block">

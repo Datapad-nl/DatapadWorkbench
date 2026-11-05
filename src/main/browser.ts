@@ -4,7 +4,7 @@ import { join } from 'path'
 import type { BrowserAnnotationHit, BrowserBounds, BrowserState } from '../shared/types'
 import { ANNOTATE_CANCEL, ANNOTATE_CLEANUP, ANNOTATE_PICKER } from './annotatePicker'
 
-const PARTITION = 'persist:grokcode-browser'
+const PARTITION = 'persist:workbench-browser'
 
 let host: BrowserWindow | null = null
 let view: WebContentsView | null = null
@@ -19,7 +19,7 @@ let loadedPersisted = false
 let picking = false
 
 function persistPath(): string {
-  return join(app.getPath('userData'), 'grokcode', 'browser.json')
+  return join(app.getPath('userData'), 'workbench', 'browser.json')
 }
 
 export function sanitizeUrl(input: string): string | null {
@@ -93,7 +93,7 @@ async function loadPersisted(): Promise<void> {
 async function savePersisted(url: string): Promise<void> {
   const clean = sanitizeUrl(url) ?? ''
   lastUrl = clean
-  await mkdir(join(app.getPath('userData'), 'grokcode'), { recursive: true })
+  await mkdir(join(app.getPath('userData'), 'workbench'), { recursive: true })
   await writeFile(persistPath(), JSON.stringify({ url: clean }), 'utf8')
 }
 

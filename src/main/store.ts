@@ -1,14 +1,17 @@
 import { app } from 'electron'
 import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
 import { join, normalize } from 'path'
+import { type McpServers, parseMcpServers } from '../shared/mcp'
 import { normalizeHexColor, pickProjectColor } from '../shared/projectColor'
 import { DEFAULT_THEME_ID } from '../shared/theme'
 import {
   DEFAULT_MODEL,
   DEFAULT_VOICE,
+  normalizeChatAgent,
   normalizeReasoningEffort,
   normalizeVoiceSettings,
   type Chat,
+  type ChatAgent,
   type ChatSummary,
   type Project,
   type PublicSettings,
@@ -17,7 +20,9 @@ import {
   type VoiceSettings
 } from '../shared/types'
 import { isUnsafeProjectPath, queueIndex } from './codegraph'
-import { id, now } from './ids'
+import { id, now, titleFromPrompt } from './ids'
+import { getClaudeCliInfo } from './claudeCli'
+import { listClaudeSessions, readClaudeHistory } from './claudeSessions'
 import { getGrokCliInfo } from './grokCli'
 import {
   findGrokSessionDir,
@@ -28,11 +33,17 @@ import {
 } from './sessions'
 
 type SettingsFile = {
+  /** Agent for new chats. Missing means Grok. */
+  defaultAgent?: ChatAgent
+  /** Claude Code model alias. Empty means its default. */
+  claudeModel?: string
   apiKey: string
   model: string
   effort: ReasoningEffort | ''
   themeId: string
   voice: VoiceSettings
+  /** MCP servers every chat gets, next to the built-in browser. */
+  mcpServers?: McpServers
 }
 
 type StoreData = {
@@ -60,7 +71,7 @@ async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 }
 
 function dataDir(): string {
-  return join(app.getPath('userData'), 'grokcode')
+  return join(app.getPath('userData'), 'workbench')
 }
 
 function projectsPath(): string {
@@ -176,12 +187,36 @@ async function rememberProjectPath(path: string | null | undefined): Promise<voi
 async function loadSettingsFile(): Promise<SettingsFile> {
   const file = await readJson<Partial<SettingsFile>>(settingsPath(), {})
   return {
+    defaultAgent: normalizeChatAgent(file.defaultAgent),
+    claudeModel: file.claudeModel?.trim() ?? '',
     apiKey: file.apiKey ?? '',
     model: file.model || DEFAULT_MODEL,
     effort: normalizeReasoningEffort(file.effort) ?? '',
     themeId: file.themeId || DEFAULT_THEME_ID,
-    voice: normalizeVoiceSettings(file.voice)
+    voice: normalizeVoiceSettings(file.voice),
+    mcpServers: readMcpServers(file.mcpServers)
   }
+}
+
+/** A hand-edited settings file with a broken server list loads with none, instead of failing. */
+function readMcpServers(value: unknown): McpServers {
+  try {
+    return parseMcpServers(JSON.stringify(value ?? {}))
+  } catch {
+    return {}
+  }
+}
+
+export async function getMcpServers(): Promise<McpServers> {
+  return (await loadSettingsFile()).mcpServers ?? {}
+}
+
+/** Save the MCP editor text. Throws the parse error so the editor can show it. */
+export async function setMcpServers(text: string): Promise<McpServers> {
+  const mcpServers = parseMcpServers(text)
+  const current = await loadSettingsFile()
+  await writeJson(settingsPath(), { ...current, mcpServers } satisfies SettingsFile)
+  return mcpServers
 }
 
 export async function getThemeId(): Promise<string> {
@@ -211,9 +246,15 @@ export async function getPublicSettings(): Promise<PublicSettings> {
   const model = file.model || DEFAULT_MODEL
   const effort = file.effort || null
   const voice = file.voice
-  const grokCli = await getGrokCliInfo()
+  const [grokCli, claude] = await Promise.all([getGrokCliInfo(), getClaudeCliInfo()])
+  const agent = {
+    defaultAgent: normalizeChatAgent(file.defaultAgent),
+    claude,
+    claudeModel: file.claudeModel ?? ''
+  }
   if (signedIn) {
     return {
+      ...agent,
       hasKey: true,
       keyPreview: 'Grok Build',
       model,
@@ -226,6 +267,7 @@ export async function getPublicSettings(): Promise<PublicSettings> {
   }
   if (envKey) {
     return {
+      ...agent,
       hasKey: true,
       keyPreview: maskKey(envKey),
       model,
@@ -238,6 +280,7 @@ export async function getPublicSettings(): Promise<PublicSettings> {
   }
   if (stored) {
     return {
+      ...agent,
       hasKey: true,
       keyPreview: maskKey(stored),
       model,
@@ -249,6 +292,7 @@ export async function getPublicSettings(): Promise<PublicSettings> {
     }
   }
   return {
+    ...agent,
     hasKey: false,
     keyPreview: null,
     model,
@@ -272,6 +316,16 @@ export async function getModel(): Promise<string> {
   return file.model || DEFAULT_MODEL
 }
 
+export async function getDefaultAgent(): Promise<ChatAgent> {
+  const file = await loadSettingsFile()
+  return normalizeChatAgent(file.defaultAgent)
+}
+
+export async function getClaudeModel(): Promise<string> {
+  const file = await loadSettingsFile()
+  return file.claudeModel ?? ''
+}
+
 export async function getEffort(): Promise<ReasoningEffort | null> {
   const file = await loadSettingsFile()
   return file.effort || null
@@ -282,21 +336,27 @@ export async function updateSettings(input: {
   model?: string
   effort?: string | null
   voice?: Partial<VoiceSettings>
+  defaultAgent?: ChatAgent
+  claudeModel?: string
 }): Promise<PublicSettings> {
   const current = await loadSettingsFile()
   await writeJson(settingsPath(), {
+    defaultAgent:
+      input.defaultAgent !== undefined ? normalizeChatAgent(input.defaultAgent) : current.defaultAgent,
+    claudeModel: input.claudeModel !== undefined ? input.claudeModel.trim() : current.claudeModel,
     apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
     model: input.model?.trim() || current.model || DEFAULT_MODEL,
     effort:
       input.effort !== undefined ? (normalizeReasoningEffort(input.effort) ?? '') : current.effort,
     themeId: current.themeId || DEFAULT_THEME_ID,
-    voice: normalizeVoiceSettings({ ...current.voice, ...input.voice })
+    voice: normalizeVoiceSettings({ ...current.voice, ...input.voice }),
+    mcpServers: current.mcpServers
   } satisfies SettingsFile)
   return getPublicSettings()
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const projects = await loadProjects()
+  const projects = (await loadProjects()).filter((project) => !project.removedAt)
   return [...projects].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
@@ -307,6 +367,19 @@ export async function createProject(name: string, path: string | null, color?: s
   await rememberProjectPath(path)
   const projects = await loadProjects()
   const timestamp = now()
+  // Adding a removed project's folder again brings it back with its chats.
+  const removed = path
+    ? projects.find(
+        (item) => item.removedAt && item.path && normalizeProjectPath(item.path) === normalizeProjectPath(path)
+      )
+    : undefined
+  if (removed) {
+    delete removed.removedAt
+    removed.updatedAt = timestamp
+    await saveProjects(projects)
+    queueIndex(removed.id, removed.path)
+    return removed
+  }
   const project: Project = {
     id: id(),
     name: name.trim() || 'Untitled project',
@@ -356,21 +429,22 @@ export async function updateProject(input: UpdateProjectInput): Promise<Project>
 
 export async function purgeUnsafeProjects(): Promise<void> {
   const projects = await loadProjects()
-  const bad = projects.filter((project) => project.path && isUnsafeProjectPath(project.path))
+  const bad = projects.filter(
+    (project) => !project.removedAt && project.path && isUnsafeProjectPath(project.path)
+  )
   for (const project of bad) {
-    await deleteProject(project.id)
+    await removeProject(project.id)
   }
 }
 
-export async function deleteProject(projectId: string): Promise<void> {
+/** Hides the project from the sidebar. Its chats stay on record for when its folder is added again. */
+export async function removeProject(projectId: string): Promise<void> {
   const projects = await loadProjects()
   const project = projects.find((item) => item.id === projectId)
-  await dismissProjectPath(project?.path)
-  await saveProjects(projects.filter((item) => item.id !== projectId))
-  const chats = await listChats()
-  await Promise.all(
-    chats.filter((chat) => chat.projectId === projectId).map((chat) => deleteChat(chat.id))
-  )
+  if (!project) return
+  await dismissProjectPath(project.path)
+  project.removedAt = now()
+  await saveProjects(projects)
 }
 
 async function readChat(chatId: string): Promise<Chat | null> {
@@ -384,7 +458,7 @@ export async function chatMediaRoots(chatId: string): Promise<string[]> {
   if (chat.worktreePath) roots.push(chat.worktreePath)
   const project = (await loadProjects()).find((item) => item.id === chat.projectId)
   if (project?.path) roots.push(project.path)
-  if (chat.grokSessionId) {
+  if (chat.grokSessionId && normalizeChatAgent(chat.agent) === 'grok') {
     const dir = findGrokSessionDir(chat.grokSessionId)
     if (dir) roots.push(dir)
   }
@@ -394,14 +468,17 @@ export async function chatMediaRoots(chatId: string): Promise<string[]> {
 export async function getChat(chatId: string): Promise<Chat> {
   const chat = await readChat(chatId)
   if (!chat) throw new Error('Chat not found')
+  const onGrok = normalizeChatAgent(chat.agent) === 'grok'
   if (chat.messages.length === 0 && chat.grokSessionId) {
     const project = (await loadProjects()).find((item) => item.id === chat.projectId)
     const cwd = chat.worktreePath || project?.path
     if (cwd) {
-      chat.messages = readGrokHistory(chat.grokSessionId, cwd)
+      chat.messages = onGrok
+        ? readGrokHistory(chat.grokSessionId, cwd)
+        : readClaudeHistory(chat.grokSessionId, cwd)
     }
   }
-  if (chat.grokSessionId) {
+  if (onGrok && chat.grokSessionId) {
     const disk = readGrokPlan(chat.grokSessionId)
     if (disk?.awaitingApproval) {
       const markdown = chat.plan?.markdown || disk.markdown
@@ -437,6 +514,7 @@ export async function listChats(): Promise<ChatSummary[]> {
       id: chat.id,
       projectId: chat.projectId,
       title: chat.title,
+      agent: normalizeChatAgent(chat.agent),
       grokSessionId: chat.grokSessionId ?? null,
       createdAt: chat.createdAt,
       updatedAt: chat.updatedAt,
@@ -448,9 +526,42 @@ export async function listChats(): Promise<ChatSummary[]> {
   return chats.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
+// Each chat's lowercased message text, kept until the chat changes. Reading imported
+// histories from the agents' session files is slow, so only the first search pays for it.
+const searchText = new Map<string, { updatedAt: string; text: string }>()
+
+/** Ids of the chats whose messages contain `query`, ignoring case. */
+export async function searchChats(query: string): Promise<string[]> {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return []
+  await mkdir(chatsDir(), { recursive: true })
+  const ids: string[] = []
+  for (const file of await readdir(chatsDir())) {
+    if (!file.endsWith('.json')) continue
+    const stored = await readChat(file.slice(0, -'.json'.length))
+    if (!stored) continue
+    let entry = searchText.get(stored.id)
+    if (entry?.updatedAt !== stored.updatedAt) {
+      // getChat also reads the messages an imported chat keeps in its agent's session files.
+      const chat = await getChat(stored.id).catch(() => null)
+      const text = (chat?.messages ?? []).map((message) => message.content).join('\n').toLowerCase()
+      entry = { updatedAt: stored.updatedAt, text }
+      searchText.set(stored.id, entry)
+    }
+    if (entry.text.includes(needle)) ids.push(stored.id)
+  }
+  return ids
+}
+
 export async function createChat(
   projectId: string,
-  input?: { id?: string; title?: string; grokSessionId?: string | null; messages?: Chat['messages'] }
+  input?: {
+    id?: string
+    title?: string
+    agent?: ChatAgent
+    grokSessionId?: string | null
+    messages?: Chat['messages']
+  }
 ): Promise<Chat> {
   const projects = await loadProjects()
   if (!projects.some((project) => project.id === projectId)) {
@@ -462,6 +573,7 @@ export async function createChat(
     id: chatId,
     projectId,
     title: input?.title ?? 'New chat',
+    agent: input?.agent ?? (await getDefaultAgent()),
     grokSessionId: input?.grokSessionId ?? null,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -472,6 +584,23 @@ export async function createChat(
   return chat
 }
 
+const GROK_DEFAULT_TITLE = 'Grok session'
+const retitleTried = new Set<string>()
+
+function grokPromptTitle(sessionId: string, cwd: string): string | null {
+  const first = readGrokHistory(sessionId, cwd).find((message) => message.role === 'user')
+  return first ? titleFromPrompt(first.content) : null
+}
+
+/** Sets an imported chat's title without touching its history or its place in the list. */
+async function retitleChat(chatId: string, title: string): Promise<void> {
+  await withLock(chatId, async () => {
+    const chat = await readChat(chatId)
+    if (!chat || chat.title !== GROK_DEFAULT_TITLE) return
+    await writeJson(chatPath(chatId), { ...chat, title })
+  })
+}
+
 export async function syncGrokSessions(): Promise<void> {
   const sessions = listGrokSessions()
   if (sessions.length === 0) return
@@ -479,6 +608,15 @@ export async function syncGrokSessions(): Promise<void> {
   const chats = await listChats()
   const known = new Set(chats.map((chat) => chat.grokSessionId).filter(Boolean))
   const dismissed = await loadDismissedPaths()
+
+  // Sessions Grok never titled read as their first prompt instead of "Grok session".
+  for (const chat of chats) {
+    if (chat.title !== GROK_DEFAULT_TITLE || !chat.grokSessionId || retitleTried.has(chat.id)) continue
+    retitleTried.add(chat.id)
+    const session = sessions.find((item) => item.id === chat.grokSessionId)
+    const title = session ? grokPromptTitle(session.id, session.cwd) : null
+    if (title) await retitleChat(chat.id, title)
+  }
 
   for (const session of sessions) {
     if (known.has(session.id)) continue
@@ -493,7 +631,33 @@ export async function syncGrokSessions(): Promise<void> {
     }
     await createChat(project.id, {
       id: session.id,
+      title:
+        session.title === GROK_DEFAULT_TITLE
+          ? (grokPromptTitle(session.id, session.cwd) ?? session.title)
+          : session.title,
+      agent: 'grok',
+      grokSessionId: session.id
+    })
+    known.add(session.id)
+  }
+}
+
+/** Claude Code sessions are imported into projects that already exist, never new ones. */
+export async function syncClaudeSessions(): Promise<void> {
+  const projects = (await loadProjects()).filter((project) => project.path)
+  if (projects.length === 0) return
+  const sessions = listClaudeSessions(projects.map((project) => project.path as string))
+  if (sessions.length === 0) return
+  const known = new Set((await listChats()).map((chat) => chat.grokSessionId).filter(Boolean))
+  for (const session of sessions) {
+    if (known.has(session.id)) continue
+    const cwd = normalizeProjectPath(session.cwd)
+    const project = projects.find((item) => normalizeProjectPath(item.path as string) === cwd)
+    if (!project) continue
+    await createChat(project.id, {
+      id: session.id,
       title: session.title,
+      agent: 'claude',
       grokSessionId: session.id
     })
     known.add(session.id)
@@ -543,6 +707,8 @@ async function touchProject(projectId: string): Promise<void> {
 
 export async function snapshot(): Promise<{ projects: Project[]; chats: ChatSummary[]; settings: PublicSettings }> {
   await syncGrokSessions()
+  await syncClaudeSessions()
   const [projects, chats, settings] = await Promise.all([listProjects(), listChats(), getPublicSettings()])
-  return { projects, chats, settings }
+  const visible = new Set(projects.map((project) => project.id))
+  return { projects, chats: chats.filter((chat) => visible.has(chat.projectId)), settings }
 }

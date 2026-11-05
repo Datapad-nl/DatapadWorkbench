@@ -9,6 +9,7 @@ import type {
 } from '../../../shared/types'
 import { useWorkspace } from '../workspace'
 import { CodeDiff } from './CodeDiff'
+import { IconButton } from './icons'
 import { ReorderGrip } from './ReorderGrip'
 
 const empty: GitSnapshot = {
@@ -24,7 +25,8 @@ const empty: GitSnapshot = {
   behind: 0,
   dirtyCount: 0,
   files: [],
-  graph: []
+  graph: [],
+  merge: null
 }
 
 const LANE_COLORS = ['#c4a35a', '#7aa2c4', '#8fbf8f', '#c47aa2', '#c48f5a', '#8f8fc4']
@@ -124,12 +126,12 @@ export function GitPane(): React.JSX.Element {
 
   useEffect(() => {
     if (!showGit) {
-      void window.grokcode.setGitActiveProject(null)
+      void window.workbench.setGitActiveProject(null)
       return
     }
-    void window.grokcode.setGitActiveProject(activeProjectId, gitChatId)
+    void window.workbench.setGitActiveProject(activeProjectId, gitChatId)
     return () => {
-      void window.grokcode.setGitActiveProject(null)
+      void window.workbench.setGitActiveProject(null)
     }
   }, [showGit, activeProjectId, gitChatId])
 
@@ -144,10 +146,10 @@ export function GitPane(): React.JSX.Element {
       return
     }
     let cancelled = false
-    void window.grokcode.getGitSnapshot(activeProjectId, gitChatId).then((next) => {
+    void window.workbench.getGitSnapshot(activeProjectId, gitChatId).then((next) => {
       if (!cancelled) setSnapshot(next)
     })
-    const unsub = window.grokcode.onGitSnapshot((next) => {
+    const unsub = window.workbench.onGitSnapshot((next) => {
       if (next.projectId !== activeProjectId) return
       if ((next.chatId ?? null) !== gitChatId) return
       setSnapshot(next)
@@ -163,7 +165,7 @@ export function GitPane(): React.JSX.Element {
       setDiff(null)
       return
     }
-    void window.grokcode
+    void window.workbench
       .getGitDiff(activeProjectId, selected.path, selected.staged, gitChatId)
       .then(setDiff)
   }, [activeProjectId, gitChatId, selected, snapshot.files])
@@ -189,7 +191,7 @@ export function GitPane(): React.JSX.Element {
   async function checkout(ref: string, detach: boolean): Promise<void> {
     if (!activeProjectId) return
     if (detach && !confirm(`Check out ${ref.slice(0, 8)}? This detaches HEAD.`)) return
-    await run(() => window.grokcode.checkoutGit(activeProjectId, ref, gitChatId))
+    await run(() => window.workbench.checkoutGit(activeProjectId, ref, gitChatId))
   }
 
   return (
@@ -197,9 +199,9 @@ export function GitPane(): React.JSX.Element {
       <header className="drag shrink-0">
         <div className="flex h-titlebar items-center justify-between gap-2 border-b border-line px-3">
           {otherPanes && <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />}
-          <div className="no-drag min-w-0 flex-1">
-            <h1 className="text-[13px] font-semibold tracking-tight">Git</h1>
-            <p className="mt-px truncate font-mono text-[11px] text-muted">
+          <div className="flex min-w-0 flex-1 items-baseline gap-2">
+            <h1 className="shrink-0 text-[13px] font-semibold text-ink">Git</h1>
+            <p className="no-drag min-w-0 truncate font-mono text-[11px] text-faint">
               {snapshotForProject.available
                 ? `${project?.name ? `${project.name} · ` : ''}${
                     gitChat?.worktreeBranch ? 'isolated · ' : ''
@@ -209,22 +211,16 @@ export function GitPane(): React.JSX.Element {
                 : project?.name ?? 'No project'}
             </p>
           </div>
-          <div className="no-drag flex shrink-0 items-center gap-1">
-            <button
-              className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink active:translate-y-px"
+          <div className="no-drag flex shrink-0 items-center gap-0.5">
+            <IconButton
+              icon="retry"
+              label="Refresh"
               onClick={() => {
                 if (activeProjectId)
-                  void window.grokcode.getGitSnapshot(activeProjectId, gitChatId).then(setSnapshot)
+                  void window.workbench.getGitSnapshot(activeProjectId, gitChatId).then(setSnapshot)
               }}
-            >
-              Refresh
-            </button>
-            <button
-              className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink active:translate-y-px"
-              onClick={() => setShowGit(false)}
-            >
-              Hide
-            </button>
+            />
+            <IconButton icon="close" label="Close Git" onClick={() => setShowGit(false)} />
           </div>
         </div>
       </header>
@@ -262,7 +258,7 @@ export function GitPane(): React.JSX.Element {
                 onSubmit={(event) => {
                   event.preventDefault()
                   void run(async () => {
-                    const result = await window.grokcode.createGitBranch(
+                    const result = await window.workbench.createGitBranch(
                       activeProjectId,
                       branchName,
                       gitChatId
@@ -289,6 +285,26 @@ export function GitPane(): React.JSX.Element {
                 </button>
               </form>
             )}
+            {snapshot.merge && gitChatId && (
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate font-mono text-[10px] text-muted">
+                  {snapshot.merge.commits > 0
+                    ? `${snapshot.merge.commits} commit${snapshot.merge.commits === 1 ? '' : 's'} not in ${snapshot.merge.into}`
+                    : `${snapshot.merge.into} has every commit`}
+                </span>
+                <button
+                  className="shrink-0 rounded-md bg-accent px-2 py-1 text-[11px] text-accent-ink disabled:opacity-40"
+                  disabled={snapshot.merge.commits === 0 || busy}
+                  onClick={() => {
+                    const into = snapshot.merge?.into
+                    if (!into || !window.confirm(`Merge this chat's branch into ${into} in the project folder?`)) return
+                    void run(() => window.workbench.mergeChatBranch(activeProjectId, gitChatId))
+                  }}
+                >
+                  Merge into {snapshot.merge.into}
+                </button>
+              </div>
+            )}
           </div>
 
           {error && (
@@ -297,7 +313,7 @@ export function GitPane(): React.JSX.Element {
 
           <section className="border-b border-line px-3 py-2">
             <div className="mb-1 flex items-center justify-between">
-              <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
+              <h2 className="text-[11px] font-semibold text-muted">
                 Uncommitted
               </h2>
               <span className="font-mono text-[10px] text-muted">{snapshot.files.length}</span>
@@ -313,17 +329,17 @@ export function GitPane(): React.JSX.Element {
                     selected={selected}
                     onSelect={setSelected}
                     onStage={() =>
-                      void run(() => window.grokcode.stageGitPath(activeProjectId, file.path, gitChatId))
+                      void run(() => window.workbench.stageGitPath(activeProjectId, file.path, gitChatId))
                     }
                     onUnstage={() =>
                       void run(() =>
-                        window.grokcode.unstageGitPath(activeProjectId, file.path, gitChatId)
+                        window.workbench.unstageGitPath(activeProjectId, file.path, gitChatId)
                       )
                     }
                     onDiscard={() => {
                       if (!confirm(`Discard ${file.path}?`)) return
                       void run(() =>
-                        window.grokcode.discardGitPath(activeProjectId, file.path, gitChatId)
+                        window.workbench.discardGitPath(activeProjectId, file.path, gitChatId)
                       )
                     }}
                   />
@@ -351,7 +367,7 @@ export function GitPane(): React.JSX.Element {
               disabled={busy || stagedCount === 0 || !message.trim()}
               onClick={() =>
                 void run(async () => {
-                  const result = await window.grokcode.commitGit(activeProjectId, message, gitChatId)
+                  const result = await window.workbench.commitGit(activeProjectId, message, gitChatId)
                   if (result.ok) setMessage('')
                   return result
                 })
@@ -362,7 +378,7 @@ export function GitPane(): React.JSX.Element {
           </section>
 
           <section className="px-2 py-2">
-            <h2 className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
+            <h2 className="mb-1 px-1 text-[11px] font-semibold text-muted">
               Branches
             </h2>
             {snapshot.graph.length === 0 ? (

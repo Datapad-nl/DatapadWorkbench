@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { KnowledgeNode, KnowledgeSnapshot } from '../../../shared/types'
 import { useWorkspace } from '../workspace'
 import { Markdown } from './Markdown'
+import { IconButton } from './icons'
 import { ReorderGrip } from './ReorderGrip'
 
 const empty: KnowledgeSnapshot = {
@@ -340,12 +341,12 @@ export function GraphPane(): React.JSX.Element {
 
   useEffect(() => {
     if (!showKnowledge) {
-      void window.grokcode.setKnowledgeActiveProject(null)
+      void window.workbench.setKnowledgeActiveProject(null)
       return
     }
-    void window.grokcode.setKnowledgeActiveProject(activeProjectId)
+    void window.workbench.setKnowledgeActiveProject(activeProjectId)
     return () => {
-      void window.grokcode.setKnowledgeActiveProject(null)
+      void window.workbench.setKnowledgeActiveProject(null)
     }
   }, [showKnowledge, activeProjectId])
 
@@ -354,8 +355,8 @@ export function GraphPane(): React.JSX.Element {
       setSnapshot(empty)
       return
     }
-    void window.grokcode.getKnowledgeSnapshot(activeProjectId).then(setSnapshot)
-    return window.grokcode.onKnowledgeSnapshot((next) => {
+    void window.workbench.getKnowledgeSnapshot(activeProjectId).then(setSnapshot)
+    return window.workbench.onKnowledgeSnapshot((next) => {
       if (next.projectId !== activeProjectId) return
       setSnapshot(next)
     })
@@ -367,7 +368,7 @@ export function GraphPane(): React.JSX.Element {
       return
     }
     let cancelled = false
-    void window.grokcode.getKnowledgeNote(activeProjectId, selectedId).then((next) => {
+    void window.workbench.getKnowledgeNote(activeProjectId, selectedId).then((next) => {
       if (cancelled) return
       setNote(next ? { title: next.title, body: next.body } : null)
     })
@@ -385,7 +386,7 @@ export function GraphPane(): React.JSX.Element {
   async function rebuild(): Promise<void> {
     if (!activeProjectId || busy) return
     setBusy(true)
-    setSnapshot(await window.grokcode.rebuildKnowledge(activeProjectId))
+    setSnapshot(await window.workbench.rebuildKnowledge(activeProjectId))
     setBusy(false)
   }
 
@@ -394,9 +395,9 @@ export function GraphPane(): React.JSX.Element {
       <header className="drag shrink-0">
         <div className="flex h-titlebar items-center justify-between gap-2 border-b border-line px-3">
           {otherPanes && <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />}
-          <div className="no-drag min-w-0 flex-1">
-            <h1 className="text-[13px] font-semibold tracking-tight">Knowledge</h1>
-            <p className="mt-px truncate font-mono text-[11px] text-muted">
+          <div className="flex min-w-0 flex-1 items-baseline gap-2">
+            <h1 className="shrink-0 text-[13px] font-semibold text-ink">Knowledge</h1>
+            <p className="no-drag min-w-0 truncate font-mono text-[11px] text-faint">
               {snapshot.available
                 ? `${snapshot.nodes.length} notes · ${snapshot.edges.length} links`
                 : project?.name ?? 'No project'}
@@ -404,27 +405,22 @@ export function GraphPane(): React.JSX.Element {
           </div>
           <div className="no-drag flex shrink-0 items-center gap-1">
             <button
-              className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink active:translate-y-px"
+              className="h-7 rounded-[7px] px-2 text-[12px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
               onClick={() => {
-                if (activeProjectId) void window.grokcode.openKnowledgeVault(activeProjectId)
+                if (activeProjectId) void window.workbench.openKnowledgeVault(activeProjectId)
               }}
               disabled={!activeProjectId}
             >
               Obsidian
             </button>
-            <button
-              className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink active:translate-y-px"
+            <IconButton
+              icon="retry"
+              label={busy ? 'Updating…' : 'Rebuild'}
               onClick={() => void rebuild()}
               disabled={!activeProjectId || busy}
-            >
-              {busy ? 'Updating' : 'Rebuild'}
-            </button>
-            <button
-              className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-raised hover:text-ink active:translate-y-px"
-              onClick={() => setShowKnowledge(false)}
-            >
-              Hide
-            </button>
+              className={busy ? 'animate-spin' : ''}
+            />
+            <IconButton icon="close" label="Close Knowledge" onClick={() => setShowKnowledge(false)} />
           </div>
         </div>
       </header>
@@ -457,7 +453,7 @@ export function GraphPane(): React.JSX.Element {
             <button
               className="ml-auto rounded px-1.5 py-0.5 hover:bg-raised hover:text-ink"
               onClick={() => {
-                if (activeProjectId) void window.grokcode.revealKnowledgeVault(activeProjectId)
+                if (activeProjectId) void window.workbench.revealKnowledgeVault(activeProjectId)
               }}
             >
               Reveal vault
@@ -466,7 +462,7 @@ export function GraphPane(): React.JSX.Element {
           <div className="min-h-[140px] max-h-[42%] overflow-y-auto border-t border-line px-3 py-3">
             {note ? (
               <div className="select-text">
-                <div className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted">
+                <div className="text-[11px] text-muted">
                   {selectedId}
                 </div>
                 <Markdown text={stripFrontmatter(note.body)} />

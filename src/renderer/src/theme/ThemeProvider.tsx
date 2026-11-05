@@ -43,7 +43,7 @@ export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.
   const [activeId, setActiveId] = useState(GRAPHITE_THEME.id)
 
   const refreshThemes = useCallback(async () => {
-    const state = await window.grokcode.getThemeState()
+    const state = await window.workbench.getThemeState()
     return applyState(state, setActive, setThemes, setActiveId)
   }, [])
 
@@ -52,28 +52,28 @@ export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.
   }, [refreshThemes])
 
   const activateTheme = useCallback(async (id: string) => {
-    const state = await window.grokcode.activateTheme(id)
+    const state = await window.workbench.activateTheme(id)
     return applyState(state, setActive, setThemes, setActiveId)
   }, [])
 
   const saveTheme = useCallback(async (theme: ThemeFile) => {
-    const state = await window.grokcode.saveTheme(theme)
+    const state = await window.workbench.saveTheme(theme)
     return applyState(state, setActive, setThemes, setActiveId)
   }, [])
 
   const deleteTheme = useCallback(async (id: string) => {
-    const state = await window.grokcode.deleteTheme(id)
+    const state = await window.workbench.deleteTheme(id)
     return applyState(state, setActive, setThemes, setActiveId)
   }, [])
 
   const importTheme = useCallback(async () => {
-    const state = await window.grokcode.importTheme()
+    const state = await window.workbench.importTheme()
     if (!state) return null
     return applyState(state, setActive, setThemes, setActiveId)
   }, [])
 
   const exportTheme = useCallback(async (id: string) => {
-    return window.grokcode.exportTheme(id)
+    return window.workbench.exportTheme(id)
   }, [])
 
   const value = useMemo<ThemeContextValue>(

@@ -1,5 +1,5 @@
 {
-  "name": "grok-build-workbench",
+  "name": "datapad-workbench",
   "version": "0.1.0",
   "private": true,
   "description": "Unofficial desktop workbench for Grok Build",
@@ -12,14 +12,19 @@
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
     "build": "electron-vite build",
+    "dist": "electron-vite build && electron-builder --publish never",
+    "release": "electron-vite build && electron-builder --publish always",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web"
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.100.0",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "@huggingface/transformers": "^4.3.0",
+    "electron-updater": "^6.8.11",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-markdown": "^10.1.0",
@@ -27,15 +32,26 @@
   },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",
+    "@eslint/js": "^9.39.5",
+    "@huggingface/transformers": "^4.3.0",
     "@tailwindcss/vite": "^4.1.12",
     "@types/node": "^22.19.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "electron": "^44.4.5",
+    "electron": "^44.10.2",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^5.0.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^16.5.0",
     "tailwindcss": "^4.1.12",
     "typescript": "^5.9.3",
-    "vite": "^7.2.6"
+    "typescript-eslint": "^8.72.1",
+    "vite": "^7.3.7",
+    "vitest": "^5.1.0"
+  },
+  "overrides": {
+    "minimatch@>=7": "^11.0.4"
   }
 }

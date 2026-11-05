@@ -1,16 +1,16 @@
 ---
 tags:
   - map
-  - grok-build-workbench
+  - datapad-workbench
 ---
 
-# Grok Build Workbench
+# Datapad Workbench
 
 This folder is an [Obsidian](https://obsidian.md) vault. In Obsidian choose **Open folder as vault** and pick this `knowledge` directory.
 
-%% grok-build-workbench:start %%
+%% datapad-workbench:start %%
 
-A living map of **Grok Build Workbench**. Generated notes stay in `generated/`; your writing stays in `notes/`.
+A living map of **Datapad Workbench**. Generated notes stay in `generated/`; your writing stays in `notes/`.
 
 ## Generated
 
@@ -18,6 +18,7 @@ A living map of **Grok Build Workbench**. Generated notes stay in `generated/`; 
 - [[Architecture]]
 - [[Stack]]
 - [[Rules]]
+- [[design]]
 - [[docs]]
 - [[resources]]
 - [[scripts]]
@@ -28,4 +29,4 @@ A living map of **Grok Build Workbench**. Generated notes stay in `generated/`; 
 
 - [[How to use this vault]]
 
-%% grok-build-workbench:end %%
+%% datapad-workbench:end %%

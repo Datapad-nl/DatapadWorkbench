@@ -16,7 +16,7 @@ export type WindowState = {
 }
 
 function statePath(): string {
-  return join(app.getPath('userData'), 'grokcode', 'window.json')
+  return join(app.getPath('userData'), 'workbench', 'window.json')
 }
 
 export function loadWindowState(): WindowState {

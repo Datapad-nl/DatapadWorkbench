@@ -21,7 +21,7 @@ type Active = {
 const active = new Map<string, Active>()
 
 function checkpointRoot(chatId: string): string {
-  return join(app.getPath('userData'), 'grokcode', 'checkpoints', chatId)
+  return join(app.getPath('userData'), 'workbench', 'checkpoints', chatId)
 }
 
 function snapDirFor(chatId: string, checkpointId: string): string {
@@ -31,9 +31,9 @@ function snapDirFor(chatId: string, checkpointId: string): string {
 function gitEnv(indexFile?: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
-    GIT_AUTHOR_NAME: 'Grok Build Workbench',
+    GIT_AUTHOR_NAME: 'Datapad Workbench',
     GIT_AUTHOR_EMAIL: 'workbench@local',
-    GIT_COMMITTER_NAME: 'Grok Build Workbench',
+    GIT_COMMITTER_NAME: 'Datapad Workbench',
     GIT_COMMITTER_EMAIL: 'workbench@local',
     ...(indexFile ? { GIT_INDEX_FILE: indexFile } : {})
   }
@@ -115,7 +115,7 @@ async function createGitCheckpoint(cwd: string, chatId: string, checkpointId: st
   const gitDir = isAbsolute(gitDirRaw.stdout.trim())
     ? gitDirRaw.stdout.trim()
     : join(cwd, gitDirRaw.stdout.trim())
-  const indexFile = join(gitDir, `grokcode-index-${checkpointId}`)
+  const indexFile = join(gitDir, `workbench-index-${checkpointId}`)
 
   try {
     await mkdir(gitDir, { recursive: true })
@@ -138,13 +138,13 @@ async function createGitCheckpoint(cwd: string, chatId: string, checkpointId: st
 
     const commit = await runGit(
       cwd,
-      ['commit-tree', treeSha, ...parent, '-m', `grokcode ${chatId} ${checkpointId}`],
+      ['commit-tree', treeSha, ...parent, '-m', `workbench ${chatId} ${checkpointId}`],
       gitEnv(indexFile)
     )
     const sha = commit.stdout.trim()
     if (commit.code !== 0 || !sha) return null
 
-    const ref = await runGit(cwd, ['update-ref', `refs/grokcode/${chatId}/${checkpointId}`, sha])
+    const ref = await runGit(cwd, ['update-ref', `refs/workbench/${chatId}/${checkpointId}`, sha])
     if (ref.code !== 0) return null
     return sha
   } finally {
@@ -281,14 +281,14 @@ async function restoreSnapshots(root: string, snapDir: string, files: string[]):
 async function deleteCheckpointArtifacts(checkpoint: Checkpoint, cwd: string | null): Promise<void> {
   await rm(snapDirFor(checkpoint.chatId, checkpoint.id), { recursive: true, force: true })
   if (cwd && checkpoint.gitSha) {
-    await runGit(cwd, ['update-ref', '-d', `refs/grokcode/${checkpoint.chatId}/${checkpoint.id}`])
+    await runGit(cwd, ['update-ref', '-d', `refs/workbench/${checkpoint.chatId}/${checkpoint.id}`])
   }
 }
 
 export async function deleteAllCheckpoints(chatId: string, cwd: string | null): Promise<void> {
   await rm(checkpointRoot(chatId), { recursive: true, force: true })
   if (!cwd) return
-  const refs = await runGit(cwd, ['for-each-ref', '--format=%(refname)', `refs/grokcode/${chatId}`])
+  const refs = await runGit(cwd, ['for-each-ref', '--format=%(refname)', `refs/workbench/${chatId}`])
   for (const ref of refs.stdout.split('\n').map((line) => line.trim()).filter(Boolean)) {
     await runGit(cwd, ['update-ref', '-d', ref])
   }

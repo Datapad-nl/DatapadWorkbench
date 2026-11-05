@@ -15,7 +15,7 @@ import {
 import { getThemeId, setThemeId } from './store'
 
 function themesDir(): string {
-  return join(app.getPath('userData'), 'grokcode', 'themes')
+  return join(app.getPath('userData'), 'workbench', 'themes')
 }
 
 function themePath(id: string): string {
@@ -59,7 +59,7 @@ export async function listThemeSummaries(): Promise<ThemeSummary[]> {
   const names = await readdir(themesDir()).catch(() => [] as string[])
   const user: ThemeSummary[] = []
   for (const name of names) {
-    if (!name.endsWith('.json') && !name.endsWith('.groktheme')) continue
+    if (!name.endsWith('.json') && !name.endsWith('.workbenchtheme')) continue
     const raw = await readJsonUnknown(join(themesDir(), name))
     if (!raw) continue
     try {
@@ -153,7 +153,7 @@ export async function importThemeFile(): Promise<{
   const options = {
     title: 'Load theme',
     filters: [
-      { name: 'Grok Build Workbench Theme', extensions: ['json', 'groktheme'] },
+      { name: 'Datapad Workbench Theme', extensions: ['json', 'workbenchtheme'] },
       { name: 'All files', extensions: ['*'] }
     ],
     properties: ['openFile' as const]
@@ -184,7 +184,7 @@ export async function exportThemeFile(id: string): Promise<boolean> {
     title: 'Save theme',
     defaultPath: `${theme.id}.json`,
     filters: [
-      { name: 'Grok Build Workbench Theme', extensions: ['json', 'groktheme'] },
+      { name: 'Datapad Workbench Theme', extensions: ['json', 'workbenchtheme'] },
       { name: 'JSON', extensions: ['json'] }
     ]
   }
@@ -192,7 +192,7 @@ export async function exportThemeFile(id: string): Promise<boolean> {
     ? await dialog.showSaveDialog(window, options)
     : await dialog.showSaveDialog(options)
   if (result.canceled || !result.filePath) return false
-  const target = result.filePath.endsWith('.json') || result.filePath.endsWith('.groktheme')
+  const target = result.filePath.endsWith('.json') || result.filePath.endsWith('.workbenchtheme')
     ? result.filePath
     : `${result.filePath}.json`
   await writeFile(target, JSON.stringify(theme, null, 2), 'utf8')

@@ -1,47 +1,74 @@
 import { useEffect, useState } from 'react'
+import { chatAgentLabel } from '../../../shared/types'
 import { useWorkspace } from '../workspace'
+import { Icon } from './icons'
 
 const USAGE_REFRESH_MS = 5 * 60 * 1000
 
-function UsageIcon({ percent }: { percent: number | null }): React.JSX.Element {
-  const used = percent == null ? null : Math.min(100, Math.max(0, percent))
-  const r = 5.2
-  const c = 2 * Math.PI * r
-  const dash = used == null ? 0 : (used / 100) * c
-  const hot = (used ?? 0) >= 90
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r={r} stroke="currentColor" strokeWidth="1.6" opacity="0.28" />
-      {used != null && (
-        <circle
-          cx="8"
-          cy="8"
-          r={r}
-          stroke={hot ? 'var(--color-danger)' : 'currentColor'}
-          strokeWidth="1.6"
-          strokeLinecap="round"
-          strokeDasharray={`${dash} ${c}`}
-          transform="rotate(-90 8 8)"
-        />
-      )}
-    </svg>
-  )
+type Usage = { percent: number; resets: string | null }
+
+/** `2026-11-04T16:20:00Z` → `2h 14m`, or null once it has passed. */
+function untilReset(iso: string | null): string | null {
+  if (!iso) return null
+  const ms = new Date(iso).getTime() - Date.now()
+  if (!Number.isFinite(ms) || ms <= 0) return null
+  const minutes = Math.round(ms / 60_000)
+  const days = Math.floor(minutes / 1440)
+  if (days >= 1) return `${days}d ${Math.floor((minutes % 1440) / 60)}h`
+  const hours = Math.floor(minutes / 60)
+  return hours >= 1 ? `${hours}h ${minutes % 60}m` : `${minutes}m`
+}
+
+const INDEX_LABEL: Partial<Record<string, string>> = {
+  indexed: 'CodeGraph indexed',
+  indexing: 'Indexing…',
+  installing: 'Installing CodeGraph…',
+  'not-indexed': 'Not indexed',
+  error: 'Index failed'
 }
 
 export function StatusBar(): React.JSX.Element {
-  const { showUsage, setShowUsage } = useWorkspace()
-  const [percent, setPercent] = useState<number | null>(null)
+  const {
+    showUsage,
+    setShowUsage,
+    settings,
+    projects,
+    indexes,
+    activeProjectId,
+    activeChatId,
+    chatsById
+  } = useWorkspace()
+  const [usage, setUsage] = useState<Usage | null>(null)
+  // Same order as the usage panel: the default agent's plan, or Claude's when it is the only one.
+  const claudeOn = settings?.claude.signedIn === true
+  const onClaude =
+    claudeOn && (settings?.defaultAgent === 'claude' || settings?.grokBuildSignedIn !== true)
 
   useEffect(() => {
     let cancelled = false
 
     async function load(): Promise<void> {
-      if (!window.grokcode.getUsage) return
       try {
-        const next = await window.grokcode.getUsage()
-        if (!cancelled) setPercent(next.usedPercent)
+        if (onClaude) {
+          const next = await window.workbench.getClaudeUsage()
+          const top = next.limits.reduce<(typeof next.limits)[number] | null>(
+            (best, limit) => (!best || limit.usedPercent > best.usedPercent ? limit : best),
+            null
+          )
+          if (!cancelled) setUsage(top ? { percent: top.usedPercent, resets: top.resets } : null)
+          return
+        }
+        if (!window.workbench.getUsage) return
+        const next = await window.workbench.getUsage()
+        if (!cancelled) {
+          setUsage(
+            next.usedPercent == null
+              ? null
+              : { percent: next.usedPercent, resets: untilReset(next.periodEnd) }
+          )
+        }
       } catch {
-        if (!cancelled) setPercent(null)
+        if (!cancelled) setUsage(null)
       }
     }
 
@@ -53,29 +80,65 @@ export function StatusBar(): React.JSX.Element {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [showUsage])
+  }, [showUsage, onClaude])
 
-  const label =
-    percent == null ? 'Usage' : `Usage · ${Math.round(percent)}% used`
+  const activeChat = activeChatId ? chatsById[activeChatId] : undefined
+  // A chat without an agent field predates Claude support, so it runs Grok.
+  const agent = activeChat ? (activeChat.agent ?? 'grok') : settings?.defaultAgent
+  const connected =
+    agent === 'claude' ? claudeOn : agent === 'grok' ? settings?.grokBuildSignedIn === true : false
+  const project = projects.find((item) => item.id === activeProjectId) ?? null
+  const indexLabel = project ? INDEX_LABEL[indexes[project.id]?.state ?? ''] : undefined
+  const percent = usage ? Math.min(100, Math.max(0, usage.percent)) : null
+  const usageText =
+    percent == null
+      ? null
+      : `${Math.round(percent)}%${usage?.resets ? ` · resets ${usage.resets}` : ''}`
 
   return (
-    <footer className="drag flex h-8 shrink-0 items-center border-t border-line bg-surface px-2">
-      <div className="no-drag flex items-center">
-        <button
-          type="button"
-          data-testid="open-usage"
-          className={`flex h-6 items-center gap-1.5 rounded-md px-1.5 text-[11px] hover:bg-raised hover:text-ink active:scale-95 ${
-            showUsage ? 'bg-raised text-ink' : 'text-muted'
-          }`}
-          title={label}
-          aria-label={label}
-          aria-expanded={showUsage}
-          onClick={() => setShowUsage(!showUsage)}
-        >
-          <UsageIcon percent={percent} />
-          <span>Usage</span>
-        </button>
-      </div>
+    <footer className="drag flex h-statusbar shrink-0 items-center gap-4 border-t border-line bg-sidebar px-3 text-[11px] text-muted">
+      <span className="flex shrink-0 items-center gap-1.5" data-testid="agent-status">
+        <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-ok' : 'bg-danger'}`} />
+        {connected ? 'Connected' : 'Disconnected'}
+        {agent && <span className="text-faint">· {chatAgentLabel(agent)} agent</span>}
+      </span>
+      {indexLabel && (
+        <span className="flex shrink-0 items-center gap-1.5">
+          <Icon name="database" size={12} className="text-faint" />
+          {indexLabel}
+        </span>
+      )}
+      {project?.path && (
+        <span className="flex min-w-0 items-center gap-1.5" title={project.path}>
+          <Icon name="folder" size={12} className="shrink-0 text-faint" />
+          <span className="truncate font-mono">{project.path}</span>
+        </span>
+      )}
+      <div className="flex-1" />
+      <button
+        type="button"
+        data-testid="open-usage"
+        className={`no-drag flex h-5 shrink-0 items-center gap-2 rounded-[5px] px-1.5 hover:bg-hover hover:text-ink ${
+          showUsage ? 'bg-hover text-ink' : ''
+        }`}
+        title={usageText ? `Usage · ${usageText}` : 'Usage'}
+        aria-expanded={showUsage}
+        onClick={() => setShowUsage(!showUsage)}
+      >
+        Usage
+        <span className="h-1 w-16 overflow-hidden rounded-full bg-line-strong">
+          {percent != null && (
+            <span
+              className={`block h-full rounded-full ${percent >= 90 ? 'bg-danger' : 'bg-accent'}`}
+              style={{ width: `${percent}%` }}
+            />
+          )}
+        </span>
+        {usageText && <span className="tabular-nums">{usageText}</span>}
+      </button>
+      <span className="flex shrink-0 items-center gap-1 text-faint">
+        <Icon name="command" size={12} />K Search
+      </span>
     </footer>
   )
 }

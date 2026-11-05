@@ -1,17 +1,25 @@
 import { useEffect, useState } from 'react'
 import {
+  CLAUDE_MODELS,
+  type ClaudeUsage,
   DEFAULT_MODEL,
+  GROK_REASONING_EFFORTS,
   REASONING_EFFORTS,
+  type ClaudeOptions,
   reasoningEffortLabel,
   type ReasoningEffort,
   DEFAULT_VOICE,
   formatGrokCli,
+  normalizeChatAgent,
   type UsageSnapshot,
-  type VoiceModelStatus
+  type VoiceLanguage,
+  type VoiceModelStatus,
+  VOICE_LANGUAGES
 } from '../../../shared/types'
 import { useVoice } from '../voice/VoiceProvider'
 import { listMicInputs, listVoices, primeTtsOutput, speakText, type MicInput } from '../voice/engine'
 import { useWorkspace } from '../workspace'
+import { type McpServers, parseMcpServers } from '../../../shared/mcp'
 import { ThemeEditor } from './ThemeEditor'
 
 export function NewProjectModal(): React.JSX.Element | null {
@@ -132,7 +140,7 @@ function MicAccessRow(): React.JSX.Element {
 
   async function refresh(): Promise<void> {
     try {
-      setStatus(await window.grokcode.getMicAccess())
+      setStatus(await window.workbench.getMicAccess())
     } catch {
       // preload from an older session
     }
@@ -149,7 +157,7 @@ function MicAccessRow(): React.JSX.Element {
     setBusy(true)
     setNote(null)
     try {
-      await window.grokcode.ensureMic().catch(() => false)
+      await window.workbench.ensureMic().catch(() => false)
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       stream.getTracks().forEach((track) => track.stop())
       await refresh()
@@ -160,9 +168,9 @@ function MicAccessRow(): React.JSX.Element {
       setNote(message)
       await refresh()
       try {
-        await window.grokcode.openMicSettings()
+        await window.workbench.openMicSettings()
       } catch {
-        setNote(`${message} Enable Grok Build Workbench in System Settings → Privacy & Security → Microphone.`)
+        setNote(`${message} Enable Datapad Workbench in System Settings → Privacy & Security → Microphone.`)
       }
     } finally {
       setBusy(false)
@@ -177,7 +185,7 @@ function MicAccessRow(): React.JSX.Element {
           {ok
             ? 'Allowed. Pick a device below.'
             : blocked
-              ? 'Blocked in macOS. Enable Grok Build Workbench under Privacy & Security → Microphone.'
+              ? 'Blocked in macOS. Enable Datapad Workbench under Privacy & Security → Microphone.'
               : 'macOS only prompts from a click. Use the button — check behind this window if nothing appears.'}
         </p>
         {note && <p className="mt-1 text-[11px] leading-4 text-ink">{note}</p>}
@@ -188,7 +196,7 @@ function MicAccessRow(): React.JSX.Element {
         className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-[11px] hover:bg-raised disabled:opacity-60"
         onClick={() => {
           if (blocked) {
-            void window.grokcode.openMicSettings()
+            void window.workbench.openMicSettings()
             return
           }
           void requestAccess()
@@ -217,7 +225,7 @@ function MicPicker({
   useEffect(() => {
     let cancelled = false
     async function load(): Promise<void> {
-      await window.grokcode.ensureMic()
+      await window.workbench.ensureMic()
       const next = await listMicInputs()
       if (!cancelled) setMics(next)
     }
@@ -270,11 +278,52 @@ function modelOptions(ids: string[], current: string): string[] {
   return list
 }
 
+const languageNames = new Intl.DisplayNames(['en'], { type: 'language' })
+/** The languages the speech model reads, by English name. `na` is the auto fallback, not a choice. */
+const SPEECH_LANGUAGES = VOICE_LANGUAGES.filter((code) => code !== 'na')
+  .map((code) => ({ code, name: languageNames.of(code) ?? code }))
+  .sort((a, b) => a.name.localeCompare(b.name))
+
+/** What the Test button says, in the chosen language. Auto-detect uses English. */
+const VOICE_TEST: Partial<Record<VoiceLanguage, string>> = {
+  en: 'Voice is on. This is how replies will sound.',
+  ko: '음성이 켜졌습니다. 답변은 이렇게 들립니다.',
+  ja: '音声がオンになりました。返答はこのように聞こえます。',
+  ar: 'الصوت مفعّل. هكذا ستبدو الردود.',
+  bg: 'Гласът е включен. Така ще звучат отговорите.',
+  cs: 'Hlas je zapnutý. Takto budou znít odpovědi.',
+  da: 'Stemmen er slået til. Sådan kommer svarene til at lyde.',
+  de: 'Die Stimme ist an. So klingen die Antworten.',
+  el: 'Η φωνή είναι ενεργή. Έτσι θα ακούγονται οι απαντήσεις.',
+  es: 'La voz está activada. Así sonarán las respuestas.',
+  et: 'Hääl on sees. Nii kõlavad vastused.',
+  fi: 'Ääni on päällä. Tältä vastaukset kuulostavat.',
+  fr: 'La voix est activée. Voici comment les réponses sonneront.',
+  hi: 'आवाज़ चालू है। जवाब ऐसे सुनाई देंगे।',
+  hr: 'Glas je uključen. Ovako će zvučati odgovori.',
+  hu: 'A hang be van kapcsolva. Így fognak szólni a válaszok.',
+  id: 'Suara aktif. Beginilah balasan akan terdengar.',
+  it: 'La voce è attiva. Ecco come suoneranno le risposte.',
+  lt: 'Balsas įjungtas. Taip skambės atsakymai.',
+  lv: 'Balss ir ieslēgta. Šādi skanēs atbildes.',
+  nl: 'De stem staat aan. Zo klinken de antwoorden.',
+  pl: 'Głos jest włączony. Tak będą brzmiały odpowiedzi.',
+  pt: 'A voz está ativada. É assim que as respostas vão soar.',
+  ro: 'Vocea este pornită. Așa vor suna răspunsurile.',
+  ru: 'Голос включён. Так будут звучать ответы.',
+  sk: 'Hlas je zapnutý. Takto budú znieť odpovede.',
+  sl: 'Glas je vklopljen. Tako bodo zveneli odgovori.',
+  sv: 'Rösten är på. Så här kommer svaren att låta.',
+  tr: 'Ses açık. Yanıtlar böyle duyulacak.',
+  uk: 'Голос увімкнено. Так звучатимуть відповіді.',
+  vi: 'Giọng nói đã bật. Câu trả lời sẽ nghe như thế này.'
+}
+
 function voiceModelHint(voiceModel: VoiceModelStatus): string {
   if (voiceModel.downloading) return `Downloading speech model… ${voiceModel.file ?? ''}`
   if (voiceModel.ready) return 'Local speech model ready'
   if (voiceModel.error) return voiceModel.error
-  return 'Will download local Whisper + TTS (~400MB) once, then stay offline'
+  return 'Will download local Whisper + TTS (~500MB) once, then stay offline'
 }
 
 function Toggle({
@@ -306,10 +355,12 @@ function Toggle({
 export function SettingsModal(): React.JSX.Element | null {
   const { showSettings, setShowSettings, settings, saveSettings } = useWorkspace()
   const { model: voiceModel } = useVoice()
-  const [tab, setTab] = useState<'general' | 'appearance'>('general')
+  const [tab, setTab] = useState<'general' | 'mcp' | 'appearance'>('general')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState(settings?.model || DEFAULT_MODEL)
   const [effort, setEffort] = useState<ReasoningEffort | ''>(settings?.effort ?? '')
+  const [claudeModel, setClaudeModel] = useState(settings?.claudeModel ?? '')
+  const [claudeOptions, setClaudeOptions] = useState<ClaudeOptions | null>(null)
   const [saved, setSaved] = useState(false)
   const [testError, setTestError] = useState<string | null>(null)
   const voices = listVoices()
@@ -320,18 +371,38 @@ export function SettingsModal(): React.JSX.Element | null {
   // a restart shows the grok-4.6 fallback even after Save wrote grok-4.7.
   useEffect(() => {
     if (!showSettings) return
+    if (showSettings === 'mcp') setTab('mcp')
     setModel(settings?.model || DEFAULT_MODEL)
     setEffort(settings?.effort ?? '')
-  }, [showSettings, settings?.model, settings?.effort])
+    setClaudeModel(settings?.claudeModel ?? '')
+  }, [showSettings, settings?.model, settings?.effort, settings?.claudeModel])
+
+  // Claude Code names the models this plan offers, and each model has its own effort levels.
+  const askClaude = showSettings && settings?.defaultAgent === 'claude'
+  useEffect(() => {
+    if (!askClaude) return
+    let cancelled = false
+    void window.workbench.getClaudeOptions(claudeModel).then((options) => {
+      if (!cancelled && options) setClaudeOptions(options)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [askClaude, claudeModel])
 
   if (!showSettings || !settings) return null
+  // The model row follows the agent new chats run on. The xAI key only serves Grok.
+  const onClaude = settings.defaultAgent === 'claude'
+  const claudeModels: ClaudeOptions['models'] =
+    claudeOptions?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label }))
+  const efforts: readonly ReasoningEffort[] = onClaude ? (claudeOptions?.efforts ?? REASONING_EFFORTS) : GROK_REASONING_EFFORTS
 
   async function submit(): Promise<void> {
-    await saveSettings({
-      apiKey: apiKey.trim() ? apiKey.trim() : undefined,
-      model,
-      effort: effort || null
-    })
+    await saveSettings(
+      onClaude
+        ? { claudeModel, effort: effort || null }
+        : { apiKey: apiKey.trim() ? apiKey.trim() : undefined, model, effort: effort || null }
+    )
     setApiKey('')
     setSaved(true)
   }
@@ -340,7 +411,11 @@ export function SettingsModal(): React.JSX.Element | null {
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
       <div
         className={`flex flex-col rounded-2xl border border-line bg-surface p-5 shadow-2xl ${
-          tab === 'appearance' ? 'h-[86vh] w-[880px]' : 'max-h-[86vh] w-[460px] overflow-y-auto'
+          tab === 'appearance'
+            ? 'h-[86vh] w-[880px]'
+            : tab === 'mcp'
+              ? 'max-h-[86vh] w-[560px] overflow-y-auto'
+              : 'max-h-[86vh] w-[460px] overflow-y-auto'
         }`}
       >
         <div className="flex items-start justify-between gap-3">
@@ -355,6 +430,15 @@ export function SettingsModal(): React.JSX.Element | null {
               onClick={() => setTab('general')}
             >
               General
+            </button>
+            <button
+              data-testid="settings-mcp"
+              className={`rounded px-2.5 py-1 text-[11px] ${
+                tab === 'mcp' ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+              }`}
+              onClick={() => setTab('mcp')}
+            >
+              MCP
             </button>
             <button
               data-testid="settings-appearance"
@@ -373,7 +457,31 @@ export function SettingsModal(): React.JSX.Element | null {
             <p className="mt-1 text-[12.5px] leading-5 text-muted">
               Chats run through Grok Build on your machine. Sign in once with `grok login`
               (SuperGrok). Existing Grok Build sessions for a folder show up in that project.
+              With a Claude subscription, `claude auth login` lets chats run on Claude Code too.
             </p>
+            <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-2 text-[12px] text-muted">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[12px] font-medium text-ink">Agent for new chats</div>
+                <select
+                  data-testid="settings-default-agent"
+                  value={settings.defaultAgent}
+                  onChange={(event) =>
+                    void saveSettings({ defaultAgent: normalizeChatAgent(event.target.value) })
+                  }
+                  className="rounded-md border border-line bg-canvas px-2 py-1 text-[12px] text-ink outline-none focus:border-accent/60"
+                >
+                  <option value="grok">Grok Build</option>
+                  <option value="claude">Claude Code</option>
+                </select>
+              </div>
+              <div data-testid="settings-claude" className="mt-1.5 leading-5">
+                {settings.claude.signedIn
+                  ? `Claude is signed in${
+                      settings.claude.subscription ? ` (${settings.claude.subscription})` : ''
+                    }${settings.claude.email ? ` as ${settings.claude.email}` : ''}.`
+                  : 'Claude is not signed in. Run claude auth login in a terminal to use your subscription.'}
+              </div>
+            </div>
             <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-2 text-[12px] text-muted">
               {settings.grokBuildSignedIn
                 ? 'Grok Build is signed in. New chats continue as real Grok sessions.'
@@ -394,35 +502,62 @@ export function SettingsModal(): React.JSX.Element | null {
                 </p>
               )}
             </div>
-            <label className="mt-4 block text-[12px] text-muted">API key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(event) => {
-                setApiKey(event.target.value)
-                setSaved(false)
-              }}
-              className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
-              placeholder="xai-…"
-            />
-            <div className="mt-4 grid grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)] gap-3">
-              <div className="min-w-0">
-                <label className="block text-[12px] text-muted">Model</label>
-                <select
-                  data-testid="settings-model"
-                  value={model}
+            {onClaude ? null : (
+              <>
+                <label className="mt-4 block text-[12px] text-muted">xAI API key (fallback)</label>
+                <input
+                  type="password"
+                  value={apiKey}
                   onChange={(event) => {
-                    setModel(event.target.value)
+                    setApiKey(event.target.value)
                     setSaved(false)
                   }}
                   className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
-                >
-                  {modelOptions(settings.grokCli.models, model).map((id) => (
-                    <option key={id} value={id}>
-                      {id}
-                    </option>
-                  ))}
-                </select>
+                  placeholder="xai-…"
+                />
+              </>
+            )}
+            <div className="mt-4 grid grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)] gap-3">
+              <div className="min-w-0">
+                <label className="block text-[12px] text-muted">
+                  {onClaude ? 'Claude model' : 'Grok model'}
+                </label>
+                {onClaude ? (
+                  <select
+                    data-testid="settings-claude-model"
+                    value={claudeModel}
+                    onChange={(event) => {
+                      setClaudeModel(event.target.value)
+                      setSaved(false)
+                    }}
+                    className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
+                  >
+                    {claudeModels.some((option) => option.value === claudeModel) ? null : (
+                      <option value={claudeModel}>{claudeModel}</option>
+                    )}
+                    {claudeModels.map((option) => (
+                      <option key={option.value} value={option.value} title={option.description}>
+                        {option.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    data-testid="settings-model"
+                    value={model}
+                    onChange={(event) => {
+                      setModel(event.target.value)
+                      setSaved(false)
+                    }}
+                    className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
+                  >
+                    {modelOptions(settings.grokCli.models, model).map((id) => (
+                      <option key={id} value={id}>
+                        {id}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
               <div className="min-w-0">
                 <label className="block text-[12px] text-muted">Effort</label>
@@ -436,7 +571,10 @@ export function SettingsModal(): React.JSX.Element | null {
                   className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
                 >
                   <option value="">Default</option>
-                  {REASONING_EFFORTS.map((id) => (
+                  {effort && !efforts.includes(effort) ? (
+                    <option value={effort}>{reasoningEffortLabel(effort)}</option>
+                  ) : null}
+                  {efforts.map((id) => (
                     <option key={id} value={id}>
                       {reasoningEffortLabel(id)}
                     </option>
@@ -449,7 +587,7 @@ export function SettingsModal(): React.JSX.Element | null {
                 <div>
                   <div className="text-[12px] font-medium text-ink">Voice</div>
                   <p className="mt-1 text-[12px] leading-5 text-muted">
-                    Talk to Grok on this machine. Listening uses a local Whisper model. Replies use
+                    Talk to the agent on this machine. Listening uses a local Whisper model. Replies use
                     your system voice. Audio never leaves the computer.
                   </p>
                 </div>
@@ -460,8 +598,8 @@ export function SettingsModal(): React.JSX.Element | null {
                     const next = !voice.enabled
                     void saveSettings({ voice: { enabled: next } })
                     if (next) {
-                      void window.grokcode.ensureMic()
-                      void window.grokcode.ensureVoiceModel()
+                      void window.workbench.ensureMic()
+                      void window.workbench.ensureVoiceModel()
                     }
                   }}
                 />
@@ -533,6 +671,21 @@ export function SettingsModal(): React.JSX.Element | null {
                     </select>
                   </label>
                   <label className="block text-[12px] text-muted">
+                    Language
+                    <select
+                      className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-[12px] text-ink outline-none"
+                      value={voice.language}
+                      onChange={(event) => void saveSettings({ voice: { language: event.target.value } })}
+                    >
+                      <option value="auto">Auto-detect</option>
+                      {SPEECH_LANGUAGES.map((item) => (
+                        <option key={item.code} value={item.code}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-[12px] text-muted">
                     Speed
                     <input
                       type="range"
@@ -560,8 +713,10 @@ export function SettingsModal(): React.JSX.Element | null {
                         setTestError(null)
                         primeTtsOutput()
                         void speakText(
-                          'Voice is on. Grok Build Workbench will listen and reply on this machine.',
-                          voice
+                          VOICE_TEST[voice.language as VoiceLanguage] ?? VOICE_TEST.en ?? '',
+                          voice,
+                          // The same line every time, so skip the check that drops lines already spoken.
+                          { repeat: true }
                         ).catch((err) => {
                           setTestError(err instanceof Error ? err.message : 'Could not play a test clip')
                         })
@@ -576,14 +731,14 @@ export function SettingsModal(): React.JSX.Element | null {
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="text-[12px] font-medium text-ink">Support</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">
-                Grok Build Workbench is free. If it helps your work, you can buy me a coffee.
+                Datapad Workbench is free. If it helps your work, you can buy me a coffee.
               </p>
               <button
                 type="button"
                 data-testid="settings-support"
                 className="mt-3 inline-flex items-center gap-2 rounded-lg border border-line bg-raised px-3 py-2 text-[12px] font-medium text-ink hover:bg-surface active:translate-y-px"
                 onClick={() => {
-                  void window.grokcode.openExternal(SUPPORT_URL)
+                  void window.workbench.openExternal(SUPPORT_URL)
                 }}
               >
                 <CoffeeIcon />
@@ -605,6 +760,8 @@ export function SettingsModal(): React.JSX.Element | null {
               </button>
             </div>
           </>
+        ) : tab === 'mcp' ? (
+          <McpSettings onClose={() => setShowSettings(false)} />
         ) : (
           <>
             <p className="mt-1 shrink-0 text-[12.5px] leading-5 text-muted">
@@ -626,6 +783,108 @@ export function SettingsModal(): React.JSX.Element | null {
         )}
       </div>
     </div>
+  )
+}
+
+const MCP_EXAMPLE = `{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "…" }
+    },
+    "linear": { "url": "https://mcp.linear.app/mcp" }
+  }
+}`
+
+function mcpText(servers: McpServers): string {
+  return Object.keys(servers).length ? JSON.stringify({ mcpServers: servers }, null, 2) : ''
+}
+
+function McpSettings({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const [text, setText] = useState('')
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void window.workbench.getMcpServers().then((servers) => setText(mcpText(servers)))
+  }, [])
+
+  let servers: McpServers = {}
+  let parseError: string | null = null
+  try {
+    servers = parseMcpServers(text)
+  } catch (error) {
+    parseError = error instanceof Error ? error.message : String(error)
+  }
+
+  async function save(): Promise<void> {
+    const result = await window.workbench.setMcpServers(text)
+    if ('error' in result) {
+      setSaveError(result.error)
+      return
+    }
+    setText(mcpText(result.servers))
+    setSaveError(null)
+    setSaved(true)
+  }
+
+  const error = parseError ?? saveError
+  return (
+    <>
+      <p className="mt-1 text-[12.5px] leading-5 text-muted">
+        Every Grok Build and Claude Code chat gets these servers, next to the built-in browser. Paste
+        the <code>mcpServers</code> JSON from a server&apos;s docs. Add <code>&quot;disabled&quot;: true</code>{' '}
+        to keep one without loading it. New chats pick up a change right away; chats already running
+        get it after a restart. Servers in each agent&apos;s own config still load as well.
+      </p>
+      <textarea
+        data-testid="settings-mcp-json"
+        value={text}
+        onChange={(event) => {
+          setText(event.target.value)
+          setSaved(false)
+          setSaveError(null)
+        }}
+        placeholder={MCP_EXAMPLE}
+        spellCheck={false}
+        rows={14}
+        className="mt-4 w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[11.5px] leading-5 text-ink outline-none placeholder:text-muted/60 focus:border-accent/60"
+      />
+      {error ? (
+        <p className="mt-2 text-[11px] leading-4 text-red-400">{error}</p>
+      ) : (
+        <ul className="mt-2 space-y-1 text-[12px]">
+          <li className="flex items-baseline gap-2">
+            <span className="font-medium text-ink">browser</span>
+            <span className="text-[11px] text-muted">built in</span>
+          </li>
+          {Object.entries(servers).map(([name, entry]) => (
+            <li key={name} className="flex min-w-0 items-baseline gap-2">
+              <span className={`font-medium ${entry.disabled ? 'text-muted line-through' : 'text-ink'}`}>
+                {name}
+              </span>
+              <span className="truncate font-mono text-[11px] text-muted">
+                {'url' in entry ? `${entry.type} ${entry.url}` : [entry.command, ...(entry.args ?? [])].join(' ')}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-5 flex justify-end gap-2">
+        <button className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink" onClick={onClose}>
+          Close
+        </button>
+        <button
+          data-testid="settings-mcp-save"
+          disabled={!!parseError}
+          className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-50"
+          onClick={() => void save()}
+        >
+          {saved ? 'Saved' : 'Save'}
+        </button>
+      </div>
+    </>
   )
 }
 
@@ -654,18 +913,78 @@ function periodLabel(period: UsageSnapshot['period']): string {
   return 'Usage limit'
 }
 
+const CLAUDE_USAGE_URL = 'https://claude.ai/settings/usage'
+
+function ClaudeUsageSection({ heading }: { heading: boolean }): React.JSX.Element {
+  const [usage, setUsage] = useState<ClaudeUsage | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void window.workbench
+      .getClaudeUsage()
+      .then((next) => {
+        if (!cancelled) setUsage(next)
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load Claude usage')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return (
+    <div data-testid="usage-claude" className="mt-4">
+      {heading ? <div className="text-[12.5px] font-medium text-ink">Claude Code</div> : null}
+      <p className="mt-1 text-[12.5px] text-muted">
+        {usage?.plan ? `Claude ${usage.plan} plan` : 'Claude subscription limits'}
+      </p>
+      {error ? (
+        <p className="mt-3 text-[12.5px] text-ink">{error}</p>
+      ) : !usage ? (
+        <p className="mt-3 text-[12.5px] text-muted">Loading usage…</p>
+      ) : (
+        usage.limits.map((limit) => {
+          const bar = Math.min(100, Math.max(0, Math.round(limit.usedPercent)))
+          return (
+            <div key={limit.label} className="mt-3">
+              <div className="flex items-baseline justify-between gap-3">
+                <div className="text-[12px] text-muted">{limit.label}</div>
+                <div className="text-[13px] font-medium tabular-nums text-ink">{bar}% used</div>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-line">
+                <div
+                  className={`h-full rounded-full ${bar >= 90 ? 'bg-red-400' : 'bg-accent'}`}
+                  style={{ width: `${bar}%` }}
+                />
+              </div>
+              {limit.resets ? (
+                <div className="mt-1.5 text-[12px] text-muted">Resets {limit.resets}</div>
+              ) : null}
+            </div>
+          )
+        })
+      )}
+    </div>
+  )
+}
+
 export function UsageModal(): React.JSX.Element | null {
-  const { showUsage, setShowUsage } = useWorkspace()
+  const { showUsage, setShowUsage, settings } = useWorkspace()
   const [usage, setUsage] = useState<UsageSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const claudeOn = settings?.claude.signedIn === true
+  const grokOn = !claudeOn || settings?.grokBuildSignedIn === true
+  const claudeFirst = claudeOn && (settings?.defaultAgent === 'claude' || !grokOn)
 
   useEffect(() => {
-    if (!showUsage) return
+    if (!showUsage || !grokOn) return
     let cancelled = false
     setLoading(true)
     setError(null)
-    void window.grokcode
+    void window.workbench
       .getUsage()
       .then((next) => {
         if (cancelled) return
@@ -682,7 +1001,7 @@ export function UsageModal(): React.JSX.Element | null {
     return () => {
       cancelled = true
     }
-  }, [showUsage])
+  }, [showUsage, grokOn])
 
   useEffect(() => {
     if (!showUsage) return
@@ -703,49 +1022,58 @@ export function UsageModal(): React.JSX.Element | null {
   const showCredits = (usage?.prepaidBalance ?? 0) > 0
   const showOnDemand = (usage?.onDemandCap ?? 0) > 0
 
+  const grokSection = grokOn ? (
+    <div data-testid="usage-grok" className="mt-4">
+      {claudeOn ? <div className="text-[12.5px] font-medium text-ink">Grok Build</div> : null}
+      <p className="mt-1 text-[12.5px] text-muted">
+        {usage?.tier ?? (loading ? 'Loading subscription limits' : 'Grok Build allowance')}
+      </p>
+
+      {loading ? (
+        <p className="mt-4 text-[12.5px] text-muted">Loading usage…</p>
+      ) : error ? (
+        <p className="mt-4 text-[12.5px] text-ink">{error}</p>
+      ) : !usage || usage.usedPercent === null ? (
+        <p className="mt-4 text-[12.5px] text-ink">Couldn&apos;t load usage.</p>
+      ) : (
+        <div className="mt-4">
+          <div className="flex items-baseline justify-between gap-3">
+            <div className="text-[12px] text-muted">{periodLabel(usage.period)}</div>
+            <div className="text-[13px] font-medium tabular-nums text-ink">{bar}% used</div>
+          </div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-line">
+            <div
+              className={`h-full rounded-full ${hot ? 'bg-red-400' : 'bg-accent'}`}
+              style={{ width: `${bar}%` }}
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
+            {left !== null && <span>{left}% left</span>}
+            {reset && <span>Next reset: {reset}</span>}
+          </div>
+          {showCredits && (
+            <div className="mt-3 text-[12px] text-ink">
+              Credits: {money(usage.prepaidBalance ?? 0)}
+            </div>
+          )}
+          {showOnDemand && (
+            <div className="mt-1 text-[12px] text-ink">
+              Pay-as-you-go: {money(usage.onDemandUsed ?? 0)} used of {money(usage.onDemandCap ?? 0)}{' '}
+              limit
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  ) : null
+  const claudeSection = claudeOn ? <ClaudeUsageSection heading={grokOn} /> : null
+
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
-      <div className="w-[420px] rounded-2xl border border-line bg-surface p-5 shadow-2xl">
+      <div className="max-h-[85vh] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface p-5 shadow-2xl">
         <div className="text-[15px] font-semibold tracking-tight">Usage</div>
-        <p className="mt-1 text-[12.5px] text-muted">
-          {usage?.tier ?? (loading ? 'Loading subscription limits' : 'Grok Build allowance')}
-        </p>
-
-        {loading ? (
-          <p className="mt-4 text-[12.5px] text-muted">Loading usage…</p>
-        ) : error ? (
-          <p className="mt-4 text-[12.5px] text-ink">{error}</p>
-        ) : !usage || usage.usedPercent === null ? (
-          <p className="mt-4 text-[12.5px] text-ink">Couldn&apos;t load usage.</p>
-        ) : (
-          <div className="mt-4">
-            <div className="flex items-baseline justify-between gap-3">
-              <div className="text-[12px] text-muted">{periodLabel(usage.period)}</div>
-              <div className="text-[13px] font-medium tabular-nums text-ink">{bar}% used</div>
-            </div>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-line">
-              <div
-                className={`h-full rounded-full ${hot ? 'bg-red-400' : 'bg-accent'}`}
-                style={{ width: `${bar}%` }}
-              />
-            </div>
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-muted">
-              {left !== null && <span>{left}% left</span>}
-              {reset && <span>Next reset: {reset}</span>}
-            </div>
-            {showCredits && (
-              <div className="mt-3 text-[12px] text-ink">
-                Credits: {money(usage.prepaidBalance ?? 0)}
-              </div>
-            )}
-            {showOnDemand && (
-              <div className="mt-1 text-[12px] text-ink">
-                Pay-as-you-go: {money(usage.onDemandUsed ?? 0)} used of {money(usage.onDemandCap ?? 0)}{' '}
-                limit
-              </div>
-            )}
-          </div>
-        )}
+        {claudeFirst ? claudeSection : grokSection}
+        {claudeFirst ? grokSection : claudeSection}
 
         <div className="mt-5 flex justify-end gap-2">
           <button
@@ -756,7 +1084,7 @@ export function UsageModal(): React.JSX.Element | null {
           </button>
           <button
             className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
-            onClick={() => void window.grokcode.openExternal(USAGE_URL)}
+            onClick={() => void window.workbench.openExternal(claudeFirst ? CLAUDE_USAGE_URL : USAGE_URL)}
           >
             Manage billing
           </button>

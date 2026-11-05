@@ -1,6 +1,6 @@
 ---
 tags:
-  - grok-build-workbench
+  - datapad-workbench
   - generated
   - area
 workbench_generated: true
@@ -8,7 +8,7 @@ workbench_generated: true
 
 # themes
 
-> This note is maintained by Grok Build Workbench. Add your own writing in `notes/`.
+> This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
 Top-level area `themes/`.
 
@@ -22,6 +22,7 @@ Top-level area `themes/`.
 
 - [[Architecture]]
 - [[Overview]]
+- [[design]]
 - [[docs]]
 - [[resources]]
 - [[scripts]]

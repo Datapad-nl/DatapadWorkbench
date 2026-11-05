@@ -1,7 +1,9 @@
 import { homedir } from 'os'
 import type {
+  AgentCommand,
   Attachment,
   Chat,
+  ChatAgent,
   ChatEvent,
   ChatPlan,
   FileMention,
@@ -10,10 +12,11 @@ import type {
   PlanVerdict,
   Project
 } from '../shared/types'
-import { normalizePermissionMode } from '../shared/types'
+import { chatAgentLabel, normalizeChatAgent, normalizePermissionMode } from '../shared/types'
 import {
-  abortMainAgent,
+  abortAgent,
   acpModeIdFor,
+  agentForSession,
   bindExitPlanSession,
   cancelSession,
   contentText,
@@ -27,11 +30,14 @@ import {
   promptIsolated,
   promptSession,
   queueExitPlanVerdict,
+  grokCommands,
   resolveExitPlan,
+  sessionCommands,
   setAcpSessionMode,
   type SessionUpdate
 } from './acp'
 import { emitGoal, emitNotice, finishTurn, startTurn } from './activity'
+import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
 import { id, now, titleFromPrompt } from './ids'
 import {
@@ -225,6 +231,10 @@ onExitPlanPrompt((input) => {
 
 onSessionUpdate((event) => {
   const chatId = sessionChats.get(event.sessionId)
+  if (event.update.sessionUpdate === 'available_commands_update') {
+    if (chatId) emitLive({ type: 'commands', chatId, commands: sessionCommands(event.sessionId) })
+    return
+  }
   if (event.update.sessionUpdate === 'current_mode_update') {
     const modeId = event.update.currentModeId || event.update.modeId || ''
     if (chatId && /plan|architect/i.test(modeId)) {
@@ -273,6 +283,13 @@ onSessionUpdate((event) => {
 
 const deltaListeners = new Map<string, (text: string) => void>()
 
+/** The slash commands the chat's agent announced for its current session. */
+export async function chatCommands(chatId: string): Promise<AgentCommand[]> {
+  const chat = await getChat(chatId)
+  if (normalizeChatAgent(chat.agent) === 'grok') return grokCommands(chat.grokSessionId ?? null)
+  return chat.grokSessionId ? sessionCommands(chat.grokSessionId) : []
+}
+
 export function isStreaming(chatId: string): boolean {
   return inflight.has(chatId)
 }
@@ -299,7 +316,7 @@ export function stopStream(chatId: string): boolean {
   cancelSession(current.sessionId)
   const gen = current.gen
   setTimeout(() => {
-    if (inflight.get(chatId)?.gen === gen) abortMainAgent()
+    if (inflight.get(chatId)?.gen === gen) abortAgent(agentForSession(current.sessionId))
   }, 800)
   return true
 }
@@ -314,11 +331,17 @@ function promptForMentions(text: string, mentions?: FileMention[]): string {
     .map((item) => `- ${item.path}${item.kind === 'folder' ? '/' : ''}`)
     .join('\n')
   const block = `The user referenced these project paths. Read them before answering.\n${list}`
+  // A slash command only runs when it starts the prompt.
+  if (isSlashCommand(text)) return `${text}\n\n${block}`
   return text.trim() ? `${block}\n\n${text}` : block
 }
 
+function isSlashCommand(text: string): boolean {
+  return /^\/\S/.test(text.trimStart())
+}
+
 function promptForMode(mode: PermissionMode, text: string): string {
-  if (mode !== 'plan') return text
+  if (mode !== 'plan' || isSlashCommand(text)) return text
   if (!text.trim()) return PLAN_MODE_INSTRUCTION
   return `${PLAN_MODE_INSTRUCTION}\n\n${text}`
 }
@@ -455,14 +478,18 @@ async function resolveSession(chat: Chat, project: Project | undefined): Promise
     bindPermissionSession(sessionId, chat.id, normalizePermissionMode(chat.mode))
     bindExitPlanSession(sessionId, chat.id)
     try {
-      await loadSession(sessionId, cwd, await projectSessionRules(project?.id))
+      await loadSession(sessionId, cwd, await projectSessionRules(project?.id), normalizeChatAgent(chat.agent))
       return { chat, sessionId }
     } catch {
       // Session is gone in this agent process. Prompting the dead id returns
       // an empty turn, so open a replacement session instead.
     }
   }
-  const sessionId = await newSession(cwd, await projectSessionRules(project?.id))
+  const sessionId = await newSession(
+    cwd,
+    await projectSessionRules(project?.id),
+    normalizeChatAgent(chat.agent)
+  )
   chat.grokSessionId = sessionId
   const saved = await saveChat(chat)
   sessionChats.set(sessionId, saved.id)
@@ -500,6 +527,18 @@ export async function appendUserMessage(
   return saveChat(chat)
 }
 
+/** Null when the chat's agent can run, otherwise what the user has to do. */
+async function agentSignInError(agent: ChatAgent): Promise<string | null> {
+  if (agent === 'claude') {
+    return (await getClaudeCliInfo()).signedIn
+      ? null
+      : 'Run `claude auth login` so Claude Code can pick up this chat.'
+  }
+  return grokBuildSignedIn() || (await getApiKey())
+    ? null
+    : 'Run `grok login` so Grok Build can pick up this chat.'
+}
+
 export async function streamAssistant(
   chat: Chat,
   project: Project | undefined,
@@ -509,11 +548,11 @@ export async function streamAssistant(
   if (inflight.has(chat.id)) {
     throw new Error('This chat is already generating')
   }
-  if (!grokBuildSignedIn() && !(await getApiKey())) {
-    throw new Error('Run `grok login` so Grok Build can pick up this chat.')
-  }
+  const agent = normalizeChatAgent(chat.agent)
+  const signInError = await agentSignInError(agent)
+  if (signInError) throw new Error(signInError)
 
-  await ensureAgent()
+  await ensureAgent(agent)
   const followText = followUp?.text.trim() ?? ''
   const lastUser = [...chat.messages]
     .reverse()
@@ -612,7 +651,10 @@ export async function streamAssistant(
       followUp ? (followUp.attachments ?? []) : (lastUser!.attachments ?? [])
     )
     if (!isCurrentTurn(chat.id, gen)) return null
-    const assembled = drafts.get(resolved.sessionId)?.trim() || '(empty response)'
+    // Commands like /compact finish without writing anything.
+    const assembled =
+      drafts.get(resolved.sessionId)?.trim() ||
+      (isSlashCommand(userText) ? `Ran ${userText.trim().split(/\s/)[0]}` : '(empty response)')
     const saved = await saveAssistant(assembled)
     finishTurn(chat.id, 'done')
     return saved
@@ -743,14 +785,16 @@ function asideContext(chat: Chat, skipMessageId?: string): string {
     (message) => message.id !== skipMessageId && message.content.trim()
   )
   for (const message of recent.slice(-8)) {
-    const who = message.role === 'user' ? 'User' : 'Grok'
+    const who = message.role === 'user' ? 'User' : chatAgentLabel(normalizeChatAgent(chat.agent))
     const tag =
       message.kind === 'btw' ? ' (aside)' : message.kind === 'steer' ? ' (steer)' : ''
     lines.push(`${who}${tag}: ${clipText(message.content, ASIDE_MESSAGE_MAX)}`)
   }
   const liveSession = inflight.get(chat.id)?.sessionId ?? chat.grokSessionId
   const live = liveSession ? drafts.get(liveSession)?.trim() : ''
-  if (live) lines.push(`Grok (in progress): ${clipText(live, 3_000)}`)
+  if (live) {
+    lines.push(`${chatAgentLabel(normalizeChatAgent(chat.agent))} (in progress): ${clipText(live, 3_000)}`)
+  }
   else if (!inflight.has(chat.id)) lines.push('The main task is not currently running.')
   return clipText(lines.join('\n'), ASIDE_CONTEXT_MAX)
 }
@@ -873,10 +917,12 @@ async function runAside(
   attachments: Attachment[]
 ): Promise<void> {
   const chatId = started.id
-  if (!grokBuildSignedIn() && !(await getApiKey())) {
+  const agent = normalizeChatAgent(started.agent)
+  const signInError = await agentSignInError(agent)
+  if (signInError) {
     const failed = await mutateChat(chatId, (chat) => {
       const reply = chat.messages.find((message) => message.id === replyId)
-      if (reply) reply.content = 'Run `grok login` so Grok Build can pick up this chat.'
+      if (reply) reply.content = signInError
     })
     emitLive({ type: 'aside-done', chatId, chat: failed })
     return
@@ -903,7 +949,8 @@ async function runAside(
       asidePrompt(question, asideContext(latest, replyId)),
       attachments,
       emitAsideDelta(chatId, replyId),
-      abort.signal
+      abort.signal,
+      { agent }
     )
     const parsed = parseAsideReply(assembled)
     steer = parsed.steer

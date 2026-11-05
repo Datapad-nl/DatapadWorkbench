@@ -4,7 +4,7 @@ export const ANNOTATE_PICKER = `(() => {
   return new Promise((resolve) => {
     var done = false
     var box = document.createElement('div')
-    box.setAttribute('data-grokcode-annotate', '1')
+    box.setAttribute('data-workbench-annotate', '1')
     box.style.cssText = [
       'position:fixed',
       'pointer-events:none',
@@ -58,7 +58,7 @@ export const ANNOTATE_PICKER = `(() => {
 
     function targetFromEvent(event) {
       var el = document.elementFromPoint(event.clientX, event.clientY)
-      if (!el || el === box || el.getAttribute && el.getAttribute('data-grokcode-annotate')) return null
+      if (!el || el === box || el.getAttribute && el.getAttribute('data-workbench-annotate')) return null
       if (el === document.documentElement || el === document.body) return el
       return el
     }

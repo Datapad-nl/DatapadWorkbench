@@ -8,7 +8,7 @@ import { Readable } from 'stream'
 import type { VoiceModelStatus } from '../shared/types'
 import { mediaSchemePrivilege } from './media'
 
-const SCHEME = 'grokcode-model'
+const SCHEME = 'workbench-model'
 
 type ModelPack = { id: string; files: string[] }
 
@@ -29,27 +29,25 @@ const PACKS: ModelPack[] = [
     ]
   },
   {
-    id: 'onnx-community/Supertonic-TTS-ONNX',
+    // Supertone archived Supertonic in 2026. The archive keeps the weights.
+    id: 'supertone-oss-archive/supertonic-3',
     files: [
-      'config.json',
-      'tokenizer.json',
-      'tokenizer_config.json',
+      'onnx/tts.json',
+      'onnx/unicode_indexer.json',
+      'onnx/duration_predictor.onnx',
       'onnx/text_encoder.onnx',
-      'onnx/text_encoder.onnx_data',
-      'onnx/latent_denoiser.onnx',
-      'onnx/latent_denoiser.onnx_data',
-      'onnx/voice_decoder.onnx',
-      'onnx/voice_decoder.onnx_data',
-      'voices/F1.bin',
-      'voices/F2.bin',
-      'voices/F3.bin',
-      'voices/F4.bin',
-      'voices/F5.bin',
-      'voices/M1.bin',
-      'voices/M2.bin',
-      'voices/M3.bin',
-      'voices/M4.bin',
-      'voices/M5.bin'
+      'onnx/vector_estimator.onnx',
+      'onnx/vocoder.onnx',
+      'voice_styles/F1.json',
+      'voice_styles/F2.json',
+      'voice_styles/F3.json',
+      'voice_styles/F4.json',
+      'voice_styles/F5.json',
+      'voice_styles/M1.json',
+      'voice_styles/M2.json',
+      'voice_styles/M3.json',
+      'voice_styles/M4.json',
+      'voice_styles/M5.json'
     ]
   }
 ]
@@ -68,7 +66,7 @@ let status: VoiceModelStatus = {
 }
 
 function modelsRoot(): string {
-  return join(app.getPath('userData'), 'grokcode', 'models')
+  return join(app.getPath('userData'), 'workbench', 'models')
 }
 
 function packDir(id: string): string {

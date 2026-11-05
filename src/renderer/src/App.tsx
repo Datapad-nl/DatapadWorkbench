@@ -11,10 +11,10 @@ import { ThemeProvider } from './theme/ThemeProvider'
 import { VoiceProvider } from './voice/VoiceProvider'
 import { useWorkspace, WorkspaceProvider, type RightPaneId } from './workspace'
 
-const ACTIVITY_WIDTH_KEY = 'grokcode.activityWidth'
-const BROWSER_WIDTH_KEY = 'grokcode.browserWidth'
-const GIT_WIDTH_KEY = 'grokcode.gitWidth'
-const KNOWLEDGE_WIDTH_KEY = 'grokcode.knowledgeWidth'
+const ACTIVITY_WIDTH_KEY = 'workbench.activityWidth'
+const BROWSER_WIDTH_KEY = 'workbench.browserWidth'
+const GIT_WIDTH_KEY = 'workbench.gitWidth'
+const KNOWLEDGE_WIDTH_KEY = 'workbench.knowledgeWidth'
 const DEFAULT_ACTIVITY_WIDTH = 360
 const DEFAULT_BROWSER_WIDTH = 420
 const DEFAULT_GIT_WIDTH = 380
@@ -134,7 +134,9 @@ function Shell(): React.JSX.Element {
         </div>
         {showGit && (
           <div
-            className="no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 active:bg-accent/40"
+            className={`no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize after:absolute after:inset-y-0 after:left-0 after:w-px hover:after:bg-accent-line ${
+              dragging === 'git' ? 'after:bg-accent-line' : ''
+            }`}
             onPointerDown={(event) => startResize(event, 'git')}
           />
         )}
@@ -159,7 +161,9 @@ function Shell(): React.JSX.Element {
         </div>
         {showBrowser && (
           <div
-            className="no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 active:bg-accent/40"
+            className={`no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize after:absolute after:inset-y-0 after:left-0 after:w-px hover:after:bg-accent-line ${
+              dragging === 'browser' ? 'after:bg-accent-line' : ''
+            }`}
             onPointerDown={(event) => startResize(event, 'browser')}
           />
         )}
@@ -184,7 +188,9 @@ function Shell(): React.JSX.Element {
         </div>
         {showActivity && (
           <div
-            className="no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 active:bg-accent/40"
+            className={`no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize after:absolute after:inset-y-0 after:left-0 after:w-px hover:after:bg-accent-line ${
+              dragging === 'activity' ? 'after:bg-accent-line' : ''
+            }`}
             onPointerDown={(event) => startResize(event, 'activity')}
           />
         )}
@@ -209,7 +215,9 @@ function Shell(): React.JSX.Element {
         </div>
         {showKnowledge && (
           <div
-            className="no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 active:bg-accent/40"
+            className={`no-drag absolute top-0 left-0 z-10 h-full w-1.5 cursor-col-resize after:absolute after:inset-y-0 after:left-0 after:w-px hover:after:bg-accent-line ${
+              dragging === 'knowledge' ? 'after:bg-accent-line' : ''
+            }`}
             onPointerDown={(event) => startResize(event, 'knowledge')}
           />
         )}

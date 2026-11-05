@@ -35,5 +35,5 @@ export function isVideoSrc(src: string): boolean {
 }
 
 export function mediaUrl(chatId: string, src: string): string {
-  return `grokmedia://media/${encodeURIComponent(chatId)}?src=${encodeURIComponent(src)}`
+  return `workbench-media://media/${encodeURIComponent(chatId)}?src=${encodeURIComponent(src)}`
 }

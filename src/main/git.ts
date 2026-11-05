@@ -101,10 +101,10 @@ export async function addChatWorktree(
   if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
     throw new Error('Project is not a git repository')
   }
-  const branch = `grokcode/${shortChatId(chatId)}`
+  const branch = `workbench/${shortChatId(chatId)}`
   const dest = join(
     dirname(projectPath),
-    '.grokcode-worktrees',
+    '.workbench-worktrees',
     `${basename(projectPath)}-${shortChatId(chatId)}`
   )
   await mkdir(dirname(dest), { recursive: true })
@@ -120,11 +120,9 @@ export async function addChatWorktree(
 
 export async function removeChatWorktree(projectPath: string, worktreePath: string): Promise<void> {
   await killProcessesUnder(worktreePath)
-  const removed = await runGit(projectPath, ['worktree', 'remove', '--force', worktreePath])
-  if (removed.code === 0) return
-  await runGit(projectPath, ['worktree', 'prune'])
-  await rm(worktreePath, { recursive: true, force: true })
-  await runGit(projectPath, ['worktree', 'prune'])
+  // Without --force, git keeps a worktree that has uncommitted or untracked files.
+  const removed = await runGit(projectPath, ['worktree', 'remove', worktreePath])
+  if (removed.code !== 0) await runGit(projectPath, ['worktree', 'prune'])
 }
 
 const READ_RE =
@@ -196,7 +194,8 @@ function emptySnapshot(
     behind: 0,
     dirtyCount: 0,
     files: [],
-    graph: []
+    graph: [],
+    merge: null
   }
 }
 
@@ -377,18 +376,23 @@ async function readGraph(cwd: string, head: string | null): Promise<GitGraphNode
 async function resolveRepo(
   projectId: string,
   chatId?: string | null
-): Promise<{ id: string; path: string; chatId: string | null } | { snapshot: GitSnapshot }> {
+): Promise<
+  | { id: string; path: string; chatId: string | null; projectPath: string | null; worktreeBranch: string | null }
+  | { snapshot: GitSnapshot }
+> {
   const projects = await listProjects()
   const project = projects.find((item) => item.id === projectId)
   if (!project) return { snapshot: emptySnapshot(projectId, null, 'error', 'Project not found', null) }
   let cwd = project.path
   let resolvedChatId: string | null = null
+  let worktreeBranch: string | null = null
   if (chatId) {
     try {
       const chat = await getChat(chatId)
       if (chat.projectId === projectId) {
         cwd = chatWorkingDir(chat, project.path)
         resolvedChatId = chatId
+        if (chat.worktreePath) worktreeBranch = chat.worktreeBranch ?? null
       }
     } catch {
       cwd = project.path
@@ -399,7 +403,21 @@ async function resolveRepo(
   if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
     return { snapshot: emptySnapshot(projectId, cwd, 'not-a-repo', null, resolvedChatId) }
   }
-  return { id: project.id, path: cwd, chatId: resolvedChatId }
+  return { id: project.id, path: cwd, chatId: resolvedChatId, projectPath: project.path, worktreeBranch }
+}
+
+/** Where a worktree chat's branch would merge to, and how many of its commits are not there yet. */
+async function readMergeTarget(
+  projectPath: string | null,
+  branch: string | null
+): Promise<GitSnapshot['merge']> {
+  if (!projectPath || !branch) return null
+  const head = await runGit(projectPath, ['symbolic-ref', '--short', '-q', 'HEAD'])
+  const into = head.stdout.trim()
+  if (head.code !== 0 || !into || into === branch) return null
+  const count = await runGit(projectPath, ['rev-list', '--count', `${into}..${branch}`])
+  if (count.code !== 0) return null
+  return { into, commits: Number(count.stdout.trim()) || 0 }
 }
 
 export async function getGitSnapshot(projectId: string, chatId?: string | null): Promise<GitSnapshot> {
@@ -425,7 +443,8 @@ export async function getGitSnapshot(projectId: string, chatId?: string | null):
     behind: parsed.behind,
     dirtyCount: parsed.files.length,
     files: parsed.files,
-    graph
+    graph,
+    merge: await readMergeTarget(repo.projectPath, repo.worktreeBranch)
   }
 }
 
@@ -567,6 +586,40 @@ export async function createGitBranch(
     return { ok: false, error: 'Invalid branch name', snapshot }
   }
   return afterAction(projectId, await runGit(repo.path, ['checkout', '-b', branch]), chatId)
+}
+
+/**
+ * Merges a worktree chat's branch into the branch the project folder has checked out.
+ * Stops without changing anything when either side has uncommitted work or the merge conflicts.
+ */
+export async function mergeChatBranch(projectId: string, chatId: string): Promise<GitActionResult> {
+  const repo = await resolveRepo(projectId, chatId)
+  if ('snapshot' in repo) return { ok: false, error: repo.snapshot.error, snapshot: repo.snapshot }
+  const fail = async (error: string): Promise<GitActionResult> => ({
+    ok: false,
+    error,
+    snapshot: await getGitSnapshot(projectId, chatId)
+  })
+  const target = await readMergeTarget(repo.projectPath, repo.worktreeBranch)
+  if (!repo.projectPath || !repo.worktreeBranch || !target) {
+    return fail('The project folder is not on a branch this chat can merge into')
+  }
+  if (target.commits === 0) return fail(`Nothing to merge: ${target.into} already has these commits`)
+  const own = await runGit(repo.path, ['status', '--porcelain'])
+  if (own.stdout.trim()) return fail('Commit or discard the chat’s changes first')
+  const main = await runGit(repo.projectPath, ['status', '--porcelain', '--untracked-files=no'])
+  if (main.stdout.trim()) {
+    return fail(`The project folder has uncommitted changes on ${target.into}. Commit or stash them first.`)
+  }
+  const merged = await runGit(repo.projectPath, ['merge', '--no-edit', repo.worktreeBranch])
+  if (merged.code !== 0) {
+    await runGit(repo.projectPath, ['merge', '--abort'])
+    return fail(
+      `Merging into ${target.into} conflicts, so nothing changed. Ask the chat to merge ${target.into} into its branch and resolve the conflicts, then try again.`
+    )
+  }
+  void broadcastGit(projectId, null)
+  return afterAction(projectId, merged, chatId)
 }
 
 async function readGitBlob(cwd: string, spec: string): Promise<string> {

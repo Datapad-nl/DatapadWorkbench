@@ -134,11 +134,11 @@ export function useChatProgress(chatId: string | null, streaming: boolean): Prog
     if (!chatId || !streaming) return
     let cancel = false
     let live = false
-    void window.grokcode.getActivity().then((snapshot) => {
+    void window.workbench.getActivity().then((snapshot) => {
       if (cancel || live) return
       setNow(progressNow(latestRunning(snapshot.events, chatId)))
     })
-    const off = window.grokcode.onActivityEvent((feed) => {
+    const off = window.workbench.onActivityEvent((feed) => {
       if (feed.type === 'reset') {
         live = true
         setNow(progressNow(latestRunning(feed.events, chatId)))

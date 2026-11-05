@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { randomBytes } from 'crypto'
 import { existsSync } from 'fs'
-import { join } from 'path'
+import { join, sep } from 'path'
 import {
   getBrowserState,
   goBack,
@@ -13,30 +13,23 @@ import {
   stopBrowser
 } from './browser'
 import { transcribeYoutube } from './youtube'
+import type { AcpMcpServer } from '../shared/mcp'
 
 export const BROWSER_SESSION_RULE = [
-  'You are inside Grok Build Workbench.',
+  'You are inside Datapad Workbench.',
   'Open every web page in the Workbench BrowserPane using the `browser` MCP (`navigate`).',
   'That pane is the in-app browser: you can drive it immediately and verify your own UI work.',
   'Never launch Chrome, Safari, Playwright, Puppeteer, `open`, `xdg-open`, `start`, or any other external browser.',
   'After a UI change, navigate to the local URL and call `get_state` to confirm the page loaded.',
   'When the user shares a YouTube URL or asks to transcribe, summarize, or quote a YouTube video, call `transcribe_youtube` with that URL.',
   'Do not scrape the watch page for captions unless that tool fails.',
-  'If you start a long-running dev server (`next dev`, vite, webpack) in a Grok Build Workbench worktree, stop it when the task is done. Do not leave it running in the background.',
+  'If you start a long-running dev server (`next dev`, vite, webpack) in a Datapad Workbench worktree, stop it when the task is done. Do not leave it running in the background.',
   'While a turn is running, keep the user posted in the reply itself.',
   'Before a long stretch of tool work, and again whenever you have been working without a new sentence the user can read, write one short sentence that says what you are doing now.',
   'For a long command, do not hide its output: if you also save a file, pipe through tee so each line still reaches the tool log. Print a progress line as the work advances, and flush it. Do not wait on one background task for the whole run; check its latest line and tell the user what it says.',
   'A long task may be started with /goal. While a goal is active, call update_goal with one short status sentence at each milestone.',
   'Do not mark the goal complete until the work is actually done, and do not go silent until the turn is finished.'
 ].join(' ')
-
-export type AcpMcpServer = {
-  type: 'stdio'
-  name: string
-  command: string
-  args: string[]
-  env: Array<{ name: string; value: string }>
-}
 
 let started: Promise<{ url: string; token: string }> | null = null
 
@@ -65,6 +58,9 @@ function authorized(req: IncomingMessage, token: string): boolean {
 
 function mcpScriptPath(): string {
   const fromSrc = join(app.getAppPath(), 'src/main/browser-mcp.mjs')
+  // A packaged app ships the script unpacked next to the asar archive.
+  const unpacked = fromSrc.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`)
+  if (unpacked !== fromSrc && existsSync(unpacked)) return unpacked
   if (existsSync(fromSrc)) return fromSrc
   const fromOut = join(__dirname, 'browser-mcp.mjs')
   if (existsSync(fromOut)) return fromOut
@@ -177,8 +173,8 @@ export async function browserMcpServers(): Promise<AcpMcpServer[]> {
       args: [mcpScriptPath()],
       env: [
         { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
-        { name: 'GROKCODE_BROWSER_URL', value: url },
-        { name: 'GROKCODE_BROWSER_TOKEN', value: token }
+        { name: 'WORKBENCH_BROWSER_URL', value: url },
+        { name: 'WORKBENCH_BROWSER_TOKEN', value: token }
       ]
     }
   ]

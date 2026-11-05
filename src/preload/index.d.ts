@@ -1,8 +1,8 @@
-import type { GrokCodeApi } from './index'
+import type { WorkbenchApi } from './index'
 
 declare global {
   interface Window {
-    grokcode: GrokCodeApi
+    workbench: WorkbenchApi
   }
 }
 

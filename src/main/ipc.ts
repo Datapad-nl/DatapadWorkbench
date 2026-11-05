@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { basename } from 'path'
+import { writeFile } from 'fs/promises'
+import { basename, join } from 'path'
 import type {
   BrowserBounds,
+  ChatAgent,
   ChatEvent,
   CreateProjectInput,
   FileMention,
@@ -12,7 +14,8 @@ import type {
   UserQuestionAnswer,
   VoiceSettings
 } from '../shared/types'
-import { normalizePermissionMode } from '../shared/types'
+import { normalizeChatAgent, normalizePermissionMode } from '../shared/types'
+import { notifyChat, watchAttention } from './attention'
 import {
   clearActivity,
   emitPermissionActivity,
@@ -48,9 +51,12 @@ import {
   syncKnowledgeWatchers
 } from './knowledge'
 import { searchProjectFiles } from './files'
+import { projectIcon } from './projectIcon'
+import { killProcessesUnder } from './worktreeProcs'
 import { deleteAllCheckpoints } from './checkpoints'
 import {
   appendUserMessage,
+  chatCommands,
   isStreaming,
   loadChat,
   onChatLive,
@@ -62,24 +68,34 @@ import {
   streamAssistant,
   stopStream
 } from './grok'
-import { applyEffortToLiveSessions, fetchUsage } from './acp'
+import {
+  applyClaudeModelToLiveSessions,
+  applyEffortToLiveSessions,
+  fetchUsage,
+  getClaudeOptions
+} from './acp'
+import { fetchClaudeUsage } from './claudeUsage'
 import {
   onPermissionDenied,
   onPermissionPrompt,
   onPermissionSettled,
   resolvePermission
 } from './permissions'
-import { deleteProjectIntake, maybeStartProjectIntake, scheduleProjectIntake } from './intake'
+import { maybeStartProjectIntake, scheduleProjectIntake } from './intake'
 import { onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
 import {
   createChat,
   createProject,
   deleteChat,
-  deleteProject,
+  removeProject,
   getChat,
   listChats,
   listProjects,
+  mutateChat,
   renameChat,
+  searchChats,
+  getMcpServers,
+  setMcpServers,
   snapshot,
   updateProject,
   updateSettings
@@ -97,6 +113,7 @@ import {
   chatWorkingDir,
   commitGit,
   createGitBranch,
+  mergeChatBranch,
   discardGitPath,
   getGitDiff,
   getGitSnapshot,
@@ -142,6 +159,16 @@ function emitDelta(chatId: string, text: string): void {
   deltaTimer = setTimeout(flushDeltas, 50)
 }
 
+function openFromNotice(chatId: string): void {
+  emit({ type: 'open', chatId })
+}
+
+/** System notification for a chat that needs the user, when the app is in the background. */
+async function noticeFor(chatId: string, body: string, urgent = false): Promise<void> {
+  const chat = await getChat(chatId).catch(() => null)
+  if (chat) notifyChat(chat, body, openFromNotice, urgent)
+}
+
 function emitIndex(event: IndexEvent): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send('index:event', event)
@@ -150,6 +177,7 @@ function emitIndex(event: IndexEvent): void {
 
 export function registerIpc(): void {
   startActivityBridge()
+  watchAttention()
   onIndexChange((index) => {
     emitIndex({ type: 'status', projectId: index.projectId, index })
     if (index.state === 'indexing' || index.state === 'installing' || index.state === 'no-folder') return
@@ -158,6 +186,7 @@ export function registerIpc(): void {
   onChatLive((event) => emit(event))
   onPermissionPrompt((request) => {
     emit({ type: 'permission', chatId: request.chatId, request })
+    void noticeFor(request.chatId, `Needs approval: ${request.title}`, true)
     emitPermissionActivity({
       chatId: request.chatId,
       sessionId: null,
@@ -190,6 +219,7 @@ export function registerIpc(): void {
   })
   onUserQuestionPrompt((request) => {
     emit({ type: 'question', chatId: request.chatId, request })
+    void noticeFor(request.chatId, request.questions[0]?.question || request.title || 'Has a question for you', true)
   })
   onUserQuestionSettled((request) => {
     emit({ type: 'question-clear', chatId: request.chatId, requestId: request.requestId })
@@ -220,16 +250,13 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('project:delete', async (_event, projectId: string) => {
-    const projects = await listProjects()
-    const project = projects.find((item) => item.id === projectId)
+    // Removing a project only hides it. Its chats, intake and files on disk are kept.
     const chats = await listChats()
     for (const chat of chats.filter((item) => item.projectId === projectId)) {
-      if (chat.worktreePath && project?.path) {
-        await removeChatWorktree(project.path, chat.worktreePath)
-      }
+      stopStream(chat.id)
+      if (chat.worktreePath) await killProcessesUnder(chat.worktreePath)
     }
-    await deleteProject(projectId)
-    await deleteProjectIntake(projectId)
+    await removeProject(projectId)
     void syncGitWatchers()
     void syncKnowledgeWatchers()
     return snapshot()
@@ -249,6 +276,12 @@ export function registerIpc(): void {
     const project = projects.find((item) => item.id === projectId)
     if (!project) throw new Error('Project not found')
     return buildOrientation(project)
+  })
+
+  ipcMain.handle('project:icon', async (_event, projectId: string) => {
+    const projects = await listProjects()
+    const project = projects.find((item) => item.id === projectId)
+    return project?.path ? projectIcon(project.path) : null
   })
 
   ipcMain.handle(
@@ -282,8 +315,37 @@ export function registerIpc(): void {
     return chat
   })
 
+  ipcMain.handle('chat:search', (_event, query: string) => searchChats(String(query ?? '')))
+  ipcMain.handle('mcp:get', () => getMcpServers())
+  ipcMain.handle('mcp:set', async (_event, text: string) => {
+    try {
+      return { servers: await setMcpServers(String(text ?? '')) }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('chat:exportMarkdown', async (_event, input: { title: string; markdown: string }) => {
+    const window = BrowserWindow.getFocusedWindow()
+    const name = String(input.title ?? '').replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'Chat'
+    const options = {
+      title: 'Export chat',
+      defaultPath: join(app.getPath('downloads'), `${name}.md`),
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    }
+    const result = window
+      ? await dialog.showSaveDialog(window, options)
+      : await dialog.showSaveDialog(options)
+    if (result.canceled || !result.filePath) return null
+    await writeFile(result.filePath, String(input.markdown ?? ''), 'utf8')
+    return result.filePath
+  })
+
   ipcMain.handle('chat:get', async (_event, chatId: string) => {
     return loadChat(chatId)
+  })
+  ipcMain.handle('chat:commands', async (_event, chatId: string) => {
+    return chatCommands(String(chatId ?? '')).catch(() => [])
   })
 
   ipcMain.handle('chat:delete', async (_event, chatId: string) => {
@@ -302,6 +364,16 @@ export function registerIpc(): void {
 
   ipcMain.handle('chat:rename', async (_event, input: { id: string; title: string }) => {
     return renameChat(input.id, input.title)
+  })
+
+  ipcMain.handle('chat:setAgent', async (_event, input: { id: string; agent: ChatAgent }) => {
+    return mutateChat(input.id, (chat) => {
+      // A started chat belongs to its agent's session. Only a fresh chat can switch.
+      if (chat.grokSessionId || chat.messages.length > 0) {
+        throw new Error('This chat already started. Open a new chat to switch agents.')
+      }
+      chat.agent = normalizeChatAgent(input.agent)
+    })
   })
 
   ipcMain.handle(
@@ -343,6 +415,8 @@ export function registerIpc(): void {
         flushDeltas()
         if (!done) return
         emit({ type: 'done', chatId: input.chatId, chat: done })
+        const reply = done.messages.at(-1)
+        notifyChat(done, reply?.role === 'assistant' && reply.content ? reply.content : 'Finished', openFromNotice)
         drainAsideSteers(input.chatId, project)
       })
       .catch((error: unknown) => {
@@ -350,6 +424,7 @@ export function registerIpc(): void {
         if (!isStreaming(input.chatId)) {
           const message = error instanceof Error ? error.message : 'Grok request failed'
           emit({ type: 'error', chatId: input.chatId, error: message })
+          void noticeFor(input.chatId, `Stopped: ${message}`)
         }
         drainAsideSteers(input.chatId, project)
       })
@@ -424,14 +499,23 @@ export function registerIpc(): void {
     'settings:set',
     async (
       _event,
-      input: { apiKey?: string; model?: string; effort?: string | null; voice?: Partial<VoiceSettings> }
+      input: {
+        apiKey?: string
+        model?: string
+        effort?: string | null
+        voice?: Partial<VoiceSettings>
+        defaultAgent?: ChatAgent
+        claudeModel?: string
+      }
     ) => {
       const settings = await updateSettings(input)
       if (input.effort !== undefined) await applyEffortToLiveSessions(settings.effort)
+      if (input.claudeModel !== undefined) await applyClaudeModelToLiveSessions(settings.claudeModel)
       return settings
     }
   )
 
+  ipcMain.handle('claude:options', (_event, model: string) => getClaudeOptions(model ?? ''))
   ipcMain.handle('voice:modelStatus', () => getVoiceModelStatus())
   ipcMain.handle('voice:ensureModel', async () => ensureVoiceModel())
   ipcMain.handle('voice:ensureMic', async () => ensureMicAccess())
@@ -545,6 +629,9 @@ export function registerIpc(): void {
       return createGitBranch(String(input.projectId ?? ''), String(input.name ?? ''), input.chatId)
     }
   )
+  ipcMain.handle('git:mergeChat', async (_event, input: { projectId: string; chatId: string }) => {
+    return mergeChatBranch(String(input.projectId ?? ''), String(input.chatId ?? ''))
+  })
   ipcMain.handle(
     'git:setActive',
     async (_event, input: { projectId: string | null; chatId?: string | null }) => {
@@ -577,6 +664,7 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('usage:get', async () => fetchUsage())
+  ipcMain.handle('usage:claude', async () => fetchClaudeUsage())
 
   ipcMain.handle('app:quit', () => {
     app.quit()

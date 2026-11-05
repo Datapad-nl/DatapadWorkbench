@@ -1,6 +1,6 @@
 ---
 tags:
-  - grok-build-workbench
+  - datapad-workbench
   - generated
   - architecture
 workbench_generated: true
@@ -8,12 +8,13 @@ workbench_generated: true
 
 # Architecture
 
-> This note is maintained by Grok Build Workbench. Add your own writing in `notes/`.
+> This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-How **Grok Build Workbench** is laid out. Areas below are wiki-linked so the graph stays connected.
+How **Datapad Workbench** is laid out. Areas below are wiki-linked so the graph stays connected.
 
 ## Areas
 
+- [[design]] — `design/`
 - [[docs]] — `docs/`
 - [[resources]] — `resources/`
 - [[scripts]] — `scripts/`
@@ -24,6 +25,8 @@ How **Grok Build Workbench** is laid out. Areas below are wiki-linked so the gra
 
 - `CLAUDE.md`
 - `CONTRIBUTING.md`
+- `datapad-workbench-assets.zip`
+- `electron-builder.yml`
 - `electron.vite.config.ts`
 - `eslint.config.mjs`
 - `LICENSE`
@@ -31,6 +34,7 @@ How **Grok Build Workbench** is laid out. Areas below are wiki-linked so the gra
 - `package.json`
 - `README.md`
 - `SECURITY.md`
+- `shot.png`
 - `tsconfig.json`
 - `tsconfig.node.json`
 - `tsconfig.node.tsbuildinfo`
@@ -42,6 +46,8 @@ How **Grok Build Workbench** is laid out. Areas below are wiki-linked so the gra
 ```
 [1m
 [0m
+├── .github
+│   └── workflows
 ├── scripts
 │   └── register-mac-app.mjs
 ├── src
@@ -49,6 +55,7 @@ How **Grok Build Workbench** is laid out. Areas below are wiki-linked so the gra
 │   ├── preload
 │   ├── renderer
 │   └── shared
+├── electron-builder.yml
 ├── electron.vite.config.ts
 └── eslint.config.mjs
 ```

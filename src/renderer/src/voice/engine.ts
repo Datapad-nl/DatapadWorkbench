@@ -1,4 +1,5 @@
-import type { VoiceSettings } from '../../../shared/types'
+import type { VoiceLanguage, VoiceSettings } from '../../../shared/types'
+import { loadSupertonic, synthesize } from './supertonic'
 
 const SAMPLE_RATE = 16000
 const SILENCE_MS = 1400
@@ -7,15 +8,8 @@ const MAX_MS = 60_000
 const PARTIAL_MS = 1600
 const PARTIAL_MAX_SEC = 6
 const ASR_MAX_SEC = 8
-const TTS_ID = 'onnx-community/Supertonic-TTS-ONNX'
-const TTS_STEPS = 5
 
 type AsrPipeline = (audio: Float32Array, options?: Record<string, unknown>) => Promise<{ text?: string }>
-type TtsResult = { audio?: Float32Array; data?: Float32Array; sampling_rate: number }
-type TtsPipeline = (
-  text: string,
-  options: { speaker_embeddings: string; num_inference_steps?: number; speed?: number }
-) => Promise<TtsResult>
 
 export type TtsVoice = { voiceURI: string; name: string }
 
@@ -34,8 +28,6 @@ export const TTS_VOICES: TtsVoice[] = [
 
 let asr: AsrPipeline | null = null
 let asrLoading: Promise<AsrPipeline> | null = null
-let tts: TtsPipeline | null = null
-let ttsLoading: Promise<TtsPipeline> | null = null
 let transformersReady: Promise<typeof import('@huggingface/transformers')> | null = null
 let speakGen = 0
 let ttsContext: AudioContext | null = null
@@ -67,7 +59,7 @@ async function transformersEnv(): Promise<typeof import('@huggingface/transforme
     tf.env.allowRemoteModels = false
     tf.env.allowLocalModels = true
     tf.env.useBrowserCache = false
-    tf.env.localModelPath = 'grokcode-model://models/'
+    tf.env.localModelPath = 'workbench-model://models/'
     const onnxWasm = tf.env.backends.onnx.wasm as { wasmPaths?: { mjs: string; wasm: string } } | undefined
     if (onnxWasm) {
       onnxWasm.wasmPaths = { mjs: ortMjs, wasm: ortWasm }
@@ -88,6 +80,18 @@ function withOnnx<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
+let ttsTail: Promise<unknown> = Promise.resolve()
+
+/** One local TTS session. The status worker has its own; this lane stays serial. */
+function withTts<T>(fn: () => Promise<T>): Promise<T> {
+  const run = ttsTail.then(fn, fn)
+  ttsTail = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
 export async function loadAsr(): Promise<void> {
   await withOnnx(async () => {
     await getAsr()
@@ -95,9 +99,7 @@ export async function loadAsr(): Promise<void> {
 }
 
 export async function loadTts(): Promise<void> {
-  await withOnnx(async () => {
-    await getTts()
-  })
+  await withOnnx(getTts)
 }
 
 async function getAsr(): Promise<AsrPipeline> {
@@ -120,23 +122,26 @@ async function getAsr(): Promise<AsrPipeline> {
   }
 }
 
-async function getTts(): Promise<TtsPipeline> {
-  if (tts) return tts
-  if (ttsLoading) return ttsLoading
-  ttsLoading = (async () => {
-    const ready = await window.grokcode.ensureVoiceModel()
-    if (!ready.ready) throw new Error(ready.error || 'Speech model is not ready')
-    const { pipeline } = await transformersEnv()
-    const pipe = await pipeline('text-to-speech', TTS_ID, { device: 'wasm' })
-    tts = ((text, options) => pipe(text, options)) as TtsPipeline
-    return tts
-  })()
-  try {
-    return await ttsLoading
-  } catch (error) {
-    ttsLoading = null
-    throw error
-  }
+async function getTts(): Promise<void> {
+  const ready = await window.workbench.ensureVoiceModel()
+  if (!ready.ready) throw new Error(ready.error || 'Speech model is not ready')
+  await loadSupertonic()
+}
+
+type Pcm = { samples: Float32Array; sampleRate: number }
+
+function speechSpeed(settings: VoiceSettings): number {
+  return Math.min(2, Math.max(0.7, settings.rate))
+}
+
+/** One chunk through the local model, on the shared ONNX lane. */
+function synthHere(text: string, lang: VoiceLanguage, settings: VoiceSettings): Promise<Pcm> {
+  return withTts(() =>
+    withOnnx(async () => {
+      await getTts()
+      return synthesize(text, lang, voiceId(settings), speechSpeed(settings))
+    })
+  )
 }
 
 function expandSpokenContractions(text: string): string {
@@ -170,16 +175,17 @@ const EN_WORDS = new Set(
   )
 )
 
-const OTHER_WORDS = new Set(
-  `het een van niet zijn voor met ook maar naar wordt deze geen nog wel omdat door bij als wat dit dat uit over hebben heeft werd worden ik je jij wij zij hun onze jouw mijn moet graag alstublieft bedankt hoe waar waarom wanneer wie welk welke natuurlijk de en
-le la les une un que pour dans pas des avec vous nous cette sont qui sur par elle aux du au cela aussi mais donc très être avoir pourquoi quand parce quelle quel bonjour merci est
-und nicht ich sie den von auf für dem sich auch nach wie aber eine ist der die das ein im zu zum zur mit dass schon wenn oder wir ihr uns euch mein keine muss haben hat wird werden wurde über weil bitte danke gerne
-el los las del una para por con como esta esto pero más muy porque cuando también está son hay sus ese esa eso nos les ya sí gracias hola dónde cómo tiene puedes puede hacer sobre entre desde hasta todos todas este estos
-che per sono come questa questo anche della degli delle nel nella gli lei noi voi loro perché quando dove cosa tutto tutti molto bene grazie ciao
-não com mais você isso pelo pela dos das num numa ele ela nós vocês muito obrigado obrigada`.split(
-    /\s+/
-  )
-)
+/** Common words per language Supertonic speaks, for picking the language tag. */
+const LANG_WORDS: Array<[VoiceLanguage, Set<string>]> = [
+  ['nl', new Set(`het een van niet zijn voor met ook maar naar wordt deze geen nog wel omdat door bij als wat dit dat uit over hebben heeft werd worden ik je jij wij zij hun onze jouw mijn moet graag alstublieft bedankt hoe waar waarom wanneer wie welk welke natuurlijk de en`.split(' '))],
+  ['fr', new Set(`le la les une un que pour dans pas des avec vous nous cette sont qui sur par elle aux du au cela aussi mais donc très être avoir pourquoi quand parce quelle quel bonjour merci est`.split(' '))],
+  ['de', new Set(`und nicht ich sie den von auf für dem sich auch nach wie aber eine ist der die das ein im zu zum zur mit dass schon wenn oder wir ihr uns euch mein keine muss haben hat wird werden wurde über weil bitte danke gerne`.split(' '))],
+  ['es', new Set(`el los las del una para por con como esta esto pero más muy porque cuando también está son hay sus ese esa eso nos les ya sí gracias hola dónde cómo tiene puedes puede hacer sobre entre desde hasta todos todas este estos`.split(' '))],
+  ['it', new Set(`che per sono come questa questo anche della degli delle nel nella gli lei noi voi loro perché quando dove cosa tutto tutti molto bene grazie ciao`.split(' '))],
+  ['pt', new Set(`não com mais você isso pelo pela dos das num numa ele ela nós vocês muito obrigado obrigada`.split(' '))],
+]
+
+const OTHER_WORDS = new Set(LANG_WORDS.flatMap(([, words]) => [...words]))
 
 const OTHER_GREETINGS = new Set(
   'bonjour merci gracias hola ciao obrigado obrigada danke bitte hallo hoi doei goedemorgen alstublieft dankjewel bedankt'.split(
@@ -197,7 +203,7 @@ function countWords(words: string[], dict: Set<string>): number {
   return n
 }
 
-/** English TTS only. `unknown` means there is not enough text to decide yet. */
+/** English or not. `unknown` means there is not enough text to decide yet. */
 export function textLanguage(text: string): 'en' | 'other' | 'unknown' {
   const trimmed = text.trim()
   if (!trimmed) return 'unknown'
@@ -221,11 +227,32 @@ export function textLanguage(text: string): 'en' | 'other' | 'unknown' {
   return 'unknown'
 }
 
-export function shouldMuteReply(userText: string, assistantText: string): boolean {
-  const reply = textLanguage(assistantText)
-  if (reply === 'other') return true
-  if (reply === 'en') return false
-  return textLanguage(userText) === 'other'
+const SCRIPT_LANGS: Array<[RegExp, VoiceLanguage]> = [
+  [/\p{Script=Hangul}/gu, 'ko'],
+  [/\p{Script=Hiragana}|\p{Script=Katakana}/gu, 'ja'],
+  [/\p{Script=Arabic}/gu, 'ar'],
+  [/\p{Script=Greek}/gu, 'el'],
+  [/\p{Script=Devanagari}/gu, 'hi'],
+  [/[іїєґІЇЄҐ]/gu, 'uk'],
+  [/\p{Script=Cyrillic}/gu, 'ru']
+]
+
+/** The language tag to read `text` with. `na` when it is not one Supertonic knows by sight. */
+export function speechLanguage(text: string, settings: VoiceSettings): VoiceLanguage {
+  if (settings.language !== 'auto') return settings.language as VoiceLanguage
+  const letters = (text.match(/\p{L}/gu) ?? []).length
+  for (const [script, lang] of SCRIPT_LANGS) {
+    const hits = (text.match(script) ?? []).length
+    if (hits >= 2 && hits >= letters * 0.25) return lang
+  }
+  if (textLanguage(text) !== 'other') return 'en'
+  const words = speechWords(text)
+  let best: [VoiceLanguage, number] = ['na', 0]
+  for (const [lang, dict] of LANG_WORDS) {
+    const hits = countWords(words, dict)
+    if (hits > best[1]) best = [lang, hits]
+  }
+  return best[0]
 }
 
 function containsWordSequence(haystack: string[], needle: string[]): boolean {
@@ -288,33 +315,8 @@ export function echoesUserRequest(spoken: string, user: string): boolean {
   return head.length >= 6 && head.length < ask.length && containsWordSequence(said, head)
 }
 
-function sentenceEnded(part: string): boolean {
-  return /[.!?](?:["')\]]+)?$/.test(part.trim())
-}
-
-/** Drop sentences the English voice cannot say. Incomplete tails stay out until they classify. */
-export function englishSpeechText(text: string, flush: boolean): string {
-  const parts = text.match(/[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g)
-  if (!parts) return ''
-  const kept: string[] = []
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i]
-    const last = i === parts.length - 1
-    const ended = sentenceEnded(part)
-    const verdict = textLanguage(part)
-    if (verdict === 'other') continue
-    if (!ended && last && !flush && verdict !== 'en') continue
-    kept.push(part)
-  }
-  return kept.join('').replace(/\s+/g, ' ').trim()
-}
-
 function voiceId(settings: VoiceSettings): string {
   return TTS_VOICES.some((item) => item.voiceURI === settings.voiceURI) ? settings.voiceURI : 'M1'
-}
-
-function speakerUrl(id: string): string {
-  return `grokcode-model://models/${TTS_ID}/voices/${id}.bin`
 }
 
 const STREAM_CLAUSE = 220
@@ -390,7 +392,7 @@ function ensureTtsOutput(sampleRate: number): { context: AudioContext; gain: Gai
 export function primeTtsOutput(): void {
   const { context, gain } = ensureTtsOutput(22050)
   gain.gain.value = 1
-  if (context.state === 'suspended') void context.resume()
+  if (context.state === 'suspended' && !replyHeld) void context.resume()
 }
 
 function dropSource(source: AudioBufferSourceNode): void {
@@ -410,6 +412,8 @@ function dropSource(source: AudioBufferSourceNode): void {
 async function playPcm(samples: Float32Array, sampleRate: number, gen: number): Promise<void> {
   if (gen !== speakGen) return
   const { context, gain } = ensureTtsOutput(sampleRate)
+  while (replyHeld && gen === speakGen) await waitReplyFree()
+  if (gen !== speakGen) return
   if (context.state === 'suspended') await context.resume()
   if (gen !== speakGen) return
   const buffer = context.createBuffer(1, samples.length, sampleRate)
@@ -437,7 +441,7 @@ async function playPcm(samples: Float32Array, sampleRate: number, gen: number): 
   })
 }
 
-type SpeakJob = { text: string; settings: VoiceSettings }
+type SpeakJob = { text: string; lang: VoiceLanguage; settings: VoiceSettings }
 
 let speakQueue: SpeakJob[] = []
 let drainPromise: Promise<void> | null = null
@@ -451,6 +455,264 @@ export function stopSpeaking(): void {
 
 export function isSpeaking(): boolean {
   return liveSources.size > 0 || speakQueue.length > 0 || drainPromise !== null
+}
+
+/**
+ * Status lines ("still working") synthesize on a worker and play on their own
+ * audio context. Pausing the reply context keeps the reply sentence intact,
+ * and reply cancellation does not stop the status line.
+ */
+let asideContext: AudioContext | null = null
+let asideGain: GainNode | null = null
+let asideGen = 0
+let asideJob: Promise<void> | null = null
+let replyHeld = false
+let replyHoldWait: Array<() => void> = []
+const asideSources = new Set<AudioBufferSourceNode>()
+
+type AsideOut =
+  | { type: 'ready' }
+  | { type: 'audio'; id: number; samples: Float32Array; sampleRate: number }
+  | { type: 'error'; id?: number; message: string }
+
+let asideWorker: Worker | null = null
+let asideWorkerBroken = false
+let asideLoad: Promise<void> | null = null
+let asideSeq = 0
+const asidePending = new Map<number, { resolve: (audio: Pcm) => void; reject: (error: Error) => void }>()
+
+function waitReplyFree(): Promise<void> {
+  return new Promise((resolve) => {
+    replyHoldWait.push(resolve)
+  })
+}
+
+function wakeReplyWaiters(): void {
+  const waiters = replyHoldWait
+  replyHoldWait = []
+  for (const wake of waiters) wake()
+}
+
+async function holdReply(): Promise<void> {
+  replyHeld = true
+  const context = ttsContext
+  if (context?.state === 'running') await context.suspend()
+  if (!replyHeld) {
+    wakeReplyWaiters()
+    if (context?.state === 'suspended') await context.resume()
+    return
+  }
+  if (typeof speechSynthesis !== 'undefined') {
+    try {
+      if (speechSynthesis.speaking && !speechSynthesis.paused) speechSynthesis.pause()
+    } catch {
+      // pause is unavailable
+    }
+  }
+}
+
+async function releaseReply(): Promise<void> {
+  if (!replyHeld) return
+  replyHeld = false
+  wakeReplyWaiters()
+  if (ttsContext?.state === 'suspended') await ttsContext.resume()
+  if (typeof speechSynthesis !== 'undefined' && speechSynthesis.paused) {
+    try {
+      speechSynthesis.resume()
+    } catch {
+      // resume is unavailable
+    }
+  }
+}
+
+function ensureAsideOutput(sampleRate: number): { context: AudioContext; gain: GainNode } {
+  if (!asideContext) {
+    asideContext = new AudioContext({ sampleRate })
+    asideGain = asideContext.createGain()
+    asideGain.connect(asideContext.destination)
+  }
+  asideGain ??= asideContext.createGain()
+  return { context: asideContext, gain: asideGain }
+}
+
+function stopAsideSources(): void {
+  for (const source of asideSources) {
+    try {
+      source.stop()
+    } catch {
+      // already stopped
+    }
+    try {
+      source.disconnect()
+    } catch {
+      // already disconnected
+    }
+  }
+  asideSources.clear()
+}
+
+export function isAsideSpeaking(): boolean {
+  return asideJob !== null
+}
+
+export function stopAside(): void {
+  asideGen += 1
+  stopAsideSources()
+  void releaseReply()
+}
+
+function asideError(error: unknown): Error {
+  return error instanceof Error ? error : new Error('Status voice failed')
+}
+
+function asideWorkerHandle(): Worker {
+  if (asideWorker) return asideWorker
+  const worker = new Worker(new URL('./asideTts.worker.ts', import.meta.url), { type: 'module' })
+  worker.onmessage = (event: MessageEvent<AsideOut>) => {
+    const message = event.data
+    if (message.type === 'ready') return
+    if (message.type === 'error') {
+      const id = message.id
+      if (id === undefined) {
+        asideWorkerBroken = true
+        for (const pending of asidePending.values()) pending.reject(new Error(message.message))
+        asidePending.clear()
+        return
+      }
+      asidePending.get(id)?.reject(new Error(message.message))
+      asidePending.delete(id)
+      return
+    }
+    const pending = asidePending.get(message.id)
+    if (!pending) return
+    asidePending.delete(message.id)
+    pending.resolve({ samples: message.samples, sampleRate: message.sampleRate })
+  }
+  worker.onerror = (event) => {
+    asideWorkerBroken = true
+    const error = new Error(event.message || 'Status voice failed')
+    for (const pending of asidePending.values()) pending.reject(error)
+    asidePending.clear()
+  }
+  asideWorker = worker
+  return worker
+}
+
+export function warmAsideVoice(): void {
+  if (asideWorkerBroken) return
+  try {
+    const worker = asideWorkerHandle()
+    if (asideLoad) return
+    asideLoad = Promise.resolve()
+    worker.postMessage({ type: 'load' })
+  } catch (error) {
+    asideWorkerBroken = true
+    console.error('aside voice', error)
+  }
+}
+
+function synthAsideOnWorker(text: string, settings: VoiceSettings): Promise<Pcm> {
+  const worker = asideWorkerHandle()
+  const id = ++asideSeq
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      asidePending.delete(id)
+      asideWorker?.terminate()
+      asideWorker = null
+      asideLoad = null
+      reject(new Error('Status voice timed out'))
+    }, 30_000)
+    asidePending.set(id, {
+      resolve: (audio) => {
+        clearTimeout(timer)
+        resolve(audio)
+      },
+      reject: (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    })
+    worker.postMessage({
+      type: 'synth',
+      id,
+      text,
+      lang: speechLanguage(text, settings),
+      voice: voiceId(settings),
+      speed: speechSpeed(settings)
+    })
+  })
+}
+
+async function synthAside(text: string, settings: VoiceSettings): Promise<Pcm> {
+  if (!asideWorkerBroken) {
+    try {
+      return await synthAsideOnWorker(text, settings)
+    } catch (error) {
+      console.error('aside voice', error)
+    }
+  }
+  return synthHere(text, speechLanguage(text, settings), settings)
+}
+
+async function playAside(samples: Float32Array, sampleRate: number, gen: number): Promise<void> {
+  if (gen !== asideGen) return
+  const { context, gain } = ensureAsideOutput(sampleRate)
+  if (context.state === 'suspended') await context.resume()
+  if (gen !== asideGen) return
+  if (context.state !== 'running') throw new Error('Status voice could not start')
+  await holdReply()
+  if (gen !== asideGen) {
+    await releaseReply()
+    return
+  }
+  const buffer = context.createBuffer(1, samples.length, sampleRate)
+  buffer.getChannelData(0).set(samples)
+  const source = context.createBufferSource()
+  source.buffer = buffer
+  source.connect(gain)
+  asideSources.add(source)
+  gain.gain.value = 1
+  try {
+    await new Promise<void>((resolve) => {
+      source.onended = () => {
+        asideSources.delete(source)
+        resolve()
+      }
+      if (gen !== asideGen) {
+        asideSources.delete(source)
+        try {
+          source.stop()
+        } catch {
+          // already stopped
+        }
+        resolve()
+        return
+      }
+      source.start()
+    })
+  } finally {
+    if (gen === asideGen) await releaseReply()
+  }
+}
+
+export async function speakAside(text: string, settings: VoiceSettings): Promise<void> {
+  const spoken = speakableText(text)
+  if (!spoken || asideJob) return
+  const gen = asideGen
+  const run = (async () => {
+    const audio = await synthAside(spoken, settings)
+    if (gen !== asideGen) return
+    await playAside(audio.samples, audio.sampleRate, gen)
+  })()
+  asideJob = run
+  try {
+    await run
+  } catch (error) {
+    if (gen === asideGen) await releaseReply()
+    throw asideError(error)
+  } finally {
+    if (asideJob === run) asideJob = null
+  }
 }
 
 export function listVoices(): TtsVoice[] {
@@ -468,34 +730,16 @@ function drainQueue(): Promise<void> {
         const job = speakQueue.shift()
         if (!job) break
         try {
-          const speed = Math.min(2, Math.max(0.7, job.settings.rate))
-          const embeddings = speakerUrl(voiceId(job.settings))
-          const result = tts
-            ? await tts(job.text, {
-                speaker_embeddings: embeddings,
-                num_inference_steps: TTS_STEPS,
-                speed
-              })
-            : await withOnnx(async () => {
-                const pipe = await getTts()
-                return pipe(job.text, {
-                  speaker_embeddings: embeddings,
-                  num_inference_steps: TTS_STEPS,
-                  speed
-                })
-              })
+          const { samples, sampleRate } = await synthHere(job.text, job.lang, job.settings)
           if (gen !== speakGen) return
-          const samples = result.data ?? result.audio
-          if (!samples || samples.length === 0) continue
-          await playPcm(samples, result.sampling_rate, gen)
+          if (samples.length === 0) continue
+          await playPcm(samples, sampleRate, gen)
           playedKeys.add(normKey(job.text))
         } catch (error) {
           speakQueue.unshift(job)
           throw error
         }
       }
-    } catch (error) {
-      throw error
     } finally {
       drainPromise = null
       if (speakQueue.length > 0) await drainQueue()
@@ -517,9 +761,11 @@ export function resetSpokenLog(): void {
 export async function speakText(
   text: string,
   settings: VoiceSettings,
-  opts?: { append?: boolean; repeat?: boolean }
+  opts?: { append?: boolean; repeat?: boolean; lang?: VoiceLanguage }
 ): Promise<void> {
-  const spoken = englishSpeechText(speakableText(text), true)
+  const spoken = speakableText(text)
+  // One language for the whole text, so a short sentence does not switch accents.
+  const lang = opts?.lang ?? speechLanguage(spoken, settings)
   if (!opts?.append) {
     speakGen += 1
     speakQueue = []
@@ -531,14 +777,14 @@ export async function speakText(
       if (!key) continue
       if (!opts?.repeat && playedKeys.has(key)) continue
       if (speakQueue.some((job) => normKey(job.text) === key)) continue
-      speakQueue.push({ text: chunk, settings })
+      speakQueue.push({ text: chunk, lang, settings })
     }
   }
   if (speakQueue.length === 0 && !opts?.append) return
   const gen = speakGen
   try {
     await drainQueue()
-  } catch (error) {
+  } catch {
     if (gen !== speakGen) return
     const rest = speakQueue.map((job) => job.text).join(' ')
     speakQueue = []
@@ -883,7 +1129,7 @@ export async function startRecorder(handlers: {
 
   function snapshot(): Float32Array {
     const max = Math.floor(sampleRate * PARTIAL_MAX_SEC)
-    let total = captured
+    const total = captured
     let skip = Math.max(0, total - max)
     const out = new Float32Array(Math.min(total, max))
     let offset = 0

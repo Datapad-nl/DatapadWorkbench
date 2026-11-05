@@ -33,7 +33,7 @@ export function CodeDiff({ diff }: { diff: ActivityDiff }): React.JSX.Element {
         <div className="min-w-0 truncate font-mono text-[10px] text-ink/80" title={diff.path || name}>
           {name}
         </div>
-        <div className="shrink-0 font-mono text-[9px] uppercase tracking-[0.12em] text-muted">
+        <div className="shrink-0 text-[11px] text-muted">
           <span className="text-diff-del">old</span>
           <span className="mx-1 text-muted">·</span>
           <span className="text-diff-add">new</span>
@@ -44,7 +44,7 @@ export function CodeDiff({ diff }: { diff: ActivityDiff }): React.JSX.Element {
           {diff.path}
         </div>
       )}
-      <div className="grid grid-cols-2 border-b border-line font-mono text-[9px] uppercase tracking-[0.12em] text-muted">
+      <div className="grid grid-cols-2 border-b border-line text-[11px] text-muted">
         <div className="border-r border-line/70 px-1.5 py-0.5">Before</div>
         <div className="px-1.5 py-0.5">After</div>
       </div>

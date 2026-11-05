@@ -1,12 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { McpServers } from '../shared/mcp'
 import type { ThemeFile, ThemeSummary } from '../shared/theme'
 import type { YoutubeTranscriptResult } from '../shared/youtube'
 import type {
+  AgentCommand,
   ActivityFeed,
   ActivitySnapshot,
   BrowserAnnotationHit,
   BrowserBounds,
   BrowserState,
+  Chat,
+  ChatAgent,
   ChatEvent,
   CreateProjectInput,
   FileHit,
@@ -22,6 +26,8 @@ import type {
   PlanVerdict,
   UpdateProjectInput,
   UsageSnapshot,
+  ClaudeOptions,
+  ClaudeUsage,
   VoiceModelStatus,
   VoiceSettings
 } from '../shared/types'
@@ -33,13 +39,24 @@ const api = {
   deleteProject: (projectId: string) => ipcRenderer.invoke('project:delete', projectId),
   indexProject: (projectId: string) => ipcRenderer.invoke('project:index', projectId),
   getOrientation: (projectId: string) => ipcRenderer.invoke('project:orientation', projectId),
+  getProjectIcon: (projectId: string) =>
+    ipcRenderer.invoke('project:icon', projectId) as Promise<string | null>,
   ensureProjectIntake: (projectId: string, chatId: string) =>
     ipcRenderer.invoke('project:ensureIntake', { projectId, chatId }),
   pickFolder: () => ipcRenderer.invoke('project:pickFolder'),
   createChat: (projectId: string) => ipcRenderer.invoke('chat:create', projectId),
   getChat: (chatId: string) => ipcRenderer.invoke('chat:get', chatId),
+  searchChats: (query: string): Promise<string[]> => ipcRenderer.invoke('chat:search', query),
+  getMcpServers: (): Promise<McpServers> => ipcRenderer.invoke('mcp:get'),
+  setMcpServers: (text: string): Promise<{ servers: McpServers } | { error: string }> =>
+    ipcRenderer.invoke('mcp:set', text),
+  exportChatMarkdown: (title: string, markdown: string): Promise<string | null> =>
+    ipcRenderer.invoke('chat:exportMarkdown', { title, markdown }),
+  getChatCommands: (chatId: string) => ipcRenderer.invoke('chat:commands', chatId) as Promise<AgentCommand[]>,
   deleteChat: (chatId: string) => ipcRenderer.invoke('chat:delete', chatId),
   renameChat: (id: string, title: string) => ipcRenderer.invoke('chat:rename', { id, title }),
+  setChatAgent: (id: string, agent: ChatAgent) =>
+    ipcRenderer.invoke('chat:setAgent', { id, agent }) as Promise<Chat>,
   sendMessage: (
     chatId: string,
     content: string,
@@ -67,6 +84,8 @@ const api = {
     model?: string
     effort?: string | null
     voice?: Partial<VoiceSettings>
+    defaultAgent?: ChatAgent
+    claudeModel?: string
   }) =>
     ipcRenderer.invoke('settings:set', input),
   getVoiceModelStatus: () => ipcRenderer.invoke('voice:modelStatus') as Promise<VoiceModelStatus>,
@@ -166,6 +185,8 @@ const api = {
     ipcRenderer.invoke('git:checkout', { projectId, ref, chatId }) as Promise<GitActionResult>,
   createGitBranch: (projectId: string, name: string, chatId?: string | null) =>
     ipcRenderer.invoke('git:createBranch', { projectId, name, chatId }) as Promise<GitActionResult>,
+  mergeChatBranch: (projectId: string, chatId: string) =>
+    ipcRenderer.invoke('git:mergeChat', { projectId, chatId }) as Promise<GitActionResult>,
   setGitActiveProject: (projectId: string | null, chatId?: string | null) =>
     ipcRenderer.invoke('git:setActive', { projectId, chatId }) as Promise<boolean>,
   onGitSnapshot: (listener: (snapshot: GitSnapshot) => void) => {
@@ -205,9 +226,12 @@ const api = {
   openMedia: (chatId: string, src: string) =>
     ipcRenderer.invoke('media:open', { chatId, src }) as Promise<boolean>,
   getUsage: () => ipcRenderer.invoke('usage:get') as Promise<UsageSnapshot>,
+  getClaudeUsage: () => ipcRenderer.invoke('usage:claude') as Promise<ClaudeUsage>,
+  getClaudeOptions: (model: string) =>
+    ipcRenderer.invoke('claude:options', model) as Promise<ClaudeOptions | null>,
   quitApp: () => ipcRenderer.invoke('app:quit') as Promise<boolean>
 }
 
-export type GrokCodeApi = typeof api
+export type WorkbenchApi = typeof api
 
-contextBridge.exposeInMainWorld('grokcode', api)
+contextBridge.exposeInMainWorld('workbench', api)

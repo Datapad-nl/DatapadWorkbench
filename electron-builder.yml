@@ -1,0 +1,57 @@
+appId: com.datapad.workbench
+productName: Datapad Workbench
+copyright: Copyright © Datapad B.V.
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**
+  - src/main/browser-mcp.mjs
+  - resources/icon.png
+  - package.json
+# The agents start these as their own processes, so they must be real files.
+# The Dock icon is loaded by path, which needs a real file as well.
+asarUnpack:
+  - src/main/browser-mcp.mjs
+  - resources/icon.png
+  - node_modules/@agentclientprotocol/**
+  - node_modules/@anthropic-ai/**
+artifactName: Datapad-Workbench-${version}-${os}-${arch}.${ext}
+publish:
+  provider: github
+  owner: Datapad-nl
+  repo: DatapadWorkbench
+  # The three platform jobs upload into one draft. Publish it to ship the update.
+  releaseType: draft
+
+mac:
+  category: public.app-category.developer-tools
+  icon: icon.icns
+  hardenedRuntime: true
+  entitlements: resources/mac/entitlements.mac.plist
+  entitlementsInherit: resources/mac/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Datapad Workbench listens on this Mac so you can talk to your agent in conversation mode.
+    NSAudioCaptureUsageDescription: Datapad Workbench listens on this Mac so you can talk to your agent in conversation mode.
+  # The Claude Code binary ships per platform, so each architecture is built on its own runner.
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+
+win:
+  icon: icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  icon: icon.png
+  category: Development
+  target:
+    - target: AppImage
+      arch: [x64]

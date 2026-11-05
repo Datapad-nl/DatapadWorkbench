@@ -3,6 +3,7 @@ import type { Attachment, BrowserAnnotationHit, BrowserState } from '../../../sh
 import { parseYoutubeVideoId } from '../../../shared/youtube'
 import type { YoutubeTranscriptResult } from '../../../shared/youtube'
 import { useStreams, useWorkspace } from '../workspace'
+import { Icon } from './icons'
 import { ReorderGrip } from './ReorderGrip'
 
 type AnnotateMode = 'off' | 'picking' | 'comment'
@@ -70,20 +71,20 @@ export function BrowserPane(): React.JSX.Element {
   }, [videoId, transcript])
 
   useEffect(() => {
-    void window.grokcode.getBrowserState().then((next) => {
+    void window.workbench.getBrowserState().then((next) => {
       setState(next)
       if (!editing) setDraft(next.url)
     })
-    return window.grokcode.onBrowserState((next) => {
+    return window.workbench.onBrowserState((next) => {
       setState(next)
       if (!editing) setDraft(next.url)
     })
   }, [editing])
 
   useEffect(() => {
-    void window.grokcode.setBrowserVisible(showWebview)
+    void window.workbench.setBrowserVisible(showWebview)
     return () => {
-      void window.grokcode.setBrowserVisible(false)
+      void window.workbench.setBrowserVisible(false)
     }
   }, [showWebview])
 
@@ -104,7 +105,7 @@ export function BrowserPane(): React.JSX.Element {
       const key = `${next.x}|${next.y}|${next.width}|${next.height}`
       if (key === last) return
       last = key
-      void window.grokcode.setBrowserBounds(next)
+      void window.workbench.setBrowserBounds(next)
     }
 
     report()
@@ -122,7 +123,7 @@ export function BrowserPane(): React.JSX.Element {
   useEffect(() => {
     if (overlay) return
     pickGen.current += 1
-    void window.grokcode.cancelBrowserAnnotate()
+    void window.workbench.cancelBrowserAnnotate()
     setMode('off')
     setHit(null)
     setNote('')
@@ -161,7 +162,7 @@ export function BrowserPane(): React.JSX.Element {
     setPasted([])
     setAnnotateError(null)
     try {
-      const next = await window.grokcode.startBrowserAnnotate()
+      const next = await window.workbench.startBrowserAnnotate()
       if (gen !== pickGen.current) return
       if (!next) {
         setMode('off')
@@ -180,7 +181,7 @@ export function BrowserPane(): React.JSX.Element {
 
   function stopAnnotate(): void {
     pickGen.current += 1
-    void window.grokcode.cancelBrowserAnnotate()
+    void window.workbench.cancelBrowserAnnotate()
     setMode('off')
     setHit(null)
     setNote('')
@@ -196,7 +197,7 @@ export function BrowserPane(): React.JSX.Element {
         setAnnotateError('Open a project chat first')
         return
       }
-      const chat = await window.grokcode.createChat(activeProjectId)
+      const chat = await window.workbench.createChat(activeProjectId)
       await openChat(chat.id)
       chatId = chat.id
     }
@@ -220,7 +221,7 @@ export function BrowserPane(): React.JSX.Element {
 
   async function go(input: string): Promise<void> {
     setEditing(false)
-    const next = await window.grokcode.navigateBrowser(input)
+    const next = await window.workbench.navigateBrowser(input)
     setState(next)
     setDraft(next.url)
   }
@@ -232,20 +233,20 @@ export function BrowserPane(): React.JSX.Element {
       return
     }
     setTranscript({ status: 'loading', videoId })
-    const result = await window.grokcode.transcribeYoutube(state.url)
+    const result = await window.workbench.transcribeYoutube(state.url)
     setTranscript({ status: 'done', videoId, result })
   }
 
   async function clearLogins(): Promise<void> {
     if (!confirm('Forget saved logins and cookies in this browser?')) return
-    const next = await window.grokcode.clearBrowserData()
+    const next = await window.workbench.clearBrowserData()
     setState(next)
     setDraft('')
   }
 
   return (
     <section className="flex h-full min-w-0 flex-1 flex-col bg-canvas">
-      <div className="drag flex h-titlebar shrink-0 items-center gap-1 border-b border-line bg-surface px-2">
+      <div className="drag flex h-titlebar shrink-0 items-center gap-1 border-b border-line bg-sidebar px-2">
         <div className="no-drag flex min-w-0 flex-1 items-center gap-1">
           {(showActivity || showGit || showKnowledge) && (
             <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />
@@ -253,24 +254,24 @@ export function BrowserPane(): React.JSX.Element {
           <IconButton
             label="Back"
             disabled={!state.canGoBack}
-            onClick={() => void window.grokcode.browserBack()}
+            onClick={() => void window.workbench.browserBack()}
           >
-            ‹
+            <Icon name="chevron" className="rotate-180" />
           </IconButton>
           <IconButton
             label="Forward"
             disabled={!state.canGoForward}
-            onClick={() => void window.grokcode.browserForward()}
+            onClick={() => void window.workbench.browserForward()}
           >
-            ›
+            <Icon name="chevron" />
           </IconButton>
           <IconButton
             label={state.loading ? 'Stop' : 'Reload'}
             onClick={() =>
-              void (state.loading ? window.grokcode.stopBrowser() : window.grokcode.reloadBrowser())
+              void (state.loading ? window.workbench.stopBrowser() : window.workbench.reloadBrowser())
             }
           >
-            {state.loading ? '■' : '↻'}
+            {state.loading ? <Icon name="close" /> : <Icon name="retry" />}
           </IconButton>
           <IconButton
             label={mode === 'off' ? 'Annotate for agent' : 'Stop annotating'}
@@ -299,7 +300,7 @@ export function BrowserPane(): React.JSX.Element {
               autoCorrect="off"
               placeholder="https://"
               value={draft}
-              className="h-7 w-full rounded-md border border-line bg-canvas px-2 font-mono text-[11px] text-ink outline-none placeholder:text-muted focus:border-accent"
+              className="h-7 w-full rounded-[7px] border border-line bg-surface px-2 font-mono text-[11px] text-ink outline-none placeholder:text-faint focus:border-accent-line"
               onFocus={() => setEditing(true)}
               onChange={(event) => {
                 setEditing(true)
@@ -321,7 +322,7 @@ export function BrowserPane(): React.JSX.Element {
           {videoId && (
             <button
               type="button"
-              className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-muted hover:bg-raised hover:text-ink"
+              className="h-7 shrink-0 rounded-[7px] px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink"
               title="Fetch YouTube captions"
               onClick={() => void transcribeCurrent()}
             >
@@ -330,20 +331,15 @@ export function BrowserPane(): React.JSX.Element {
           )}
           <button
             type="button"
-            className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-muted hover:bg-raised hover:text-ink"
+            className="h-7 shrink-0 rounded-[7px] px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink"
             title="Forget cookies and logins"
             onClick={() => void clearLogins()}
           >
             Clear
           </button>
-          <button
-            type="button"
-            className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-muted hover:bg-raised hover:text-ink"
-            title="Hide browser"
-            onClick={() => setShowBrowser(false)}
-          >
-            Hide
-          </button>
+          <IconButton label="Close Browser" onClick={() => setShowBrowser(false)}>
+            <Icon name="close" />
+          </IconButton>
         </div>
       </div>
       <div className="relative min-h-0 flex-1">
@@ -676,7 +672,7 @@ function TranscriptPanel({ view }: { view: TranscriptView }): React.JSX.Element 
             </div>
             <button
               type="button"
-              className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-muted hover:bg-raised hover:text-ink"
+              className="h-7 shrink-0 rounded-[7px] px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink"
               onClick={() => void copy()}
             >
               Copy
@@ -753,8 +749,10 @@ function IconButton({
       data-testid={testId}
       disabled={disabled}
       aria-pressed={active}
-      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-raised disabled:text-muted disabled:hover:bg-transparent ${
-        active ? 'bg-accent text-accent-ink hover:bg-accent' : 'text-ink'
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] disabled:opacity-40 disabled:hover:bg-transparent ${
+        active
+          ? 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)]'
+          : 'text-muted hover:bg-hover hover:text-ink'
       }`}
       onClick={onClick}
     >

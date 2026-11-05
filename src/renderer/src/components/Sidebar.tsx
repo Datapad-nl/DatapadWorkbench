@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PROJECT_COLORS, resolveProjectColor } from '../../../shared/projectColor'
-import type { Project } from '../../../shared/types'
-import { useStreams, useWorkspace, type RightPaneId } from '../workspace'
+import type { ChatSummary, Project } from '../../../shared/types'
+import { useStreams, useWorkspace } from '../workspace'
+import wordmark from '../assets/wordmark.png'
+import { Icon, IconButton } from './icons'
 import { IndexStatus } from './OrientationCard'
-import { ReorderGrip } from './ReorderGrip'
 
-const WIDTH_KEY = 'grokcode.sidebarWidth'
-const COLLAPSED_KEY = 'grokcode.collapsedProjects'
-const DEFAULT_WIDTH = 268
+const WIDTH_KEY = 'workbench.sidebarWidth'
+const COLLAPSED_KEY = 'workbench.collapsedProjects'
+const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 180
 const MAX_WIDTH = 520
 
@@ -28,12 +29,39 @@ function readCollapsed(): Record<string, boolean> {
   }
 }
 
+const projectIcons = new Map<string, Promise<string | null>>()
+
+/** The favicon or app icon found in the project's folder, or null. */
+function useProjectIcon(project: Project): string | null {
+  const key = project.path ? `${project.id}:${project.path}` : null
+  const [icon, setIcon] = useState<{ key: string; url: string | null } | null>(null)
+
+  useEffect(() => {
+    if (!key) return
+    let cancelled = false
+    let pending = projectIcons.get(key)
+    if (!pending) {
+      pending = window.workbench.getProjectIcon(project.id).catch(() => null)
+      projectIcons.set(key, pending)
+    }
+    void pending.then((url) => {
+      if (!cancelled) setIcon({ key, url })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [key, project.id])
+
+  return icon && icon.key === key ? icon.url : null
+}
+
 function ProjectColorButton({ project }: { project: Project }): React.JSX.Element {
   const { updateProject } = useWorkspace()
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const color = resolveProjectColor(project)
+  const icon = useProjectIcon(project)
   const [pos, setPos] = useState({ top: 0, left: 0 })
 
   function placePopover(rect: DOMRect): void {
@@ -83,7 +111,8 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
         ref={buttonRef}
         data-testid="project-color"
         type="button"
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm hover:bg-canvas active:scale-95"
+        className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] text-[10.5px] font-semibold text-[#141414] active:scale-95"
+        style={icon ? undefined : { background: color }}
         title="Change project color"
         aria-label={`Change color for ${project.name}`}
         aria-expanded={open}
@@ -93,10 +122,11 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
           setOpen((current) => !current)
         }}
       >
-        <span
-          className="h-2.5 w-2.5 rounded-full ring-1 ring-white/20"
-          style={{ background: color }}
-        />
+        {icon ? (
+          <img src={icon} alt="" draggable={false} className="h-full w-full rounded-[5px] object-contain" />
+        ) : (
+          project.name.trim().slice(0, 1).toUpperCase() || '·'
+        )}
       </button>
       {open &&
         createPortal(
@@ -250,7 +280,11 @@ function ProjectMenu({
 
   function remove(): void {
     onClose()
-    if (confirm(`Delete ${project.name} and its chats?`)) {
+    if (
+      confirm(
+        `Remove ${project.name} from the Workbench?\n\nIts chats are kept and come back when you add the folder again. Files on disk are not touched.`
+      )
+    ) {
       void deleteProject(project.id)
     }
   }
@@ -295,125 +329,182 @@ function ProjectMenu({
         className="flex w-full items-center rounded-md px-2 py-1.5 text-left text-[12px] text-danger hover:bg-raised"
         onClick={remove}
       >
-        Delete
+        Remove from Workbench
       </button>
     </div>,
     document.body
   )
 }
 
-function ActivityToggle(): React.JSX.Element {
-  const { showActivity, setShowActivity, swapRightPanes } = useWorkspace()
+const WORKTREE_MARKERS = ['/.grokcode-worktrees/', '/.workbench-worktrees/']
+const VISIBLE_CHATS = 5
 
+function isWorktree(project: Project): boolean {
+  return Boolean(project.path && WORKTREE_MARKERS.some((marker) => project.path!.includes(marker)))
+}
+
+/**
+ * Worktrees live at `<dir>/.workbench-worktrees/<repo>-<id>` next to `<dir>/<repo>`.
+ * Show the parent project's own name, so a renamed project renames its worktrees too.
+ */
+function worktreeParent(project: Project, projects: Project[]): string {
+  const path = project.path ?? ''
+  const repo = (path.split('/').pop() ?? project.name).replace(/-[0-9a-f]{6,}$/i, '')
+  const marker = WORKTREE_MARKERS.find((item) => path.includes(item))
+  const parentPath = marker ? `${path.slice(0, path.indexOf(marker))}/${repo}` : null
+  return projects.find((item) => item.path === parentPath)?.name ?? repo
+}
+
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return ''
+  const seconds = Math.max(0, (Date.now() - then) / 1000)
+  if (seconds < 60) return 'now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d`
+  const months = Math.floor(days / 30)
+  if (months < 12) return `${months}mo`
+  return `${Math.floor(days / 365)}y`
+}
+
+function initials(text: string): string {
+  const words = text
+    .replace(/@.*$/, '')
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+  if (words.length === 0) return '·'
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
+  return (words[0][0] + words[1][0]).toUpperCase()
+}
+
+function KeyHint({ children }: { children: React.ReactNode }): React.JSX.Element {
   return (
-    <div className="flex items-center">
-      <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />
-      <button
-        data-testid="open-activity"
-        className={`flex h-8 min-w-0 flex-1 items-center justify-between rounded-md px-2 text-left text-[11px] hover:bg-raised hover:text-ink ${
-          showActivity ? 'text-ink' : 'text-muted'
-        }`}
-        onClick={() => setShowActivity(!showActivity)}
-      >
-        <span>Thought process</span>
-        <span>{showActivity ? 'Hide' : 'Show'}</span>
-      </button>
+    <kbd className="shrink-0 rounded-[4px] border border-line px-1 font-sans text-[10.5px] leading-4 text-faint">
+      {children}
+    </kbd>
+  )
+}
+
+function SectionLabel({
+  label,
+  count,
+  onAdd,
+  addLabel,
+  addTestId
+}: {
+  label: string
+  count?: number
+  onAdd?: () => void
+  addLabel?: string
+  addTestId?: string
+}): React.JSX.Element {
+  return (
+    <div className="mt-3 mb-1 flex h-6 items-center justify-between pr-1 pl-2">
+      <span className="text-[11px] font-semibold text-faint">{label}</span>
+      {onAdd ? (
+        <IconButton icon="plus" label={addLabel ?? 'Add'} size={22} onClick={onAdd} testId={addTestId} />
+      ) : count != null ? (
+        <span className="text-[11px] text-faint tabular-nums">{count}</span>
+      ) : null}
     </div>
   )
 }
 
-function BrowserToggle(): React.JSX.Element {
-  const { showBrowser, setShowBrowser, swapRightPanes } = useWorkspace()
-
+function ChatRow({ chat, project }: { chat: ChatSummary; project: Project }): React.JSX.Element {
+  const { activeChatId, openChat, deleteChat } = useWorkspace()
+  const streams = useStreams()
+  const streaming = streams[chat.id]?.status === 'streaming'
+  const active = activeChatId === chat.id
   return (
-    <div className="flex items-center">
-      <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />
-      <button
-        data-testid="open-browser"
-        className={`flex h-8 min-w-0 flex-1 items-center justify-between rounded-md px-2 text-left text-[11px] hover:bg-raised hover:text-ink ${
-          showBrowser ? 'text-ink' : 'text-muted'
+    <div className="relative">
+      {active && <span className="absolute top-1 bottom-1 -left-[9px] w-[2px] rounded-full bg-accent" />}
+      <div
+        className={`group flex h-[30px] items-center rounded-[7px] ${
+          active
+            ? 'bg-raised text-ink shadow-[inset_0_0_0_1px_var(--color-line-strong)]'
+            : 'text-ink-2 hover:bg-hover hover:text-ink'
         }`}
-        onClick={() => setShowBrowser(!showBrowser)}
       >
-        <span>Browser</span>
-        <span>{showBrowser ? 'Hide' : 'Show'}</span>
-      </button>
+        <button
+          className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2 text-left"
+          title={chat.title}
+          data-project={project.id}
+          onClick={() => void openChat(chat.id)}
+        >
+          <span className="truncate text-[12.5px]">{chat.title}</span>
+          {chat.agent === 'claude' && (
+            <span data-testid="chat-agent-tag" className="shrink-0 text-[10.5px] text-faint">
+              Claude
+            </span>
+          )}
+          {chat.worktreeBranch && (
+            <span
+              className="min-w-0 shrink truncate font-mono text-[10.5px] text-faint"
+              title={chat.worktreePath || chat.worktreeBranch}
+            >
+              {chat.worktreeBranch.replace(/^workbench\//, '')}
+            </span>
+          )}
+        </button>
+        <span className="flex w-9 shrink-0 items-center justify-end pr-2">
+          {streaming ? (
+            <span className="streaming-dot h-1.5 w-1.5 rounded-full bg-accent" title="Working" />
+          ) : (
+            <span className="text-[11px] text-faint tabular-nums group-hover:hidden group-focus-within:hidden">
+              {relativeTime(chat.updatedAt)}
+            </span>
+          )}
+          {!streaming && (
+            <button
+              className="hidden h-5 w-5 items-center justify-center rounded text-muted group-hover:flex group-focus-within:flex hover:text-danger"
+              title="Delete chat"
+              aria-label={`Delete ${chat.title}`}
+              onClick={() => {
+                if (
+                  confirm(
+                    chat.worktreePath
+                      ? 'Delete this chat?\n\nIts worktree is removed only if it has no uncommitted changes. Its branch is kept.'
+                      : 'Delete this chat?'
+                  )
+                )
+                  void deleteChat(chat.id)
+              }}
+            >
+              <Icon name="close" size={12} />
+            </button>
+          )}
+        </span>
+      </div>
     </div>
   )
 }
 
-function GitToggle(): React.JSX.Element {
-  const { showGit, setShowGit, swapRightPanes } = useWorkspace()
-
-  return (
-    <div className="flex items-center">
-      <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />
-      <button
-        data-testid="open-git"
-        className={`flex h-8 min-w-0 flex-1 items-center justify-between rounded-md px-2 text-left text-[11px] hover:bg-raised hover:text-ink ${
-          showGit ? 'text-ink' : 'text-muted'
-        }`}
-        onClick={() => setShowGit(!showGit)}
-      >
-        <span>Git</span>
-        <span>{showGit ? 'Hide' : 'Show'}</span>
-      </button>
-    </div>
-  )
-}
-
-function KnowledgeToggle(): React.JSX.Element {
-  const { showKnowledge, setShowKnowledge, swapRightPanes } = useWorkspace()
-
-  return (
-    <div className="flex items-center">
-      <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />
-      <button
-        data-testid="open-knowledge"
-        className={`flex h-8 min-w-0 flex-1 items-center justify-between rounded-md px-2 text-left text-[11px] hover:bg-raised hover:text-ink ${
-          showKnowledge ? 'text-ink' : 'text-muted'
-        }`}
-        onClick={() => setShowKnowledge(!showKnowledge)}
-      >
-        <span>Knowledge</span>
-        <span>{showKnowledge ? 'Hide' : 'Show'}</span>
-      </button>
-    </div>
-  )
-}
-
-function PaneToggles(): React.JSX.Element {
-  const { rightPaneOrder } = useWorkspace()
-  const panes: Record<RightPaneId, React.JSX.Element> = {
-    git: <GitToggle key="git" />,
-    browser: <BrowserToggle key="browser" />,
-    activity: <ActivityToggle key="activity" />,
-    knowledge: <KnowledgeToggle key="knowledge" />
-  }
-  return <>{rightPaneOrder.map((id) => panes[id])}</>
-}
-
-export function Sidebar(): React.JSX.Element {
+export function Sidebar(): React.JSX.Element | null {
   const {
     projects,
     chats,
     activeProjectId,
-    activeChatId,
     settings,
     selectProject,
-    openChat,
     createChat,
-    deleteChat,
     setShowNewProject,
     setShowSettings,
     gitSummaries,
-    setShowGit
+    showSidebar,
+    setShowSidebar
   } = useWorkspace()
-  const streams = useStreams()
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(readCollapsed)
   const [width, setWidth] = useState(readWidth)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ projectId: string; top: number; left: number } | null>(null)
+  const [query, setQuery] = useState('')
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({})
+  const [resizing, setResizing] = useState(false)
+  const searchRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     localStorage.setItem(WIDTH_KEY, String(width))
@@ -422,6 +513,26 @@ export function Sidebar(): React.JSX.Element {
   useEffect(() => {
     localStorage.setItem(COLLAPSED_KEY, JSON.stringify(collapsed))
   }, [collapsed])
+
+  const newChatProjectId = activeProjectId ?? projects[0]?.id ?? null
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent): void {
+      if (!event.metaKey && !event.ctrlKey) return
+      if (event.altKey || event.shiftKey) return
+      const key = event.key.toLowerCase()
+      if (key === 'k') {
+        event.preventDefault()
+        setShowSidebar(true)
+        requestAnimationFrame(() => searchRef.current?.focus())
+      } else if (key === 'n' && newChatProjectId) {
+        event.preventDefault()
+        void createChat(newChatProjectId)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [createChat, newChatProjectId, setShowSidebar])
 
   function toggleProject(projectId: string): void {
     setCollapsed((current) => ({ ...current, [projectId]: !current[projectId] }))
@@ -444,6 +555,7 @@ export function Sidebar(): React.JSX.Element {
     const startWidth = width
     const target = event.currentTarget
     target.setPointerCapture(event.pointerId)
+    setResizing(true)
 
     function onMove(move: PointerEvent): void {
       const next = startWidth + (move.clientX - startX)
@@ -451,6 +563,7 @@ export function Sidebar(): React.JSX.Element {
     }
 
     function onUp(): void {
+      setResizing(false)
       target.removeEventListener('pointermove', onMove)
       target.removeEventListener('pointerup', onUp)
     }
@@ -468,231 +581,291 @@ export function Sidebar(): React.JSX.Element {
     return grouped
   }, [chats])
 
+  const needle = query.trim().toLowerCase()
+
+  // Chats whose messages mention the query, looked up once typing pauses.
+  const [contentHits, setContentHits] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    if (!needle) {
+      setContentHits(new Set())
+      return
+    }
+    let live = true
+    const timer = setTimeout(() => {
+      void window.workbench.searchChats(needle).then((ids) => {
+        if (live) setContentHits(new Set(ids))
+      })
+    }, 200)
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [needle])
+
+  // While searching, a project shows when its name matches or when any of its chats does.
+  const filtered = useMemo(() => {
+    return projects
+      .map((project) => {
+        const all = chatsByProject[project.id] ?? []
+        if (!needle) return { project, chats: all }
+        const nameHit = project.name.toLowerCase().includes(needle)
+        const hits = all.filter((chat) => chat.title.toLowerCase().includes(needle) || contentHits.has(chat.id))
+        if (!nameHit && hits.length === 0) return null
+        return { project, chats: nameHit && hits.length === 0 ? all : hits }
+      })
+      .filter((item): item is { project: Project; chats: ChatSummary[] } => item !== null)
+  }, [projects, chatsByProject, needle, contentHits])
+
+  const regular = filtered.filter((item) => !isWorktree(item.project))
+  const worktrees = filtered.filter((item) => isWorktree(item.project))
+
   const menuProject = menu ? (projects.find((item) => item.id === menu.projectId) ?? null) : null
 
-  return (
-    <aside
-      className="relative flex h-full shrink-0 flex-col border-r border-line bg-sidebar"
-      style={{ width }}
-    >
-      <header className="drag flex h-titlebar shrink-0 items-center border-b border-line pl-traffic pr-2">
-        <div className="no-drag flex min-w-0 flex-1 items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="truncate text-[13px] font-semibold tracking-tight text-ink">
-              Grok Build Workbench
-            </div>
-            <div className="mt-px font-mono text-[8px] uppercase tracking-[0.14em] text-muted">
-              Desktop
+  if (!showSidebar) return null
+
+  const account = settings?.claude.email ?? null
+  const plans = [
+    settings?.grokBuildSignedIn ? 'SuperGrok' : settings?.hasKey ? 'xAI API key' : null,
+    settings?.claude.signedIn
+      ? `Claude${settings.claude.subscription ? ` ${settings.claude.subscription}` : ''} connected`
+      : null
+  ].filter(Boolean)
+  const accountName = account ?? (plans.length ? 'Signed in' : 'Not signed in')
+
+  function renderProject(project: Project, projectChats: ChatSummary[], worktree: boolean): React.JSX.Element {
+    const open = needle ? true : !collapsed[project.id]
+    const selected = activeProjectId === project.id
+    const git = gitSummaries[project.id]
+    const branch = git?.available ? (git.branch ?? 'HEAD') : null
+    const limit = showAll[project.id] || needle ? projectChats.length : VISIBLE_CHATS
+    const shown = projectChats.slice(0, limit)
+    const hidden = projectChats.length - shown.length
+    return (
+      <div key={project.id} className="mb-px">
+        <div
+          className={`group flex h-[30px] items-center gap-1.5 rounded-[7px] pr-1 ${
+            selected && !open ? 'bg-hover' : 'hover:bg-hover'
+          }`}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            openMenu(project.id, event.clientX, event.clientY)
+          }}
+        >
+          <button
+            className="flex h-[30px] w-5 shrink-0 items-center justify-center rounded-sm pl-1 text-faint hover:text-ink"
+            aria-expanded={open}
+            title={open ? 'Collapse project' : 'Expand project'}
+            onClick={() => toggleProject(project.id)}
+          >
+            <Icon
+              name="chevron"
+              size={12}
+              strokeWidth={1.6}
+              className={`transition-transform ${open ? 'rotate-90' : ''}`}
+            />
+          </button>
+          {worktree ? (
+            <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-faint">
+              <Icon name="branch" size={13} />
+            </span>
+          ) : (
+            <ProjectColorButton project={project} />
+          )}
+          {renamingId === project.id ? (
+            <ProjectRenameInput project={project} onDone={() => setRenamingId(null)} />
+          ) : (
+            <button
+              className="flex h-full min-w-0 flex-1 items-center text-left"
+              title={worktree ? `${project.name} · ${project.path ?? ''}` : project.name}
+              onClick={() => {
+                selectProject(project.id)
+                expandProject(project.id)
+              }}
+              onDoubleClick={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                setRenamingId(project.id)
+              }}
+            >
+              <span
+                className={`truncate text-[13px] ${
+                  worktree ? 'text-muted' : open ? 'font-medium text-ink' : 'text-ink-2'
+                }`}
+              >
+                {worktree ? worktreeParent(project, projects) : project.name}
+              </span>
+            </button>
+          )}
+          <span className="flex min-w-0 shrink items-center group-hover:hidden group-focus-within:hidden">
+            {open && !worktree && projectChats.length > 0 ? (
+              <span className="rounded-full bg-raised px-1.5 text-[10.5px] leading-4 text-muted tabular-nums">
+                {projectChats.length}
+              </span>
+            ) : branch ? (
+              <span className="max-w-[110px] truncate pr-1 font-mono text-[10.5px] text-faint" title={branch}>
+                {branch}
+              </span>
+            ) : null}
+          </span>
+          <span className="hidden shrink-0 items-center group-hover:flex group-focus-within:flex">
+            <IconButton
+              icon="plus"
+              label="New chat"
+              size={24}
+              onClick={() => {
+                expandProject(project.id)
+                void createChat(project.id)
+              }}
+            />
+            <IconButton
+              icon="more"
+              label="Project options"
+              size={24}
+              testId="project-options"
+              onClick={(event) => {
+                event.stopPropagation()
+                if (menu?.projectId === project.id) {
+                  setMenu(null)
+                  return
+                }
+                const rect = event.currentTarget.getBoundingClientRect()
+                openMenu(project.id, rect.left, rect.bottom + 4)
+              }}
+            />
+          </span>
+        </div>
+        {open && (
+          <div className="mb-1 pl-[26px]">
+            {!worktree && (
+              <div className="mb-0.5 pl-[24px]">
+                <IndexStatus projectId={project.id} compact />
+              </div>
+            )}
+            <div className="ml-[9px] border-l border-line pl-2">
+              {projectChats.length === 0 ? (
+                <button
+                  className="flex h-[30px] w-full items-center rounded-[7px] px-2 text-left text-[12.5px] text-faint hover:bg-hover hover:text-ink"
+                  onClick={() => void createChat(project.id)}
+                >
+                  No chats yet · start one
+                </button>
+              ) : (
+                shown.map((chat) => <ChatRow key={chat.id} chat={chat} project={project} />)
+              )}
+              {hidden > 0 && (
+                <button
+                  className="flex h-7 w-full items-center rounded-[7px] px-2 text-left text-[12px] text-faint hover:bg-hover hover:text-muted"
+                  onClick={() => setShowAll((current) => ({ ...current, [project.id]: true }))}
+                >
+                  Show {hidden} more
+                </button>
+              )}
             </div>
           </div>
-          <button
-            data-testid="new-project"
-            className="shrink-0 rounded-md px-2 py-1 text-[11px] text-muted transition hover:bg-raised hover:text-ink active:translate-y-px"
-            onClick={() => setShowNewProject(true)}
-          >
-            New project
-          </button>
-        </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <aside className="relative flex h-full shrink-0 flex-col border-r border-line bg-sidebar" style={{ width }}>
+      <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line pl-traffic pr-2">
+        <img
+          src={wordmark}
+          alt="Datapad Workbench"
+          draggable={false}
+          className="h-5 min-w-0 shrink translate-y-px object-contain object-left"
+        />
+        <div className="flex-1" />
+        <IconButton icon="sidebar" label="Hide sidebar" onClick={() => setShowSidebar(false)} />
       </header>
 
-      <div className="no-drag min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      <div className="no-drag shrink-0 px-2 pt-3">
+        <label className="flex h-8 items-center gap-2 rounded-[8px] border border-line bg-surface px-2.5 text-faint focus-within:border-line-strong">
+          <Icon name="search" size={13} />
+          <input
+            ref={searchRef}
+            data-testid="sidebar-search"
+            value={query}
+            placeholder="Search projects, chats and messages"
+            className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink outline-none placeholder:text-faint"
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setQuery('')
+                event.currentTarget.blur()
+              }
+            }}
+          />
+          {query ? (
+            <button className="text-faint hover:text-ink" aria-label="Clear search" onClick={() => setQuery('')}>
+              <Icon name="close" size={12} />
+            </button>
+          ) : (
+            <KeyHint>⌘K</KeyHint>
+          )}
+        </label>
+        <button
+          data-testid="sidebar-new-chat"
+          className="mt-2 flex h-[30px] w-full items-center gap-2 rounded-[7px] px-2 text-left text-[13px] text-ink-2 hover:bg-hover hover:text-ink disabled:opacity-50"
+          disabled={!newChatProjectId}
+          onClick={() => {
+            if (!newChatProjectId) return
+            expandProject(newChatProjectId)
+            void createChat(newChatProjectId)
+          }}
+        >
+          <Icon name="plus" size={13} className="text-muted" />
+          <span className="flex-1">New chat</span>
+          <KeyHint>⌘N</KeyHint>
+        </button>
+      </div>
+
+      <div className="no-drag min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <SectionLabel
+          label="Projects"
+          onAdd={() => setShowNewProject(true)}
+          addLabel="New project"
+          addTestId="new-project"
+        />
         {projects.length === 0 ? (
           <button
-            className="w-full rounded-lg border border-dashed border-line px-3 py-6 text-left text-[11px] text-muted transition hover:border-accent/40 hover:text-ink"
+            className="w-full rounded-[8px] border border-dashed border-line px-3 py-5 text-left text-[12.5px] leading-5 text-muted transition hover:border-line-strong hover:text-ink"
             onClick={() => setShowNewProject(true)}
           >
-            Add a project to start chatting.
+            Add a project folder to start chatting.
           </button>
+        ) : regular.length === 0 && worktrees.length === 0 ? (
+          <div className="px-2 py-2 text-[12.5px] text-faint">Nothing matches “{query.trim()}”.</div>
         ) : (
-          projects.map((project) => {
-            const open = !collapsed[project.id]
-            const projectChats = chatsByProject[project.id] ?? []
-            const selected = activeProjectId === project.id
-            return (
-              <div key={project.id} className="mb-0.5">
-                <div
-                  className={`flex h-8 items-center gap-1 rounded-md pr-0.5 ${
-                    selected ? 'bg-active' : 'hover:bg-raised/70'
-                  }`}
-                  onContextMenu={(event) => {
-                    event.preventDefault()
-                    openMenu(project.id, event.clientX, event.clientY)
-                  }}
-                >
-                  <button
-                    className="flex h-8 w-6 shrink-0 items-center justify-center rounded-sm text-ink/80 hover:bg-canvas hover:text-ink"
-                    aria-expanded={open}
-                    title={open ? 'Collapse project' : 'Expand project'}
-                    onClick={() => toggleProject(project.id)}
-                  >
-                    <svg
-                      width="11"
-                      height="11"
-                      viewBox="0 0 12 12"
-                      fill="none"
-                      aria-hidden="true"
-                      className={`transition-transform ${open ? 'rotate-90' : ''}`}
-                    >
-                      <path
-                        d="M4.25 2.25L8.5 6L4.25 9.75"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </button>
-                  <ProjectColorButton project={project} />
-                  {renamingId === project.id ? (
-                    <ProjectRenameInput project={project} onDone={() => setRenamingId(null)} />
-                  ) : (
-                    <button
-                      className="flex min-w-0 flex-1 items-center text-left"
-                      title="Double-click to rename"
-                      onClick={() => {
-                        selectProject(project.id)
-                        expandProject(project.id)
-                      }}
-                      onDoubleClick={(event) => {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        setRenamingId(project.id)
-                      }}
-                    >
-                      <span className="truncate text-[12px] font-medium text-ink">{project.name}</span>
-                    </button>
-                  )}
-                  {gitSummaries[project.id]?.available && (
-                    <button
-                      className="max-w-[88px] shrink-0 truncate px-1 font-mono text-[9px] text-muted hover:text-ink"
-                      title="Open git pane"
-                      onClick={() => {
-                        selectProject(project.id)
-                        expandProject(project.id)
-                        setShowGit(true)
-                      }}
-                    >
-                      {gitSummaries[project.id].branch ?? 'HEAD'}
-                      {gitSummaries[project.id].dirtyCount > 0
-                        ? ` · ${gitSummaries[project.id].dirtyCount}`
-                        : ''}
-                    </button>
-                  )}
-                  <button
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] text-muted hover:bg-canvas hover:text-ink"
-                    title="New chat"
-                    onClick={() => {
-                      expandProject(project.id)
-                      void createChat(project.id)
-                    }}
-                  >
-                    +
-                  </button>
-                  <button
-                    data-testid="project-options"
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[13px] text-muted hover:bg-canvas hover:text-ink"
-                    title="Project options"
-                    aria-label={`Options for ${project.name}`}
-                    aria-expanded={menu?.projectId === project.id}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      if (menu?.projectId === project.id) {
-                        setMenu(null)
-                        return
-                      }
-                      const rect = event.currentTarget.getBoundingClientRect()
-                      openMenu(project.id, rect.left, rect.bottom + 4)
-                    }}
-                  >
-                    ⋯
-                  </button>
-                </div>
-                {open && (
-                  <div className="mb-1 ml-7">
-                    {project.path && (
-                      <div className="truncate px-1.5 font-mono text-[9px] leading-4 text-muted">
-                        {project.path}
-                      </div>
-                    )}
-                    <div className="px-1.5">
-                      <IndexStatus projectId={project.id} compact />
-                    </div>
-                    {projectChats.length === 0 ? (
-                      <button
-                        className="mt-0.5 flex h-7 w-full items-center rounded-md px-1.5 text-left text-[12px] text-muted hover:bg-canvas/80 hover:text-ink"
-                        onClick={() => void createChat(project.id)}
-                      >
-                        New chat
-                      </button>
-                    ) : (
-                      projectChats.map((chat) => {
-                        const streaming = streams[chat.id]?.status === 'streaming'
-                        const active = activeChatId === chat.id
-                        const projectColor = resolveProjectColor(project)
-                        return (
-                          <div
-                            key={chat.id}
-                            className={`group mt-px flex h-7 items-center rounded-md ${
-                              active ? 'bg-active text-ink' : 'text-muted hover:bg-canvas/80 hover:text-ink'
-                            }`}
-                          >
-                            <button
-                              className="flex min-w-0 flex-1 items-center gap-2 px-1.5 text-left"
-                              onClick={() => void openChat(chat.id)}
-                            >
-                              <span
-                                className={`h-1.5 w-1.5 shrink-0 rounded-full ${streaming ? 'streaming-dot' : ''}`}
-                                style={{ background: projectColor, opacity: streaming ? 1 : 0.7 }}
-                              />
-                              <span className="truncate text-[12px] leading-5">{chat.title}</span>
-                              {chat.worktreeBranch && (
-                                <span
-                                  className="shrink-0 font-mono text-[9px] text-muted"
-                                  title={chat.worktreePath || chat.worktreeBranch}
-                                >
-                                  {chat.worktreeBranch.replace(/^grokcode\//, '')}
-                                </span>
-                              )}
-                            </button>
-                            <button
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[12px] text-muted opacity-0 group-hover:opacity-100 hover:text-danger"
-                              onClick={() => {
-                                if (confirm('Delete this chat?')) void deleteChat(chat.id)
-                              }}
-                            >
-                              ×
-                            </button>
-                          </div>
-                        )
-                      })
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })
+          regular.map((item) => renderProject(item.project, item.chats, false))
+        )}
+        {worktrees.length > 0 && (
+          <>
+            <SectionLabel label="Worktrees" count={worktrees.length} />
+            {worktrees.map((item) => renderProject(item.project, item.chats, true))}
+          </>
         )}
       </div>
 
-      <div className="no-drag border-t border-line px-2 py-2">
-        <PaneToggles />
-        <button
-          data-testid="open-settings"
-          className="flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-[11px] text-muted hover:bg-raised hover:text-ink"
-          onClick={() => setShowSettings(true)}
-        >
-          <span>Settings</span>
-          <span className="font-mono text-[9px]">
-            {settings?.grokBuildSignedIn
-              ? 'Grok Build'
-              : settings?.hasKey
-                ? settings.model
-                : 'Sign in'}
-          </span>
-        </button>
+      <div className="no-drag flex h-14 shrink-0 items-center gap-2.5 border-t border-line px-3">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-raised text-[11px] font-semibold text-ink-2 shadow-[inset_0_0_0_1px_var(--color-line-strong)]">
+          {initials(account ?? 'Workbench')}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-medium text-ink" title={accountName}>
+            {accountName}
+          </div>
+          <div className="truncate text-[11px] text-faint" title={plans.join(' · ')}>
+            {plans.length ? plans.join(' · ') : 'Open settings to sign in'}
+          </div>
+        </div>
+        <IconButton icon="gear" label="Settings" testId="open-settings" onClick={() => setShowSettings(true)} />
       </div>
       <div
-        className="no-drag absolute top-0 right-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 active:bg-accent/40"
+        className={`no-drag absolute top-0 -right-[3px] z-20 h-full w-1.5 cursor-col-resize after:absolute after:inset-y-0 after:left-[2px] after:w-px hover:after:bg-accent-line ${
+          resizing ? 'after:bg-accent-line' : ''
+        }`}
         onPointerDown={startResize}
       />
       {menu && menuProject && (

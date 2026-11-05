@@ -1,7 +1,9 @@
-import type { Project, UserQuestion } from '../shared/types'
+import type { ChatAgent, Project, UserQuestion } from '../shared/types'
 import { promptIsolated } from './acp'
+import { getClaudeCliInfo } from './claudeCli'
 import type { ProjectScan } from './projectScan'
-import { getApiKey, getModel } from './store'
+import { grokBuildSignedIn } from './sessions'
+import { getApiKey, getDefaultAgent, getModel } from './store'
 
 export type GeneratedIntake = {
   title: string
@@ -96,9 +98,9 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
   }
   if (kind === 'Desktop app') {
     return {
-      title: `How should Grok work in ${project.name}?`,
+      title: `How should the agent work in ${project.name}?`,
       questions: [
-        q('What is the live job for Grok in this desktop app?', [
+        q('What is the live job for the agent in this desktop app?', [
           option('Ship a user-visible feature', 'New behavior in the UI'),
           option('Fix something that is already broken', 'Bug or regression'),
           option('Harden reliability and edge cases', 'Permissions, crashes, state'),
@@ -127,7 +129,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
           option('Staging / a small set of users', 'Careful, not sacred'),
           option('Production traffic', 'Do not break live behavior')
         ]),
-        q('What should Grok do first?', [
+        q('What should the agent do first?', [
           option('A product feature', 'User-facing change'),
           option('A bug or visual regression', 'Repair'),
           option('Performance, a11y, or polish', 'Quality'),
@@ -144,7 +146,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
   }
   if (kind === 'Native mobile app') {
     return {
-      title: `How should Grok treat ${project.name}?`,
+      title: `How should the agent treat ${project.name}?`,
       questions: [
         q('Which platforms are in scope right now?', [
           option('iOS only', 'Android later or never'),
@@ -166,7 +168,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
   }
   if (kind === 'API / backend service') {
     return {
-      title: `How should Grok change ${project.name}?`,
+      title: `How should the agent change ${project.name}?`,
       questions: [
         q('Who actually calls this API?', [
           option('Our own frontend or workers', 'Internal'),
@@ -178,7 +180,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
           option('Auth and tenancy rules', 'Do not loosen access'),
           option('Nothing is sacred if a better shape is needed', 'Allowed to redesign')
         ], true),
-        q('What should Grok do first?', [
+        q('What should the agent do first?', [
           option('A new endpoint or workflow', 'Feature'),
           option('A production bug', 'Fix'),
           option('Tests and hardening', 'Safety')
@@ -200,7 +202,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
           option('Fine during this phase', 'Still shaping it'),
           option('Prefer aliases when renaming', 'Softer migrations')
         ]),
-        q('What should Grok do first?', [
+        q('What should the agent do first?', [
           option('A new command or flag', 'Feature'),
           option('Wrong output or exit codes', 'Fix'),
           option('Help text and UX of the CLI', 'Polish')
@@ -222,7 +224,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
           option('Additive is fine, removals need a yes', 'Expand freely'),
           option('Rewrite if the design is wrong', 'No loyalty yet')
         ]),
-        q('What should Grok do first?', [
+        q('What should the agent do first?', [
           option('A capability callers need', 'Feature'),
           option('A bug in the current API', 'Fix'),
           option('Types, docs, and examples', 'Usability')
@@ -231,7 +233,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
     }
   }
   return {
-    title: `What should Grok know about ${project.name}?`,
+    title: `What should the agent know about ${project.name}?`,
     questions: [
       q('What is the current job?', [
         option('Build something new in this repo', 'Feature work'),
@@ -244,7 +246,7 @@ function fallbackQuestions(project: Project, scan: ProjectScan): GeneratedIntake
         option('A team I work with', 'Shared'),
         option('Customers or the public', 'External')
       ]),
-      q('When Grok has a choice, what wins?', [
+      q('When the agent has a choice, what wins?', [
         option('Smallest diff that works', 'Surgical'),
         option('Match existing patterns even if verbose', 'Consistency'),
         option('A cleaner design if the cost is bounded', 'Judgement')
@@ -310,7 +312,7 @@ function parseGenerated(raw: string): GeneratedIntake | null {
 
 function generationPrompt(project: Project, scan: ProjectScan): string {
   return [
-    'You are briefing Grok Build Workbench on a software project.',
+    'You are briefing Datapad Workbench on a software project.',
     'Facts below were extracted from the repository. Treat them as known. Do not ask the user to restate them.',
     'Write 3 to 5 multiple-choice questions that only a human can answer, specific to THIS project.',
     'Good questions: current job, who it is for, what is frozen, what “done” looks like, product-specific gaps the files cannot show (audience, live vs local, compatibility, what not to rewrite).',
@@ -357,10 +359,26 @@ async function generateViaApi(prompt: string): Promise<string | null> {
   }
 }
 
-async function generateViaAgent(project: Project, prompt: string): Promise<string | null> {
+/** The agent for new chats when it is signed in, else whichever one is. */
+async function intakeAgent(): Promise<ChatAgent | null> {
+  const signedIn: Record<ChatAgent, boolean> = {
+    grok: grokBuildSignedIn(),
+    claude: (await getClaudeCliInfo()).signedIn
+  }
+  const preferred = await getDefaultAgent()
+  if (signedIn[preferred]) return preferred
+  return signedIn.grok ? 'grok' : signedIn.claude ? 'claude' : null
+}
+
+async function generateViaAgent(
+  project: Project,
+  prompt: string,
+  agent: ChatAgent
+): Promise<string | null> {
   if (!project.path) return null
   try {
     return await promptIsolated(project.path, prompt, [], undefined, undefined, {
+      agent,
       timeoutMs: 75_000,
       rules:
         'Do not use tools. Do not read or edit files. The prompt already contains the project dossier. Reply with JSON only.'
@@ -376,7 +394,10 @@ export async function generateIntakeQuestions(
 ): Promise<GeneratedIntake> {
   const fallback = fallbackQuestions(project, scan)
   const prompt = generationPrompt(project, scan)
-  const raw = (await generateViaApi(prompt).catch(() => null)) ?? (await generateViaAgent(project, prompt))
+  const agent = await intakeAgent()
+  // The xAI key only stands in for Grok, so a Claude default goes straight to Claude.
+  const viaApi = agent === 'claude' ? null : await generateViaApi(prompt).catch(() => null)
+  const raw = viaApi ?? (agent ? await generateViaAgent(project, prompt, agent) : null)
   if (!raw) return fallback
   return parseGenerated(raw) ?? fallback
 }

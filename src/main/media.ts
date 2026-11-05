@@ -3,7 +3,7 @@ import { pathToFileURL } from 'url'
 import { chatMediaRoots } from './store'
 import { resolveMediaFile } from './mediaFiles'
 
-export const MEDIA_SCHEME = 'grokmedia'
+export const MEDIA_SCHEME = 'workbench-media'
 
 export function mediaSchemePrivilege(): {
   scheme: string

@@ -40,10 +40,12 @@ const IGNORE = new Set([
 ])
 
 const RESERVED = new Set(['home', 'overview', 'architecture', 'stack', 'rules'])
-const MARK_START = '%% grok-build-workbench:start %%'
-const MARK_END = '%% grok-build-workbench:end %%'
-const LEGACY_MARK_START = '%% grokcode:start %%'
-const LEGACY_MARK_END = '%% grokcode:end %%'
+const MARK_START = '%% datapad-workbench:start %%'
+const MARK_END = '%% datapad-workbench:end %%'
+const LEGACY_MARKS = [
+  ['%% grok-build-workbench:start %%', '%% grok-build-workbench:end %%'],
+  ['%% grokcode:start %%', '%% grokcode:end %%']
+]
 const WATCH_MS = 400
 const MAX_NOTES = 200
 const MAX_AREAS = 16
@@ -91,7 +93,7 @@ function emit(snapshot: KnowledgeSnapshot): void {
 }
 
 function sanitizeName(name: string): string {
-  return name.replace(/[\\/:*?"<>|#\[\]]+/g, '-').replace(/\s+/g, ' ').trim() || 'untitled'
+  return name.replace(/[\\/:*?"<>|#[\]]+/g, '-').replace(/\s+/g, ' ').trim() || 'untitled'
 }
 
 function titleOf(relPath: string, body: string): string {
@@ -340,7 +342,7 @@ async function ensureObsidian(vault: string): Promise<void> {
 }
 
 function generatedNote(title: string, extraTags: string[], body: string): string {
-  const tags = ['grok-build-workbench', 'generated', ...extraTags]
+  const tags = ['datapad-workbench', 'generated', ...extraTags]
   return [
     '---',
     'tags:',
@@ -350,7 +352,7 @@ function generatedNote(title: string, extraTags: string[], body: string): string
     '',
     `# ${title}`,
     '',
-    '> This note is maintained by Grok Build Workbench. Add your own writing in `notes/`.',
+    '> This note is maintained by Datapad Workbench. Add your own writing in `notes/`.',
     '',
     body.trim(),
     ''
@@ -451,7 +453,7 @@ async function patchHome(vault: string, projectName: string, block: string): Pro
     '---',
     'tags:',
     '  - map',
-    '  - grok-build-workbench',
+    '  - datapad-workbench',
     '---',
     '',
     `# ${projectName}`,
@@ -485,7 +487,7 @@ async function patchHome(vault: string, projectName: string, block: string): Pro
 function findHomeSection(markdown: string): { start: number; end: number; endLen: number } | null {
   for (const [startMark, endMark] of [
     [MARK_START, MARK_END],
-    [LEGACY_MARK_START, LEGACY_MARK_END]
+    ...LEGACY_MARKS
   ]) {
     const start = markdown.indexOf(startMark)
     const end = markdown.indexOf(endMark)
@@ -497,7 +499,7 @@ function findHomeSection(markdown: string): { start: number; end: number; endLen
 function syncHomeBranding(markdown: string, projectName: string): string {
   return markdown
     .replace(/^# .+$/m, `# ${projectName}`)
-    .replace(/^(\s+- )grokcode$/m, '$1grok-build-workbench')
+    .replace(/^(\s+- )(grokcode|grok-build-workbench)$/m, '$1datapad-workbench')
 }
 
 async function writeGenerated(vault: string, fileName: string, contents: string): Promise<void> {
@@ -529,7 +531,7 @@ async function ensureStarterNote(vault: string): Promise<void> {
     [
       '---',
       'tags:',
-      '  - grok-build-workbench',
+      '  - datapad-workbench',
       '---',
       '',
       '# How to use this vault',
@@ -537,7 +539,7 @@ async function ensureStarterNote(vault: string): Promise<void> {
       'This `knowledge` folder is a real Obsidian vault. Open it with **Open folder as vault**.',
       '',
       '- Wiki-links use `[[Square brackets]]`, same as Obsidian.',
-      '- Grok Build Workbench rewrites files in `generated/` when the project index updates.',
+      '- Datapad Workbench rewrites files in `generated/` when the project index updates.',
       '- Anything you add under `notes/` is yours and is never overwritten.',
       `- ${wiki('Home')} is the map of content.`,
       `- ${wiki('Overview')} and ${wiki('Architecture')} are the generated base for how this project works.`,

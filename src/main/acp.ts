@@ -1,10 +1,13 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'child_process'
 import readline from 'readline'
+import { toAcpMcpServers } from '../shared/mcp'
 import { BROWSER_SESSION_RULE, browserMcpServers } from './browserAgent'
+import { claudeAcpCommand } from './claudeCli'
 import { grokBinary } from './grokCli'
 import {
   askPermission,
   cancelAllPermissions,
+  cancelSessionPermissions,
   chatIdForSession,
   decidePermission,
   fallbackSessionId,
@@ -13,11 +16,14 @@ import {
   modeForSession,
   noteDeniedPermission,
   outcomeFor,
+  pickOption,
+  type PermissionOption,
   type PermissionParams
 } from './permissions'
 import {
   askUserQuestions,
   cancelAllQuestions,
+  cancelSessionQuestions,
   elicitationResult,
   isElicitationMethod,
   isUserQuestionMethod,
@@ -25,8 +31,17 @@ import {
   parseQuestions,
   skipOutcome
 } from './questions'
-import type { ReasoningEffort, UsagePeriodKind, UsageSnapshot } from '../shared/types'
-import { getApiKey, getEffort } from './store'
+import { tmpdir } from 'os'
+import {
+  normalizeReasoningEffort,
+  type AgentCommand,
+  type ChatAgent,
+  type ClaudeOptions,
+  type ReasoningEffort,
+  type UsagePeriodKind,
+  type UsageSnapshot
+} from '../shared/types'
+import { getApiKey, getClaudeModel, getEffort, getMcpServers } from './store'
 import { readGrokPlan } from './sessions'
 
 type JsonRpc = {
@@ -93,6 +108,7 @@ export type SessionUpdate = {
     completedDeliverables?: number
     total_deliverables?: number
     totalDeliverables?: number
+    availableCommands?: Array<{ name?: unknown; description?: unknown; input?: { hint?: unknown } | null }>
   }
 }
 
@@ -113,17 +129,76 @@ export function contentText(content: unknown): string | null {
 const UPDATE_LISTENERS = new Set<(update: SessionUpdate) => void>()
 const EXIT_PLAN_LISTENERS = new Set<(input: { chatId: string; sessionId: string; markdown: string }) => void>()
 const acpSessionModes = new Map<string, { current: string; available: SessionMode[] }>()
+const acpSessionCommands = new Map<string, AgentCommand[]>()
 const pendingExits = new Map<string, PendingExit>()
 const queuedVerdicts = new Map<string, ExitPlanOutcome>()
 const SESSION_UPDATE_METHODS = new Set(['session/update', 'x.ai/session/update', '_x.ai/session/update'])
 
-let proc: ChildProcessWithoutNullStreams | null = null
-let ready: Promise<void> | null = null
-let nextId = 1
-const pending = new Map<number, Pending>()
-const liveSessions = new Set<string>()
-const inbound: JsonRpc[] = []
-let flushScheduled = false
+/** One ACP agent process. Grok Build and Claude Code each get their own. */
+type Conn = {
+  agent: ChatAgent
+  proc: ChildProcessWithoutNullStreams | null
+  ready: Promise<void> | null
+  nextId: number
+  pending: Map<number, Pending>
+  liveSessions: Set<string>
+  inbound: JsonRpc[]
+  flushScheduled: boolean
+}
+
+function makeConn(agent: ChatAgent): Conn {
+  return {
+    agent,
+    proc: null,
+    ready: null,
+    nextId: 1,
+    pending: new Map(),
+    liveSessions: new Set(),
+    inbound: [],
+    flushScheduled: false
+  }
+}
+
+const conns: Record<ChatAgent, Conn> = { grok: makeConn('grok'), claude: makeConn('claude') }
+const sessionAgents = new Map<string, ChatAgent>()
+
+/** Claude Code's ExitPlanMode arrives as a permission request with these option ids. */
+const CLAUDE_EXIT_PLAN_OPTION = 'exit-plan-'
+const CLAUDE_EXIT_PLAN_APPROVE = 'exit-plan-default'
+
+export function agentForSession(sessionId: string): ChatAgent {
+  return sessionAgents.get(sessionId) ?? 'grok'
+}
+
+function connForSession(sessionId: string): Conn {
+  return conns[agentForSession(sessionId)]
+}
+
+/** Request ids from two agents can collide, so Claude's get a prefix. */
+function promptRequestId(conn: Conn, id: number | string): string {
+  return conn.agent === 'grok' ? String(id) : `${conn.agent}:${id}`
+}
+
+function spawnAgent(agent: ChatAgent): ChildProcessWithoutNullStreams {
+  if (agent === 'claude') {
+    const { command, args, env } = claudeAcpCommand()
+    return spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env })
+  }
+  return spawn(grokBinary(), ['agent', '--no-leader', 'stdio'], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: process.env
+  })
+}
+
+function isClaudeExitPlan(options: PermissionOption[]): boolean {
+  return options.some((option) => option.optionId.startsWith(CLAUDE_EXIT_PLAN_OPTION))
+}
+
+/** Answer "allow" once, so Claude Code never writes an always-allow rule into the user's settings. */
+function claudeOptions(options: PermissionOption[]): PermissionOption[] {
+  if (!options.some((option) => option.kind === 'allow_once')) return options
+  return options.filter((option) => option.kind !== 'allow_always')
+}
 
 type TurnWait = {
   done: boolean
@@ -165,31 +240,33 @@ function waitForTurnEnd(sessionId: string, timeoutMs = 500): Promise<void> {
   })
 }
 
-function enqueue(message: JsonRpc): void {
+function enqueue(conn: Conn, message: JsonRpc): void {
   // Batch a stdout burst so agent_message_chunk is applied before session/prompt resolves.
-  inbound.push(message)
-  if (flushScheduled) return
-  flushScheduled = true
-  setImmediate(flushInbound)
+  conn.inbound.push(message)
+  if (conn.flushScheduled) return
+  conn.flushScheduled = true
+  setImmediate(() => flushInbound(conn))
 }
 
-function flushInbound(): void {
-  flushScheduled = false
-  const batch = inbound.splice(0)
-  for (const message of batch) handleMessage(message)
-  if (inbound.length > 0) {
-    flushScheduled = true
-    setImmediate(flushInbound)
+function flushInbound(conn: Conn): void {
+  conn.flushScheduled = false
+  const batch = conn.inbound.splice(0)
+  for (const message of batch) handleMessage(conn, message)
+  if (conn.inbound.length > 0) {
+    conn.flushScheduled = true
+    setImmediate(() => flushInbound(conn))
   }
 }
 
-function send(payload: object): void {
-  if (!proc?.stdin.writable) throw new Error('Grok Build is not running')
-  proc.stdin.write(`${JSON.stringify(payload)}\n`)
+function send(conn: Conn, payload: object): void {
+  if (!conn.proc?.stdin.writable) {
+    throw new Error(conn.agent === 'claude' ? 'Claude Code is not running' : 'Grok Build is not running')
+  }
+  conn.proc.stdin.write(`${JSON.stringify(payload)}\n`)
 }
 
-function request<T>(method: string, params: unknown, timeoutMs: number): Promise<T> {
-  const id = nextId++
+function request<T>(conn: Conn, method: string, params: unknown, timeoutMs: number): Promise<T> {
+  const id = conn.nextId++
   return new Promise<T>((resolve, reject) => {
     // timeoutMs <= 0 waits until the agent answers or the process exits.
     // A deadline that fires first deletes the waiter while the turn is still
@@ -197,26 +274,33 @@ function request<T>(method: string, params: unknown, timeoutMs: number): Promise
     const timer =
       timeoutMs > 0
         ? setTimeout(() => {
-            pending.delete(id)
+            conn.pending.delete(id)
             reject(new Error(`${method} timed out`))
           }, timeoutMs)
         : null
-    pending.set(id, {
+    conn.pending.set(id, {
       resolve: (value) => resolve(value as T),
       reject,
       timer
     })
-    send({ jsonrpc: '2.0', id, method, params })
+    send(conn, { jsonrpc: '2.0', id, method, params })
   })
 }
 
-async function settlePermission(message: JsonRpc): Promise<void> {
+async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
   const params = (message.params ?? {}) as PermissionParams
   const sessionId = params.sessionId || fallbackSessionId()
+  if (conn.agent === 'claude') {
+    if (isClaudeExitPlan(params.options ?? [])) {
+      await settleClaudeExitPlan(conn, message, params, sessionId)
+      return
+    }
+    params.options = claudeOptions(params.options ?? [])
+  }
   const options = params.options ?? []
   const mode = modeForSession(sessionId)
   const decision = decidePermission(mode, params)
-  const requestId = message.id === undefined ? null : String(message.id)
+  const requestId = message.id === undefined ? null : promptRequestId(conn, message.id)
 
   if (decision === 'deny') noteDeniedPermission(sessionId, params)
   const result =
@@ -225,7 +309,34 @@ async function settlePermission(message: JsonRpc): Promise<void> {
       : outcomeFor(options, decision === 'deny' ? 'deny' : 'allow')
 
   if (message.id === undefined) return
-  send({ jsonrpc: '2.0', id: message.id, result })
+  send(conn, { jsonrpc: '2.0', id: message.id, result })
+}
+
+/** Show Claude Code's plan in the Workbench plan card and answer with the user's verdict. */
+async function settleClaudeExitPlan(
+  conn: Conn,
+  message: JsonRpc,
+  params: PermissionParams,
+  sessionId: string
+): Promise<void> {
+  if (message.id === undefined) return
+  const input = params.toolCall?.rawInput
+  const plan = input && typeof input === 'object' ? (input as { plan?: unknown }).plan : undefined
+  const outcome = await awaitExitPlanVerdict(conn, message.id, sessionId, stringField(plan))
+  const options = params.options ?? []
+  // Approval returns Claude to its default mode. The Workbench mode then decides each tool.
+  const option =
+    outcome === 'approved'
+      ? (options.find((item) => item.optionId === CLAUDE_EXIT_PLAN_APPROVE) ?? pickOption(options, 'allow'))
+      : pickOption(options, 'deny')
+  if (!conn.proc) return
+  send(conn, {
+    jsonrpc: '2.0',
+    id: message.id,
+    result: option
+      ? { outcome: { outcome: 'selected', optionId: option.optionId } }
+      : { outcome: { outcome: 'cancelled' } }
+  })
 }
 
 function sessionIdFrom(params: unknown): string {
@@ -368,22 +479,19 @@ export function isExitPlanMethod(method?: string): boolean {
   )
 }
 
-async function settleExitPlan(message: JsonRpc): Promise<void> {
-  const params = (message.params ?? {}) as ExitPlanParams
-  const sessionId = params.sessionId || sessionIdFrom(message.params) || fallbackSessionId()
+function awaitExitPlanVerdict(
+  conn: Conn,
+  id: number | string,
+  sessionId: string,
+  markdown: string
+): Promise<ExitPlanOutcome> {
   const chatId = chatIdForSession(sessionId) || ''
-  if (message.id === undefined) return
-
-  const markdown = planMarkdownFromParams(params, sessionId)
-  const requestId = String(message.id)
   const queued = chatId ? takeQueuedExitPlanVerdict(chatId) : null
-  if (queued) {
-    send({ jsonrpc: '2.0', id: message.id, result: exitPlanResult(queued) })
-    return
-  }
-  const outcome = await new Promise<ExitPlanOutcome>((resolve) => {
+  if (queued) return Promise.resolve(queued)
+  const requestId = promptRequestId(conn, id)
+  return new Promise<ExitPlanOutcome>((resolve) => {
     pendingExits.set(requestId, {
-      id: message.id as number | string,
+      id,
       sessionId,
       chatId,
       markdown,
@@ -396,15 +504,24 @@ async function settleExitPlan(message: JsonRpc): Promise<void> {
       for (const listener of EXIT_PLAN_LISTENERS) listener({ chatId, sessionId, markdown })
     }
   })
-  send({ jsonrpc: '2.0', id: message.id, result: exitPlanResult(outcome) })
 }
 
-async function settleUserQuestion(message: JsonRpc, kind: 'ext' | 'elicitation'): Promise<void> {
+async function settleExitPlan(conn: Conn, message: JsonRpc): Promise<void> {
+  const params = (message.params ?? {}) as ExitPlanParams
+  const sessionId = params.sessionId || sessionIdFrom(message.params) || fallbackSessionId()
+  if (message.id === undefined) return
+
+  const markdown = planMarkdownFromParams(params, sessionId)
+  const outcome = await awaitExitPlanVerdict(conn, message.id, sessionId, markdown)
+  send(conn, { jsonrpc: '2.0', id: message.id, result: exitPlanResult(outcome) })
+}
+
+async function settleUserQuestion(conn: Conn, message: JsonRpc, kind: 'ext' | 'elicitation'): Promise<void> {
   if (message.id === undefined) return
   const questions = parseQuestions(message.params)
   if (!questions) {
     const skipped = skipOutcome()
-    send({
+    send(conn, {
       jsonrpc: '2.0',
       id: message.id,
       result: kind === 'elicitation' ? elicitationResult(skipped, []) : skipped
@@ -412,12 +529,12 @@ async function settleUserQuestion(message: JsonRpc, kind: 'ext' | 'elicitation')
     return
   }
   const sessionId = sessionIdFrom(message.params)
-  const outcome = await askUserQuestions(String(message.id), sessionId, questions, kind)
+  const outcome = await askUserQuestions(promptRequestId(conn, message.id), sessionId, questions, kind)
   const result = kind === 'elicitation' ? elicitationResult(outcome, questions) : outcome
-  send({ jsonrpc: '2.0', id: message.id, result })
+  send(conn, { jsonrpc: '2.0', id: message.id, result })
 }
 
-function handleIncomingRequest(message: JsonRpc): boolean {
+function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
   if (message.method && SESSION_UPDATE_METHODS.has(message.method)) {
     const params = message.params as SessionUpdate | undefined
     if (params?.sessionId) {
@@ -429,23 +546,26 @@ function handleIncomingRequest(message: JsonRpc): boolean {
         const current = acpSessionModes.get(params.sessionId)
         if (current) acpSessionModes.set(params.sessionId, { ...current, current: modeId })
       }
+      if (params.update?.sessionUpdate === 'available_commands_update') {
+        acpSessionCommands.set(params.sessionId, readCommands(params.update.availableCommands))
+      }
       for (const listener of UPDATE_LISTENERS) listener(params)
     }
     return true
   }
 
   if (message.method === 'session/request_permission') {
-    void settlePermission(message)
+    void settlePermission(conn, message)
     return true
   }
 
   if (isExitPlanMethod(message.method)) {
-    void settleExitPlan(message)
+    void settleExitPlan(conn, message)
     return true
   }
 
   if (isElicitationMethod(message.method)) {
-    void settleUserQuestion(message, 'elicitation')
+    void settleUserQuestion(conn, message, 'elicitation')
     return true
   }
 
@@ -453,19 +573,19 @@ function handleIncomingRequest(message: JsonRpc): boolean {
     isUserQuestionMethod(message.method) ||
     (Boolean(message.method) && message.id !== undefined && looksLikeUserQuestion(message.params))
   ) {
-    void settleUserQuestion(message, 'ext')
+    void settleUserQuestion(conn, message, 'ext')
     return true
   }
 
   return false
 }
 
-function handleMessage(message: JsonRpc): void {
-  if (handleIncomingRequest(message)) return
+function handleMessage(conn: Conn, message: JsonRpc): void {
+  if (handleIncomingRequest(conn, message)) return
 
   if (message.id === undefined || typeof message.id !== 'number') {
     if (message.method && message.id !== undefined) {
-      send({
+      send(conn, {
         jsonrpc: '2.0',
         id: message.id,
         error: { code: -32601, message: `Method not found: ${message.method}` }
@@ -473,10 +593,10 @@ function handleMessage(message: JsonRpc): void {
     }
     return
   }
-  const waiter = pending.get(message.id)
+  const waiter = conn.pending.get(message.id)
   if (!waiter) {
     if (message.method) {
-      send({
+      send(conn, {
         jsonrpc: '2.0',
         id: message.id,
         error: { code: -32601, message: `Method not found: ${message.method}` }
@@ -485,7 +605,7 @@ function handleMessage(message: JsonRpc): void {
     return
   }
   if (waiter.timer) clearTimeout(waiter.timer)
-  pending.delete(message.id)
+  conn.pending.delete(message.id)
   if (message.error) {
     waiter.reject(new Error(message.error.message || JSON.stringify(message.error)))
     return
@@ -493,15 +613,21 @@ function handleMessage(message: JsonRpc): void {
   waiter.resolve(message.result)
 }
 
-async function authenticate(): Promise<void> {
-  const init = await request<{
+type Call = <T>(method: string, params: unknown, timeoutMs: number) => Promise<T>
+
+function connCall(conn: Conn): Call {
+  return <T>(method: string, params: unknown, timeoutMs: number) => request<T>(conn, method, params, timeoutMs)
+}
+
+async function handshake(agent: ChatAgent, call: Call, clientName: string): Promise<void> {
+  const init = await call<{
     authMethods?: Array<{ id: string }>
     agentCapabilities?: { loadSession?: boolean }
   }>(
     'initialize',
     {
       protocolVersion: 1,
-      clientInfo: { name: 'Grok Build Workbench', version: '0.1.0' },
+      clientInfo: { name: clientName, version: '0.1.0' },
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
@@ -510,6 +636,9 @@ async function authenticate(): Promise<void> {
     },
     30_000
   )
+
+  // Claude Code signs in from the user's `claude auth login`. Its adapter has no authenticate step.
+  if (agent === 'claude') return
 
   const methods = new Set((init.authMethods ?? []).map((method) => method.id))
   const apiKey = await getApiKey()
@@ -520,20 +649,58 @@ async function authenticate(): Promise<void> {
       : null
 
   if (!methodId) {
-    throw new Error('Run `grok login` once. Grok Build Workbench uses your Grok Build session.')
+    throw new Error('Run `grok login` once. Datapad Workbench uses your Grok Build session.')
   }
 
-  await request('authenticate', { methodId, _meta: { headless: true } }, 30_000)
+  await call('authenticate', { methodId, _meta: { headless: true } }, 30_000)
 }
 
-function attachProcess(child: ChildProcessWithoutNullStreams): void {
-  proc = child
+/** Drop everything waiting on one agent's sessions. The other agent keeps running. */
+function releaseAgentState(conn: Conn, reason: string): void {
+  const sessions = new Set(conn.liveSessions)
+  for (const [sessionId, agent] of sessionAgents) {
+    if (agent === conn.agent) sessions.add(sessionId)
+  }
+  for (const waiter of conn.pending.values()) {
+    if (waiter.timer) clearTimeout(waiter.timer)
+    waiter.reject(new Error(reason))
+  }
+  conn.pending.clear()
+  conn.liveSessions.clear()
+  if (conn.agent === 'claude') resetClaudeOptions()
+  conn.inbound.length = 0
+  conn.flushScheduled = false
+  for (const sessionId of sessions) {
+    const turn = turnWaits.get(sessionId)
+    if (!turn) continue
+    const waiters = turn.waiters.splice(0)
+    turn.done = true
+    for (const waiter of waiters) waiter()
+    turnWaits.delete(sessionId)
+  }
+  for (const item of [...pendingExits.values()]) {
+    if (agentForSession(item.sessionId) === conn.agent) item.resolve('abandoned')
+  }
+  const other = conns[conn.agent === 'grok' ? 'claude' : 'grok']
+  if (!other.proc) {
+    cancelAllPermissions()
+    cancelAllQuestions()
+    return
+  }
+  for (const sessionId of sessions) {
+    cancelSessionPermissions(sessionId)
+    cancelSessionQuestions(sessionId)
+  }
+}
+
+function attachProcess(conn: Conn, child: ChildProcessWithoutNullStreams): void {
+  conn.proc = child
   const rl = readline.createInterface({ input: child.stdout })
   rl.on('line', (line) => {
     const trimmed = line.trim()
     if (!trimmed.startsWith('{')) return
     try {
-      enqueue(JSON.parse(trimmed) as JsonRpc)
+      enqueue(conn, JSON.parse(trimmed) as JsonRpc)
     } catch {
       // ignore non-JSON banners
     }
@@ -542,27 +709,28 @@ function attachProcess(child: ChildProcessWithoutNullStreams): void {
     // keep stderr from filling the pipe
   })
   child.on('exit', () => {
-    proc = null
-    ready = null
-    liveSessions.clear()
-    inbound.length = 0
-    flushScheduled = false
-    for (const waiter of pending.values()) {
-      if (waiter.timer) clearTimeout(waiter.timer)
-      waiter.reject(new Error('Grok Build exited'))
-    }
-    pending.clear()
-    for (const turn of turnWaits.values()) {
-      const waiters = turn.waiters.splice(0)
-      turn.done = true
-      for (const waiter of waiters) waiter()
-    }
-    turnWaits.clear()
-    for (const item of pendingExits.values()) item.resolve('abandoned')
-    pendingExits.clear()
-    cancelAllPermissions()
-    cancelAllQuestions()
+    // An aborted process already released its state, and a new one may be running.
+    if (conn.proc !== child) return
+    conn.proc = null
+    conn.ready = null
+    releaseAgentState(conn, conn.agent === 'claude' ? 'Claude Code exited' : 'Grok Build exited')
   })
+}
+
+function readCommands(list: SessionUpdate['update']['availableCommands']): AgentCommand[] {
+  const commands: AgentCommand[] = []
+  for (const item of list ?? []) {
+    const name = typeof item?.name === 'string' ? item.name.replace(/^\//, '').trim() : ''
+    if (!name) continue
+    const hint = typeof item.input?.hint === 'string' ? item.input.hint : undefined
+    commands.push({ name, description: typeof item.description === 'string' ? item.description : '', hint })
+  }
+  return commands
+}
+
+/** The slash commands an agent announced for a session, if it has. */
+export function sessionCommands(sessionId: string): AgentCommand[] {
+  return acpSessionCommands.get(sessionId) ?? []
 }
 
 export function onSessionUpdate(listener: (update: SessionUpdate) => void): () => void {
@@ -572,54 +740,62 @@ export function onSessionUpdate(listener: (update: SessionUpdate) => void): () =
   }
 }
 
-export async function ensureAgent(): Promise<void> {
-  if (ready) return ready
-  ready = (async () => {
-    const child = spawn(grokBinary(), ['agent', '--no-leader', 'stdio'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env
-    })
-    attachProcess(child)
-    await authenticate()
+export async function ensureAgent(agent: ChatAgent = 'grok'): Promise<void> {
+  const conn = conns[agent]
+  if (conn.ready) return conn.ready
+  conn.ready = (async () => {
+    attachProcess(conn, spawnAgent(agent))
+    await handshake(
+      agent,
+      (method, params, timeoutMs) => request(conn, method, params, timeoutMs),
+      'Datapad Workbench'
+    )
   })()
   try {
-    await ready
+    await conn.ready
   } catch (error) {
-    ready = null
-    proc?.kill()
-    proc = null
+    conn.ready = null
+    const child = conn.proc
+    conn.proc = null
+    child?.kill()
     throw error
   }
 }
 
+/** Session rules: Grok reads `_meta.rules`, Claude Code appends a system prompt. */
+function sessionRules(agent: ChatAgent, rules: string): Record<string, unknown> {
+  if (agent === 'claude') {
+    return { systemPrompt: { mode: 'append', content: [{ type: 'text', text: rules }] } }
+  }
+  return { _meta: { rules } }
+}
+
 async function sessionConfig(
+  agent: ChatAgent,
   cwd: string,
   extraRules?: string | null
-): Promise<{
-  cwd: string
-  mcpServers: Awaited<ReturnType<typeof browserMcpServers>>
-  _meta: { rules: string }
-}> {
+): Promise<Record<string, unknown>> {
   const rules = extraRules?.trim()
     ? `${BROWSER_SESSION_RULE}\n\n${extraRules.trim()}`
     : BROWSER_SESSION_RULE
   return {
     cwd,
-    mcpServers: await browserMcpServers(),
-    _meta: { rules }
+    mcpServers: [...(await browserMcpServers()), ...toAcpMcpServers(await getMcpServers())],
+    ...sessionRules(agent, rules)
   }
 }
 
 async function applySessionEffort(sessionId: string, effort: ReasoningEffort | null): Promise<void> {
-  if (!effort || !proc || !liveSessions.has(sessionId)) return
+  const conn = connForSession(sessionId)
+  if (!effort || !conn.proc || !conn.liveSessions.has(sessionId)) return
   try {
     await request(
+      conn,
       'session/set_config_option',
-      {
-        sessionId,
-        configId: 'reasoning_effort',
-        value: { value: effort }
-      },
+      conn.agent === 'claude'
+        ? { sessionId, configId: 'effort', value: effort }
+        : // Grok Build tops out at Extra high, so Claude's Max maps to it.
+          { sessionId, configId: 'reasoning_effort', value: { value: effort === 'max' ? 'xhigh' : effort } },
       8_000
     )
   } catch {
@@ -628,40 +804,160 @@ async function applySessionEffort(sessionId: string, effort: ReasoningEffort | n
 }
 
 export async function applyEffortToLiveSessions(effort: ReasoningEffort | null): Promise<void> {
-  if (!effort || !proc) return
-  await Promise.all([...liveSessions].map((sessionId) => applySessionEffort(sessionId, effort)))
+  if (!effort) return
+  const sessions = Object.values(conns).flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
+  await Promise.all(sessions.map((sessionId) => applySessionEffort(sessionId, effort)))
 }
 
-export async function newSession(cwd: string, extraRules?: string | null): Promise<string> {
-  await ensureAgent()
+/** Pick the Claude Code model. The Grok agent has no model to choose here. */
+async function applyClaudeModel(call: Call, sessionId: string, model: string): Promise<void> {
+  if (!model) return
+  try {
+    await call('session/set_config_option', { sessionId, configId: 'model', value: model }, 8_000)
+  } catch {
+    // An alias this plan does not offer. Claude Code keeps its default.
+  }
+}
+
+type ConfigOption = {
+  id?: string
+  options?: Array<{ value?: unknown; name?: unknown; description?: unknown }>
+}
+
+function readClaudeOptions(configOptions: unknown): ClaudeOptions | null {
+  if (!Array.isArray(configOptions)) return null
+  const list = configOptions as ConfigOption[]
+  const models = list.find((option) => option.id === 'model')?.options
+  if (!models?.length) return null
+  const efforts = list.find((option) => option.id === 'effort')?.options ?? []
+  return {
+    // The settings store the default as an empty string. Its description names the model.
+    models: models.flatMap((option) => {
+      if (typeof option.value !== 'string') return []
+      const description = typeof option.description === 'string' ? option.description : undefined
+      const name = typeof option.name === 'string' ? option.name : option.value
+      return option.value === 'default'
+        ? [{ value: '', name: description ? `Default (${description})` : 'Default' }]
+        : [{ value: option.value, name, description }]
+    }),
+    efforts: efforts.flatMap((option) => {
+      const effort = normalizeReasoningEffort(option.value)
+      return effort ? [effort] : []
+    })
+  }
+}
+
+// A session that never gets a prompt, kept only to read what Claude Code offers.
+// Without a prompt it writes no transcript, so it never shows up as a chat.
+let claudeProbe: Promise<string> | null = null
+let claudeProbeQueue: Promise<unknown> = Promise.resolve()
+const claudeOptionsCache = new Map<string, ClaudeOptions>()
+
+function resetClaudeOptions(): void {
+  claudeProbe = null
+  claudeOptionsCache.clear()
+}
+
+/** Claude Code's model list, and the effort levels of `model` ('' is the default). */
+export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
+  const key = model || 'default'
+  const cached = claudeOptionsCache.get(key)
+  if (cached) return Promise.resolve(cached)
+  const next = claudeProbeQueue.then(async () => {
+    const hit = claudeOptionsCache.get(key)
+    if (hit) return hit
+    try {
+      await ensureAgent('claude')
+      const conn = conns.claude
+      if (!claudeProbe) {
+        claudeProbe = request<{ sessionId: string; configOptions?: unknown }>(
+          conn,
+          'session/new',
+          { cwd: tmpdir(), mcpServers: [] },
+          30_000
+        ).then((result) => {
+          sessionAgents.set(result.sessionId, 'claude')
+          const options = readClaudeOptions(result.configOptions)
+          if (options) claudeOptionsCache.set('default', options)
+          return result.sessionId
+        })
+      }
+      const sessionId = await claudeProbe
+      if (!claudeOptionsCache.has(key)) {
+        const result = await request<{ configOptions?: unknown }>(
+          conn,
+          'session/set_config_option',
+          { sessionId, configId: 'model', value: key },
+          8_000
+        )
+        const options = readClaudeOptions(result.configOptions)
+        if (options) claudeOptionsCache.set(key, options)
+      }
+      return claudeOptionsCache.get(key) ?? null
+    } catch {
+      resetClaudeOptions()
+      return null
+    }
+  })
+  claudeProbeQueue = next
+  return next
+}
+
+export async function applyClaudeModelToLiveSessions(model: string): Promise<void> {
+  const conn = conns.claude
+  if (!conn.proc) return
+  const call = connCall(conn)
+  // Back to "default" when the setting is cleared, so live chats follow it too.
+  await Promise.all([...conn.liveSessions].map((sessionId) => applyClaudeModel(call, sessionId, model || 'default')))
+}
+
+async function applySessionSettings(agent: ChatAgent, sessionId: string): Promise<void> {
+  await applySessionEffort(sessionId, await getEffort())
+  if (agent !== 'claude') return
+  await applyClaudeModel(connCall(conns.claude), sessionId, await getClaudeModel())
+}
+
+export async function newSession(
+  cwd: string,
+  extraRules?: string | null,
+  agent: ChatAgent = 'grok'
+): Promise<string> {
+  await ensureAgent(agent)
+  const conn = conns[agent]
   const result = await request<{
     sessionId: string
     modes?: { currentModeId?: string; availableModes?: SessionMode[] }
-  }>('session/new', await sessionConfig(cwd, extraRules), 30_000)
+  }>(conn, 'session/new', await sessionConfig(agent, cwd, extraRules), 30_000)
+  sessionAgents.set(result.sessionId, agent)
   rememberModes(result.sessionId, result)
-  liveSessions.add(result.sessionId)
-  await applySessionEffort(result.sessionId, await getEffort())
+  conn.liveSessions.add(result.sessionId)
+  await applySessionSettings(agent, result.sessionId)
   return result.sessionId
 }
 
 export async function loadSession(
   sessionId: string,
   cwd: string,
-  extraRules?: string | null
+  extraRules?: string | null,
+  agent: ChatAgent = 'grok'
 ): Promise<void> {
-  await ensureAgent()
+  await ensureAgent(agent)
+  const conn = conns[agent]
+  sessionAgents.set(sessionId, agent)
   const result = await request<unknown>(
+    conn,
     'session/load',
-    { sessionId, ...(await sessionConfig(cwd, extraRules)) },
+    { sessionId, ...(await sessionConfig(agent, cwd, extraRules)) },
     60_000
   )
   rememberModes(sessionId, result)
-  liveSessions.add(sessionId)
-  await applySessionEffort(sessionId, await getEffort())
+  conn.liveSessions.add(sessionId)
+  await applySessionSettings(agent, sessionId)
 }
 
 export function hasLiveSession(sessionId: string): boolean {
-  return proc !== null && liveSessions.has(sessionId)
+  const conn = connForSession(sessionId)
+  return conn.proc !== null && conn.liveSessions.has(sessionId)
 }
 
 function moneyVal(value: unknown): number | null {
@@ -690,9 +986,25 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
+/**
+ * Grok lists its slash commands when asked instead of announcing them.
+ * A live session adds the project's own skills; without one the list is the user's.
+ */
+export async function grokCommands(sessionId: string | null): Promise<AgentCommand[]> {
+  const live = sessionId && hasLiveSession(sessionId) ? sessionId : null
+  const key = live ?? ''
+  const known = acpSessionCommands.get(key)
+  if (known?.length) return known
+  await ensureAgent('grok')
+  const raw = asRecord(await request<unknown>(conns.grok, '_x.ai/commands/list', live ? { sessionId: live } : {}, 10_000))
+  const commands = readCommands(raw.commands as SessionUpdate['update']['availableCommands'])
+  acpSessionCommands.set(key, commands)
+  return commands
+}
+
 export async function fetchUsage(): Promise<UsageSnapshot> {
-  await ensureAgent()
-  const raw = asRecord(await request<unknown>('_x.ai/billing', {}, 20_000))
+  await ensureAgent('grok')
+  const raw = asRecord(await request<unknown>(conns.grok, '_x.ai/billing', {}, 20_000))
   const config = asRecord(raw.config ?? raw)
   const period = asRecord(config.currentPeriod)
   const used = moneyVal(config.creditUsagePercent)
@@ -712,8 +1024,9 @@ export async function fetchUsage(): Promise<UsageSnapshot> {
 export async function setAcpSessionMode(sessionId: string, modeId: string): Promise<boolean> {
   if (!sessionId || !modeId) return false
   try {
-    await ensureAgent()
-    await request('session/set_mode', { sessionId, modeId }, 15_000)
+    const agent = agentForSession(sessionId)
+    await ensureAgent(agent)
+    await request(conns[agent], 'session/set_mode', { sessionId, modeId }, 15_000)
     const current = acpSessionModes.get(sessionId)
     if (current) acpSessionModes.set(sessionId, { ...current, current: modeId })
     return true
@@ -727,7 +1040,8 @@ export async function promptSession(
   text: string,
   images: Array<{ mimeType: string; data: string }> = []
 ): Promise<void> {
-  await ensureAgent()
+  const agent = agentForSession(sessionId)
+  await ensureAgent(agent)
   const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
   if (text.trim()) {
     prompt.push({ type: 'text', text })
@@ -740,6 +1054,7 @@ export async function promptSession(
   }
   beginTurn(sessionId)
   await request(
+    conns[agent],
     'session/prompt',
     {
       sessionId,
@@ -747,44 +1062,34 @@ export async function promptSession(
     },
     0
   )
-  await waitForTurnEnd(sessionId)
+  // Grok can send turn_completed after the prompt reply. Claude Code sends every update first.
+  if (agent === 'grok') await waitForTurnEnd(sessionId)
+  else markTurnDone(sessionId)
 }
 
 export function cancelSession(sessionId: string): void {
-  if (!proc) return
-  send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
+  const conn = connForSession(sessionId)
+  if (!conn.proc) return
+  send(conn, { jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
 }
 
-export function abortMainAgent(): void {
-  if (!proc) return
-  for (const waiter of pending.values()) {
-    if (waiter.timer) clearTimeout(waiter.timer)
-    waiter.reject(new Error('cancelled'))
-  }
-  pending.clear()
-  for (const item of pendingExits.values()) item.resolve('abandoned')
-  pendingExits.clear()
-  cancelAllQuestions()
+/** Kill one agent's process. Chats on the other agent keep running. */
+export function abortAgent(agent: ChatAgent = 'grok'): void {
+  const conn = conns[agent]
+  const child = conn.proc
+  if (!child) return
+  conn.proc = null
+  conn.ready = null
   try {
-    proc.kill()
+    child.kill()
   } catch {
     // already gone
   }
-  proc = null
-  ready = null
-  liveSessions.clear()
-  inbound.length = 0
-  flushScheduled = false
-  for (const turn of turnWaits.values()) {
-    const waiters = turn.waiters.splice(0)
-    turn.done = true
-    for (const waiter of waiters) waiter()
-  }
-  turnWaits.clear()
+  releaseAgentState(conn, 'cancelled')
 }
 
 export function isAgentRunning(): boolean {
-  return proc !== null
+  return Object.values(conns).some((conn) => conn.proc !== null)
 }
 
 export async function promptIsolated(
@@ -793,13 +1098,11 @@ export async function promptIsolated(
   images: Array<{ mimeType: string; data: string }> = [],
   onText?: (chunk: string) => void,
   signal?: AbortSignal,
-  options?: { timeoutMs?: number; rules?: string }
+  options?: { timeoutMs?: number; rules?: string; agent?: ChatAgent }
 ): Promise<string> {
   if (signal?.aborted) throw new Error('cancelled')
-  const child = spawn(grokBinary(), ['agent', '--no-leader', 'stdio'], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: process.env
-  })
+  const agent = options?.agent ?? 'grok'
+  const child = spawnAgent(agent)
   let next = 1
   const waiters = new Map<number, Pending>()
   let assembled = ''
@@ -851,12 +1154,16 @@ export async function promptIsolated(
     if (message.method === 'session/request_permission') {
       const params = (message.params ?? {}) as PermissionParams
       const tool = params.toolCall
-      const deny = isPlanGateTool(params) || isMutatingTool(tool?.kind, tool?.title, tool?.name)
+      const options = params.options ?? []
+      const deny =
+        (agent === 'claude' && isClaudeExitPlan(options)) ||
+        isPlanGateTool(params) ||
+        isMutatingTool(tool?.kind, tool?.title, tool?.name)
       if (message.id !== undefined) {
         write({
           jsonrpc: '2.0',
           id: message.id,
-          result: outcomeFor(params.options ?? [], deny ? 'deny' : 'allow')
+          result: outcomeFor(agent === 'claude' ? claudeOptions(options) : options, deny ? 'deny' : 'allow')
         })
       }
       return
@@ -915,41 +1222,22 @@ export async function promptIsolated(
   signal?.addEventListener('abort', onAbort)
 
   try {
-    const init = await call<{ authMethods?: Array<{ id: string }> }>(
-      'initialize',
-      {
-        protocolVersion: 1,
-        clientInfo: { name: 'Grok Build Workbench-aside', version: '0.1.0' },
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
-          elicitation: { form: {} }
-        }
-      },
-      30_000
-    )
-    const methods = new Set((init.authMethods ?? []).map((method) => method.id))
-    const apiKey = await getApiKey()
-    const methodId = methods.has('cached_token')
-      ? 'cached_token'
-      : apiKey && methods.has('xai.api_key')
-        ? 'xai.api_key'
-        : null
-    if (!methodId) throw new Error('Run `grok login` once. Grok Build Workbench uses your Grok Build session.')
-    await call('authenticate', { methodId, _meta: { headless: true } }, 30_000)
+    await handshake(agent, call, 'Datapad Workbench-aside')
+    const rules =
+      options?.rules ??
+      'Read-only aside on the current main task. Use the provided context. You may read project files. Do not edit files or run mutating commands.'
     const created = await call<{ sessionId: string }>(
       'session/new',
       {
         cwd,
         mcpServers: [],
-        _meta: {
-          rules:
-            options?.rules ??
-            'Read-only aside on the current main task. Use the provided context. You may read project files. Do not edit files or run mutating commands.'
-        }
+        ...sessionRules(agent, rules),
+        // Side questions are throwaway: keep them out of the user's Claude Code history.
+        ...(agent === 'claude' ? { _meta: { claudeCode: { options: { persistSession: false } } } } : {})
       },
       30_000
     )
+    if (agent === 'claude') await applyClaudeModel(call, created.sessionId, await getClaudeModel())
     const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
     if (text.trim()) prompt.push({ type: 'text', text })
     for (const image of images) {

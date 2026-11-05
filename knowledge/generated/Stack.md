@@ -1,6 +1,6 @@
 ---
 tags:
-  - grok-build-workbench
+  - datapad-workbench
   - generated
   - stack
 workbench_generated: true
@@ -8,11 +8,11 @@ workbench_generated: true
 
 # Stack
 
-> This note is maintained by Grok Build Workbench. Add your own writing in `notes/`.
+> This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
 Electron + React + Vite + Tailwind
 
-Detected languages: javascript, tsx, typescript.
+Detected languages: javascript, tsx, typescript, yaml.
 
 - [[Overview]]
 - [[Architecture]]

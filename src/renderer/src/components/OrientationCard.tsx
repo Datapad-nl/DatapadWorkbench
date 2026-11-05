@@ -44,6 +44,39 @@ export function IndexStatus({
   const state = index?.state ?? (project?.path ? 'not-indexed' : 'no-folder')
   if (state === 'no-folder') return null
 
+  if (compact) {
+    return (
+      <div className="flex h-5 min-w-0 items-center gap-1.5 font-mono text-[11px] text-faint">
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+            state === 'indexed'
+              ? 'bg-ok'
+              : state === 'indexing' || state === 'installing'
+                ? 'streaming-dot bg-accent'
+                : state === 'error' || state === 'missing-cli'
+                  ? 'bg-danger'
+                  : 'bg-line-strong'
+          }`}
+        />
+        <span className="shrink-0">{stateLabel(state)}</span>
+        {project?.path && (
+          <span className="min-w-0 truncate" title={project.path}>
+            · {project.path}
+          </span>
+        )}
+        {canIndex(state) && (
+          <button
+            data-testid="create-index"
+            className="shrink-0 rounded px-1 font-sans text-[11px] text-muted hover:bg-hover hover:text-ink"
+            onClick={() => void indexProject(projectId)}
+          >
+            {indexAction(state)}
+          </button>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className={`flex items-center gap-2 ${compact ? '' : 'mt-1'}`}>
       <span
@@ -57,7 +90,7 @@ export function IndexStatus({
                 : 'bg-line'
         }`}
       />
-      <span className="font-mono text-[9px] uppercase tracking-[0.12em] text-muted">
+      <span className="text-[11px] text-muted">
         {stateLabel(state)}
         {state === 'indexed' && index?.fileCount != null ? ` · ${index.fileCount}` : ''}
       </span>
@@ -104,20 +137,20 @@ export function ProjectOrientation({
   return (
     <div
       data-testid="orientation-card"
-      className="select-text rounded-2xl border border-line bg-surface px-5 py-4"
+      className="select-text rounded-[8px] border border-line-strong bg-raised px-4 py-3.5"
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted">Project</div>
-          <div className="font-display mt-1 text-[16px] font-semibold tracking-tight text-ink">
+          <div className="text-[11px] text-faint">Project</div>
+          <div className="mt-0.5 text-[13px] font-semibold text-ink">
             {card?.name ?? 'Project'}
           </div>
         </div>
-        <div className="shrink-0 font-mono text-[10px] uppercase tracking-[0.12em] text-muted">
+        <div className="shrink-0 text-[11px] text-faint">
           {stateLabel(state)}
         </div>
       </div>
-      {card?.stack && <div className="mt-1 text-[13px] text-ink/80">{card.stack}</div>}
+      {card?.stack && <div className="mt-1 text-[13px] text-ink-2">{card.stack}</div>}
       {card?.summary && <p className="mt-2 text-[13px] leading-5 text-muted">{card.summary}</p>}
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-muted">
         {stats.map((item) => (
@@ -126,7 +159,7 @@ export function ProjectOrientation({
         {card?.rulesFile && <span>Rules: {card.rulesFile}</span>}
       </div>
       {card?.tree && (
-        <pre className="mt-3 overflow-x-auto font-mono text-[11px] leading-5 text-ink/70">
+        <pre className="mt-3 overflow-x-auto font-mono text-[11px] leading-5 text-muted">
           {card.tree}
         </pre>
       )}
@@ -137,7 +170,7 @@ export function ProjectOrientation({
       {canIndex(state) && (
         <button
           data-testid="create-index-card"
-          className="mt-4 rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
+          className="mt-3 flex h-8 items-center rounded-[10px] bg-accent px-3.5 text-[12.5px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
           onClick={() => void indexProject(projectId)}
         >
           {indexAction(state)}

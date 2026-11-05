@@ -14,15 +14,18 @@ import { useStreams, useWorkspace } from '../workspace'
 import {
   dropSpokenUserEcho,
   echoesUserRequest,
-  englishSpeechText,
+  isAsideSpeaking,
   isSpeaking,
   openLiveMicStream,
   primeTtsOutput,
   resetSpokenLog,
   resetVoiceMotion,
-  shouldMuteReply,
   speakableText,
+  speakAside,
   speakText,
+  speechLanguage,
+  stopAside,
+  warmAsideVoice,
   textLanguage,
   startNativeSpeech,
   startRecorder,
@@ -120,8 +123,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   userTalkingRef.current = userTalking
 
   useEffect(() => {
-    void window.grokcode.getVoiceModelStatus().then(setModel)
-    return window.grokcode.onVoiceModelStatus(setModel)
+    void window.workbench.getVoiceModelStatus().then(setModel)
+    return window.workbench.onVoiceModelStatus(setModel)
   }, [])
 
   useEffect(() => {
@@ -136,6 +139,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     setReplyMuted(spoken.silenced)
     if (!spoken.silenced) return
     speakEpoch.current += 1
+    stopAside()
     stopSpeaking()
     if (statusRef.current === 'speaking') {
       const stillWorking = streamsRef.current[chatId]?.status === 'streaming' || liveRef.current
@@ -162,6 +166,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     setBands([0, 0, 0, 0, 0, 0, 0])
     resetVoiceMotion()
     speakEpoch.current += 1
+    stopAside()
     stopSpeaking()
     speechIgnoreEnd.current = true
     speechRef.current?.stop()
@@ -218,6 +223,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       if (shouldSend) {
         if (looping) {
           awaitingReply.current = true
+          stopAside()
           stopSpeaking()
           speakEpoch.current += 1
         }
@@ -247,6 +253,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       setError(null)
       if (liveRef.current) {
         awaitingReply.current = true
+        stopAside()
         stopSpeaking()
         speakEpoch.current += 1
         await sendMessage(chatId, text.trim())
@@ -310,6 +317,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     }
     if (!opts?.preserveSpeech) {
       speakEpoch.current += 1
+      stopAside()
       stopSpeaking()
     }
     listenLock.current = true
@@ -341,7 +349,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       })
       recorder.current = rec
       if (statusRef.current !== 'speaking' && statusRef.current !== 'waiting') setStatus('listening')
-      void window.grokcode.ensureVoiceModel().then(setModel).catch(() => undefined)
+      void window.workbench.ensureVoiceModel().then(setModel).catch(() => undefined)
     } catch (err) {
       liveRef.current = false
       setLive(false)
@@ -442,7 +450,6 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         spoken.plain = ''
         spoken.draftLen = 0
         spoken.ids.clear()
-        spoken.muted = false
         spoken.silenced = false
         setReplyMuted(false)
         resetSpokenLog()
@@ -463,23 +470,13 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         latestUserText(chatsById[activeChatId]?.messages)
       )
       if (!raw) return
-      if (!spoken.plain && (spoken.muted || textLanguage(raw) === 'other')) {
-        spoken.muted = true
-        if (isSpeaking()) {
-          speakEpoch.current += 1
-          stopSpeaking()
-          resetSpokenLog()
-        }
-        if (statusRef.current === 'speaking') setStatus('waiting')
-        return
-      }
-      if (!spoken.plain && textLanguage(raw) !== 'en') return
-      const full = englishSpeechText(raw, false)
-      const { speak, consumed } = takeSpeakableDelta(full, spoken.plain, false)
+      // Wait until there is enough text to tell the language, so the first sentence gets the right accent.
+      if (!spoken.plain && voice.language === 'auto' && textLanguage(raw) === 'unknown') return
+      const { speak, consumed } = takeSpeakableDelta(raw, spoken.plain, false)
       if (!speak) return
       spoken.plain = consumed
       setStatus('speaking')
-      void speakText(speak, voice, { append: true }).catch((err) => {
+      void speakText(speak, voice, { append: true, lang: speechLanguage(raw, voice) }).catch((err) => {
         if (streams[activeChatId]?.status !== 'streaming') return
         setError(err instanceof Error ? err.message : 'Could not speak')
         setStatus('error')
@@ -503,16 +500,14 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     spoken.ids.add(last.id)
     const userText = latestUserText(chat?.messages)
     const raw = dropSpokenUserEcho(speakableText(last.content), userText, true)
-    const blocked = spoken.silenced || spoken.muted || (!spoken.plain && shouldMuteReply(userText, raw))
-    spoken.muted = false
-    const full = blocked ? '' : englishSpeechText(raw, true)
+    const full = spoken.silenced ? '' : raw
     const prior = spoken.plain
     const speak = leftoverSpeak(full, prior)
     spoken.plain = full.replace(/\s+/g, ' ').trim()
     spoken.draftLen = 0
     const epoch = ++speakEpoch.current
     const run = speak
-      ? speakText(speak, voice, { append: Boolean(prior.trim()) })
+      ? speakText(speak, voice, { append: Boolean(prior.trim()), lang: speechLanguage(full, voice) })
       : speakText('', voice, { append: true })
     if (speak) setStatus('speaking')
     void run
@@ -558,7 +553,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         speakableLen.current = speakable.length
         replyAt.current = Date.now()
       }
-      if (speechState(chatId).muted || speechState(chatId).silenced) return
+      if (speechState(chatId).silenced) return
       const cue = progressRef.current
       const userText = latestUserText(chatsByIdRef.current[chatId]?.messages)
       const echoesUser = echoesUserRequest(cue.speech, userText) || echoesUserRequest(cue.label, userText)
@@ -573,7 +568,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
           announcedAt: announcedAt.current,
           lastKey: announcedKey.current,
           key: cue.key,
-          speaking: isSpeaking(),
+          speaking: isAsideSpeaking(),
           userBusy,
           echoesUser
         })
@@ -586,7 +581,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       progressSpokenText = `${progressSpokenText} ${speech}`.trim().slice(-2000)
       const epoch = speakEpoch.current
       setStatus('speaking')
-      void speakText(speech, voiceNow, { append: true, repeat: true })
+      void speakAside(speech, voiceNow)
         .catch((err) => {
           if (epoch !== speakEpoch.current) return
           if (streamsRef.current[chatId]?.status !== 'streaming') return
@@ -596,7 +591,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         .finally(() => {
           if (epoch !== speakEpoch.current) return
           if (streamsRef.current[chatId]?.status !== 'streaming') return
-          if (statusRef.current === 'speaking' && !isSpeaking()) setStatus('waiting')
+          if (statusRef.current === 'speaking' && !isSpeaking() && !isAsideSpeaking()) setStatus('waiting')
         })
     }, 1000)
     return () => window.clearInterval(timer)
@@ -626,7 +621,9 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
 
   useEffect(() => {
     if (!voice.enabled) return
-    void window.grokcode.ensureVoiceModel()
+    void window.workbench.ensureVoiceModel().then((next) => {
+      if (next.ready) warmAsideVoice()
+    })
   }, [voice.enabled])
 
   const consumeTranscript = useCallback(() => setPendingTranscript(null), [])
@@ -681,7 +678,6 @@ type ChatSpeech = {
   plain: string
   ids: Set<string>
   draftLen: number
-  muted: boolean
   silenced: boolean
   hearing: boolean
 }
@@ -692,7 +688,7 @@ let progressSpokenText = ''
 function speechState(chatId: string): ChatSpeech {
   let state = speechByChat.get(chatId)
   if (!state) {
-    state = { plain: '', ids: new Set(), draftLen: 0, muted: false, silenced: false, hearing: false }
+    state = { plain: '', ids: new Set(), draftLen: 0, silenced: false, hearing: false }
     speechByChat.set(chatId, state)
   }
   return state

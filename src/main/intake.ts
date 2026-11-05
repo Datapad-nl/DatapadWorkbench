@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readFile, rm, writeFile } from 'fs/promises'
+import { mkdir, readFile, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type {
@@ -32,7 +32,7 @@ const FIELD_LABEL: Record<ScanField, string> = {
 }
 
 function dataDir(): string {
-  return join(app.getPath('userData'), 'grokcode')
+  return join(app.getPath('userData'), 'workbench')
 }
 
 function profilesPath(): string {
@@ -74,14 +74,6 @@ export async function needsProjectIntake(projectId: string): Promise<boolean> {
   const existing = await getProjectIntake(projectId)
   if (!existing) return true
   return existing.status !== 'completed' && existing.status !== 'skipped'
-}
-
-export async function deleteProjectIntake(projectId: string): Promise<void> {
-  const profiles = await loadIntakes()
-  if (!profiles[projectId]) return
-  delete profiles[projectId]
-  await saveIntakes(profiles)
-  await removeMemorySection(projectId)
 }
 
 function formatValues(values: string[]): string {
@@ -129,7 +121,7 @@ export function formatProjectSessionRules(intake: ProjectIntake | null, project:
     ].join(' ')
   }
   return [
-    `This Grok Build Workbench project already has a briefing.`,
+    `This Datapad Workbench project already has a briefing.`,
     `"From the repo" facts were derived from the codebase — match that stack unless the user asks to change it.`,
     `"From you" answers are intent the code cannot show.`,
     ...briefLines(intake, project)
@@ -146,8 +138,8 @@ export async function projectSessionRules(projectId: string | undefined): Promis
 }
 
 function memoryBlock(project: Project, intake: ProjectIntake): string {
-  const start = `<!-- grokcode-project ${project.id} -->`
-  const end = `<!-- /grokcode-project ${project.id} -->`
+  const start = `<!-- workbench-project ${project.id} -->`
+  const end = `<!-- /workbench-project ${project.id} -->`
   const body = [`### ${project.name}`, '', ...briefLines(intake, project)].join('\n')
   return `${start}\n${body}\n${end}`
 }
@@ -185,15 +177,6 @@ async function writeGrokMemory(project: Project, intake: ProjectIntake): Promise
   if (!path) return
   await mkdir(join(path, '..'), { recursive: true })
   await writeFile(path, `${memoryBlock(project, intake)}\n`, 'utf8')
-}
-
-async function removeMemorySection(projectId: string): Promise<void> {
-  await stripLegacyMemory(projectId)
-  const projects = await listProjects()
-  const project = projects.find((item) => item.id === projectId)
-  const path = project ? briefingPath(project) : null
-  if (!path) return
-  await rm(path, { force: true })
 }
 
 async function persistIntake(project: Project, intake: ProjectIntake): Promise<void> {

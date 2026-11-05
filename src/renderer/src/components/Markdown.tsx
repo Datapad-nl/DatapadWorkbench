@@ -24,7 +24,7 @@ function LocalMedia({
 }): React.JSX.Element {
   const url = mediaUrl(chatId, src)
   const open = (): void => {
-    void window.grokcode.openMedia(chatId, src)
+    void window.workbench.openMedia(chatId, src)
   }
   if (isVideoSrc(src)) {
     return <video src={url} controls className={FRAME} />

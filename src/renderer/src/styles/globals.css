@@ -24,8 +24,16 @@
   --font-sans: "SF Pro Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
   --font-display: "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-  --spacing-titlebar: 52px;
-  --spacing-traffic: 80px;
+  --color-faint: color-mix(in srgb, var(--color-muted) 62%, var(--color-canvas));
+  --color-ink-2: color-mix(in srgb, var(--color-ink) 80%, var(--color-canvas));
+  --color-hover: color-mix(in srgb, var(--color-raised) 55%, var(--color-sidebar));
+  --color-line-strong: color-mix(in srgb, var(--color-line) 70%, var(--color-ink) 8%);
+  --color-accent-soft: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  --color-accent-line: color-mix(in srgb, var(--color-accent) 35%, transparent);
+  --color-ok: #7fbf8e;
+  --spacing-titlebar: 48px;
+  --spacing-statusbar: 28px;
+  --spacing-traffic: 88px;
 }
 
 html,
@@ -83,6 +91,14 @@ textarea {
 
 .no-drag {
   -webkit-app-region: no-drag;
+}
+
+/* In the base layer so a utility such as `outline-none` can still turn it off. */
+@layer base {
+  :where(button, a, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-accent-line);
+    outline-offset: 1px;
+  }
 }
 
 .markdown,

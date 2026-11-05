@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { resolveProjectColor } from '../../../shared/projectColor'
 import type {
   Attachment,
   ChatPlan,
@@ -14,7 +13,8 @@ import type {
   PlanVerdict,
   Project,
   ProjectIndex,
-  UserQuestionRequest
+  UserQuestionRequest,
+  AgentCommand
 } from '../../../shared/types'
 import {
   commandAt,
@@ -22,21 +22,27 @@ import {
   filterSlashCommands,
   matchedSlashAlias,
   parseSlashLine,
+  slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
 import {
+  chatAgentLabel,
   formatGrokCli,
   nextPermissionMode,
+  normalizeChatAgent,
   normalizePermissionMode,
   normalizeReasoningEffort,
-  reasoningEffortLabel
+  reasoningEffortLabel,
+  type ChatAgent
 } from '../../../shared/types'
 import { useChatProgress } from '../progress'
 import { VoiceBlob } from '../voice/VoiceBlob'
 import { useVoice } from '../voice/VoiceProvider'
-import { useStreams, useWorkspace } from '../workspace'
+import { useStreams, useWorkspace, type RightPaneId } from '../workspace'
+import { AgentGlyph, Icon, IconButton, type IconName } from './icons'
 import { Markdown } from './Markdown'
 import { ProjectOrientation } from './OrientationCard'
+import wordmark from '../assets/wordmark.png'
 
 const MAX_IMAGES = 6
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -54,6 +60,7 @@ type SlashRun = {
   draft: { attachments: Attachment[]; mentions: FileMention[] }
   chatId: string
   projectId: string
+  agent: ChatAgent
   title: string
   sessionHint: string | null
   messages: Message[]
@@ -67,8 +74,8 @@ type SlashRun = {
     mentions?: FileMention[]
   ) => Promise<void>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
-  saveSettings: (input: { model?: string; effort?: string | null }) => Promise<void>
-  setShowSettings: (open: boolean) => void
+  saveSettings: (input: { model?: string; claudeModel?: string; effort?: string | null }) => Promise<void>
+  setShowSettings: (open: boolean | 'mcp') => void
   setShowUsage: (open: boolean) => void
   openRewind: () => void
 }
@@ -85,7 +92,7 @@ async function copyText(text: string): Promise<boolean> {
 function conversationMarkdown(messages: Message[]): string {
   return messages
     .map((message) => {
-      const who = message.role === 'user' ? 'You' : 'Grok'
+      const who = message.role === 'user' ? 'You' : 'Agent'
       const extras = (message.mentions ?? []).map((item) => `@${item.path}`).join(' ')
       return `## ${who}\n\n${message.content}${extras ? `\n\n${extras}` : ''}`
     })
@@ -95,7 +102,12 @@ function conversationMarkdown(messages: Message[]): string {
 async function runSlash(input: SlashRun): Promise<string | null> {
   const { def, args } = input
   if (def.kind === 'unavailable') {
-    return `/${def.id} is a Grok Build TUI command. Not available in Grok Build Workbench.`
+    return `/${def.id} is a ${chatAgentLabel(input.agent)} terminal command. Not available in Datapad Workbench.`
+  }
+  if (def.kind === 'agent') {
+    const line = args ? `/${def.id} ${args}` : `/${def.id}`
+    await input.sendMessage(input.chatId, line, input.draft.attachments, input.draft.mentions)
+    return null
   }
   if (def.kind === 'prompt') {
     const body = args ? `${def.prompt ?? ''} ${args}`.trim() : (def.prompt ?? '').trim()
@@ -132,7 +144,9 @@ async function runSlash(input: SlashRun): Promise<string | null> {
     case 'export': {
       const text = conversationMarkdown(input.messages)
       if (!text.trim()) return 'Nothing to export'
-      return (await copyText(text)) ? 'Copied conversation as Markdown' : 'Could not copy'
+      const saved = await window.workbench.exportChatMarkdown(input.title, text).catch(() => undefined)
+      if (saved === undefined) return 'Could not save the export'
+      return saved ? `Saved ${saved}` : 'Export cancelled'
     }
     case 'rename':
       if (!args) return 'Usage: /rename <title>'
@@ -147,15 +161,16 @@ async function runSlash(input: SlashRun): Promise<string | null> {
         input.setShowSettings(true)
         return 'Opened settings — set the model there, or /model <id>'
       }
-      await input.saveSettings({ model: args })
+      // Each agent keeps its own model setting.
+      await input.saveSettings(input.agent === 'claude' ? { claudeModel: args } : { model: args })
       return `Model set to ${args}`
     case 'effort': {
       if (!args) {
         input.setShowSettings(true)
-        return 'Opened settings — set effort next to the model, or /effort low|medium|high|xhigh'
+        return 'Opened settings — set effort next to the model, or /effort low|medium|high|xhigh|max'
       }
       const effort = normalizeReasoningEffort(args)
-      if (!effort) return 'Usage: /effort low | medium | high | xhigh'
+      if (!effort) return 'Usage: /effort low | medium | high | xhigh | max'
       await input.saveSettings({ effort })
       return `Effort set to ${reasoningEffortLabel(effort)}`
     }
@@ -163,12 +178,15 @@ async function runSlash(input: SlashRun): Promise<string | null> {
     case 'theme':
       input.setShowSettings(true)
       return null
+    case 'mcps':
+      input.setShowSettings('mcp')
+      return null
     case 'docs':
-      await window.grokcode.openExternal(args.toLowerCase() === 'web' || !args ? DOCS_URL : DOCS_URL)
+      await window.workbench.openExternal(args.toLowerCase() === 'web' || !args ? DOCS_URL : DOCS_URL)
       return 'Opened docs'
     case 'usage':
-      if (args.toLowerCase() === 'manage') {
-        await window.grokcode.openExternal(USAGE_URL)
+      if (args.toLowerCase() === 'manage' && input.agent === 'grok') {
+        await window.workbench.openExternal(USAGE_URL)
         return 'Opened billing'
       }
       input.setShowUsage(true)
@@ -179,10 +197,10 @@ async function runSlash(input: SlashRun): Promise<string | null> {
     case 'logout':
       return 'Run `grok logout` in a terminal'
     case 'quit':
-      await window.grokcode.quitApp()
+      await window.workbench.quitApp()
       return null
     case 'view-plan':
-      return 'The plan card is in the thread when Grok writes one'
+      return 'The plan card is in the thread when the agent writes one'
     case 'session-info':
       return [input.title, input.sessionHint].filter(Boolean).join(' · ') || 'Session'
     default:
@@ -204,6 +222,7 @@ export function ChatPane(): React.JSX.Element {
     createChat,
     deleteChat,
     renameChat,
+    setChatAgent,
     sendMessage,
     stopChat,
     setChatMode,
@@ -217,7 +236,10 @@ export function ChatPane(): React.JSX.Element {
     saveSettings,
     setShowSettings,
     setShowUsage,
-    setShowNewProject
+    setShowNewProject,
+    showSidebar,
+    setShowSidebar,
+    gitSummaries
   } = useWorkspace()
   const { stopAll } = useVoice()
   const streams = useStreams()
@@ -234,7 +256,39 @@ export function ChatPane(): React.JSX.Element {
   const progress = useChatProgress(activeChat?.id ?? null, Boolean(streamingNow))
 
   return (
-    <section className="flex min-w-[320px] flex-1 flex-col bg-canvas">
+    <section className="flex min-w-[320px] flex-1 flex-col bg-surface">
+      <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line bg-canvas px-3">
+        {!showSidebar && (
+          <div className="flex shrink-0 items-center pl-traffic">
+            <IconButton icon="sidebar" label="Show sidebar" onClick={() => setShowSidebar(true)} />
+          </div>
+        )}
+        <Icon name="folder" className="text-faint" />
+        <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
+          <span className="max-w-[200px] truncate text-muted" title={activeProject?.path ?? undefined}>
+            {activeProject?.name ?? 'No project'}
+          </span>
+          {activeChat && (
+            <>
+              <span className="text-faint">/</span>
+              <span className="truncate font-semibold text-ink" title={activeChat.title}>
+                {activeChat.title}
+              </span>
+            </>
+          )}
+        </div>
+        {activeProject && (
+          <BranchChip
+            branch={
+              gitSummaries[activeProject.id]?.available
+                ? (activeChat?.worktreeBranch ?? gitSummaries[activeProject.id]?.branch ?? null)
+                : null
+            }
+          />
+        )}
+        <div className="min-w-2 flex-1" />
+        <PaneToggles />
+      </header>
       <TabBar
         openChatIds={openChatIds}
         activeChatId={activeChatId}
@@ -251,7 +305,12 @@ export function ChatPane(): React.JSX.Element {
       {!activeChat ? (
         <EmptyState
           projectId={activeProject?.id ?? null}
+          projectName={activeProject?.name ?? null}
+          agent={normalizeChatAgent(settings?.defaultAgent)}
           index={activeProject ? indexes[activeProject.id] : undefined}
+          onNewChat={() => {
+            if (activeProject) void createChat(activeProject.id)
+          }}
           onNewProject={() => setShowNewProject(true)}
         />
       ) : (
@@ -259,7 +318,9 @@ export function ChatPane(): React.JSX.Element {
           <MessageList
             chat={activeChat}
             chatId={activeChat.id}
+            agent={normalizeChatAgent(activeChat.agent)}
             projectId={activeChat.projectId}
+            projectName={activeProject?.name ?? 'this project'}
             index={indexes[activeChat.projectId]}
             draft={streamingNow ? stream?.draft ?? '' : ''}
             streaming={Boolean(streamingNow)}
@@ -273,6 +334,7 @@ export function ChatPane(): React.JSX.Element {
               setRewindSelected(checkpointId)
               setRewindOpen(true)
             }}
+            onSuggest={(text) => void sendMessage(activeChat.id, text)}
           />
           <Composer
             key={activeChat.id}
@@ -298,14 +360,22 @@ export function ChatPane(): React.JSX.Element {
                 draft,
                 chatId: activeChat.id,
                 projectId: activeChat.projectId,
+                agent: normalizeChatAgent(activeChat.agent),
                 title: activeChat.title,
                 sessionHint: settings
-                  ? [
-                      settings.model,
-                      settings.effort ? reasoningEffortLabel(settings.effort) : null,
-                      settings.grokBuildSignedIn ? 'Grok Build' : settings.keySource,
-                      formatGrokCli(settings.grokCli)
-                    ]
+                  ? (normalizeChatAgent(activeChat.agent) === 'claude'
+                      ? [
+                          'Claude Code',
+                          settings.effort ? reasoningEffortLabel(settings.effort) : null,
+                          settings.claude.subscription
+                        ]
+                      : [
+                          settings.model,
+                          settings.effort ? reasoningEffortLabel(settings.effort) : null,
+                          settings.grokBuildSignedIn ? 'Grok Build' : settings.keySource,
+                          formatGrokCli(settings.grokCli)
+                        ]
+                    )
                       .filter(Boolean)
                       .join(' · ')
                   : null,
@@ -330,6 +400,14 @@ export function ChatPane(): React.JSX.Element {
               void stopChat(activeChat.id)
             }}
             onMode={(mode) => void setChatMode(activeChat.id, mode)}
+            agent={normalizeChatAgent(activeChat.agent)}
+            onAgent={
+              !activeChat.grokSessionId &&
+              activeChat.messages.length === 0 &&
+              (settings?.claude.signedIn || normalizeChatAgent(activeChat.agent) === 'claude')
+                ? (agent) => void setChatAgent(activeChat.id, agent)
+                : null
+            }
             onPermission={(requestId, decision) => void resolvePermission(requestId, decision)}
             onQuestion={(requestId, decision) => void resolveQuestion(requestId, decision)}
             onRewindMenu={() => {
@@ -363,6 +441,63 @@ export function ChatPane(): React.JSX.Element {
   )
 }
 
+function BranchChip({ branch }: { branch: string | null }): React.JSX.Element {
+  return (
+    <span
+      title={branch ?? 'Not a git repository'}
+      className="flex h-[22px] max-w-[220px] shrink-0 items-center gap-1 rounded-md border border-line-strong px-1.5 font-mono text-[11px] text-muted"
+    >
+      <Icon name="branch" size={12} className="text-faint" />
+      <span className="truncate">{branch ?? 'no git'}</span>
+    </span>
+  )
+}
+
+const PANE_BUTTONS: { id: RightPaneId; icon: IconName; label: string; testId: string }[] = [
+  { id: 'git', icon: 'commit', label: 'Git', testId: 'open-git' },
+  { id: 'browser', icon: 'globe', label: 'Browser', testId: 'open-browser' },
+  { id: 'activity', icon: 'pulse', label: 'Activity', testId: 'open-activity' },
+  { id: 'knowledge', icon: 'book', label: 'Knowledge', testId: 'open-knowledge' }
+]
+
+/** The segmented group that opens and closes the right panes. */
+function PaneToggles(): React.JSX.Element {
+  const {
+    showGit,
+    showBrowser,
+    showActivity,
+    showKnowledge,
+    setShowGit,
+    setShowBrowser,
+    setShowActivity,
+    setShowKnowledge
+  } = useWorkspace()
+  const state: Record<RightPaneId, [boolean, (open: boolean) => void]> = {
+    git: [showGit, setShowGit],
+    browser: [showBrowser, setShowBrowser],
+    activity: [showActivity, setShowActivity],
+    knowledge: [showKnowledge, setShowKnowledge]
+  }
+  return (
+    <div className="no-drag flex shrink-0 items-center gap-0.5 rounded-[9px] border border-line bg-sidebar p-0.5">
+      {PANE_BUTTONS.map((pane) => {
+        const [open, setOpen] = state[pane.id]
+        return (
+          <IconButton
+            key={pane.id}
+            icon={pane.icon}
+            label={`${open ? 'Hide' : 'Show'} ${pane.label}`}
+            testId={pane.testId}
+            active={open}
+            size={26}
+            onClick={() => setOpen(!open)}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
 function TabBar({
   openChatIds,
   activeChatId,
@@ -385,104 +520,226 @@ function TabBar({
   const tabs = useMemo(() => {
     const projectById = new Map(projects.map((project) => [project.id, project]))
     return new Map(
-      chats.map((chat) => {
-        const project = projectById.get(chat.projectId)
-        return [
-          chat.id,
-          {
-            title: chat.title,
-            projectName: project?.name ?? 'Project',
-            color: resolveProjectColor(project ?? { id: chat.projectId })
-          }
-        ]
-      })
+      chats.map((chat) => [
+        chat.id,
+        { title: chat.title, projectName: projectById.get(chat.projectId)?.name ?? 'Project' }
+      ])
     )
   }, [chats, projects])
 
   return (
-    <div className="drag flex h-titlebar shrink-0 items-center gap-1 border-b border-line bg-surface px-3">
-      <div className="no-drag flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+    <div className="relative flex h-10 shrink-0 items-end bg-canvas px-3 before:absolute before:inset-x-0 before:bottom-0 before:h-px before:bg-line">
+      <div className="flex min-w-0 items-end gap-0.5 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
         {openChatIds.map((id) => {
           const active = id === activeChatId
           const streaming = streams[id]?.status === 'streaming'
           const tab = tabs.get(id)
-          const color = tab?.color ?? '#8E8E86'
           return (
             <div
               key={id}
               title={tab ? `${tab.projectName} · ${tab.title}` : 'Chat'}
-              className={`relative flex h-8 max-w-[220px] items-center gap-1 overflow-hidden rounded-md border pl-3 pr-1 ${
+              className={`group relative z-[1] flex h-[34px] max-w-[240px] shrink-0 items-center gap-1 rounded-t-lg border border-b-0 pr-1 pl-3 ${
                 active
-                  ? 'border-line bg-canvas text-ink'
-                  : 'border-transparent text-muted hover:bg-raised hover:text-ink'
+                  ? 'border-line bg-surface text-ink'
+                  : 'border-transparent text-muted hover:bg-hover hover:text-ink'
               }`}
             >
-              <span
-                aria-hidden
-                className="absolute inset-y-1.5 left-0 w-[3px] rounded-full"
-                style={{ background: color, opacity: active ? 1 : 0.72 }}
-              />
               <button className="flex min-w-0 items-center gap-2" onClick={() => onOpen(id)}>
                 <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${streaming ? 'streaming-dot' : ''}`}
-                  style={{ background: color }}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    active || streaming ? 'bg-accent' : 'bg-faint'
+                  } ${streaming ? 'streaming-dot' : ''}`}
                 />
-                <span className="truncate text-[12.5px]">{tab?.title ?? 'Chat'}</span>
+                <span className={`truncate text-[12.5px] ${active ? 'font-medium' : ''}`}>
+                  {tab?.title ?? 'Chat'}
+                </span>
               </button>
               <button
-                className="rounded px-1 text-[11px] text-muted hover:text-ink"
+                aria-label="Close tab"
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-faint hover:bg-hover hover:text-ink focus-visible:opacity-100 ${
+                  active ? '' : 'opacity-0 group-hover:opacity-100'
+                }`}
                 onClick={() => onClose(id)}
               >
-                ×
+                <Icon name="close" size={11} />
               </button>
             </div>
           )
         })}
       </div>
-      <button
-        className="no-drag rounded-md px-2 py-1 text-[12px] text-muted hover:bg-raised hover:text-ink"
-        onClick={onNew}
-      >
-        New chat
-      </button>
+      <div className="mb-[5px] ml-1">
+        <IconButton icon="plus" label="New chat" size={24} onClick={onNew} testId="tab-new-chat" />
+      </div>
+    </div>
+  )
+}
+
+const SUGGESTIONS = [
+  'Give me a tour of this codebase',
+  'Find likely bugs in the recent changes',
+  'Suggest tests for the least covered code'
+]
+
+function AgentTile({ agent, size = 28 }: { agent: ChatAgent; size?: number }): React.JSX.Element {
+  return (
+    <div
+      className="flex shrink-0 items-center justify-center rounded-[8px] bg-ink text-canvas"
+      style={{ width: size, height: size }}
+    >
+      <AgentGlyph agent={agent} size={Math.round(size * 0.5)} />
+    </div>
+  )
+}
+
+function EmptyHero({
+  agent,
+  projectName,
+  children
+}: {
+  agent: ChatAgent
+  projectName: string
+  children?: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-col items-center text-center">
+      <AgentTile agent={agent} size={40} />
+      <h1 className="mt-4 text-[20px] font-semibold tracking-tight text-ink">
+        What should we build in <span className="text-accent">{projectName}</span>?
+      </h1>
+      {children}
     </div>
   )
 }
 
 function EmptyState({
   projectId,
+  projectName,
+  agent,
   index,
+  onNewChat,
   onNewProject
 }: {
   projectId: string | null
+  projectName: string | null
+  agent: ChatAgent
   index: ProjectIndex | undefined
+  onNewChat: () => void
   onNewProject: () => void
 }): React.JSX.Element {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center px-10">
-      <div className="w-full max-w-[640px]">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted">
-          Grok Build Workbench
-        </div>
-        <h1 className="font-display mt-3 text-[28px] font-semibold tracking-tight text-ink">
-          Open a project, then start as many chats as you need.
-        </h1>
-        <p className="mt-3 max-w-lg text-[14px] leading-6 text-muted">
-          Each project holds its own conversations. Chats keep generating when you switch tabs.
+  if (!projectId) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center px-5">
+        <img src={wordmark} alt="Datapad Workbench" className="h-11 w-auto select-none" draggable={false} />
+        <p className="mt-5 max-w-md text-center text-[14.5px] leading-[1.6] text-muted">
+          Open a project folder, then start as many chats as you need. Chats keep working when you
+          switch tabs.
         </p>
-        {projectId && (
-          <div className="mt-8">
-            <ProjectOrientation projectId={projectId} index={index} />
-          </div>
-        )}
         <button
           data-testid="empty-new-project"
-          className="mt-8 rounded-lg bg-accent px-4 py-2 text-[13px] font-medium text-accent-ink transition hover:brightness-110 active:translate-y-px"
+          className="mt-6 flex h-8 items-center gap-1.5 rounded-[10px] bg-accent px-3.5 text-[13px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
           onClick={onNewProject}
         >
+          <Icon name="plus" size={13} />
           New project
         </button>
       </div>
+    )
+  }
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto flex w-[min(720px,100%-40px)] flex-col gap-8 py-16">
+        <EmptyHero agent={agent} projectName={projectName ?? 'this project'}>
+          <button
+            data-testid="empty-new-chat"
+            className="mt-6 flex h-8 items-center gap-1.5 rounded-[10px] bg-accent px-3.5 text-[13px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
+            onClick={onNewChat}
+          >
+            <Icon name="plus" size={13} />
+            New chat
+          </button>
+        </EmptyHero>
+        <ProjectOrientation projectId={projectId} index={index} />
+      </div>
+    </div>
+  )
+}
+
+function dayLabel(date: Date): string {
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  if (date.toDateString() === today.toDateString()) return `Today · ${time}`
+  if (date.toDateString() === yesterday.toDateString()) return `Yesterday · ${time}`
+  const day = date.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric'
+  })
+  return `${day} · ${time}`
+}
+
+function clockTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function DayDivider({ label }: { label: string }): React.JSX.Element {
+  return (
+    <div className="flex items-center gap-3 text-[11px] tabular-nums text-faint">
+      <span className="h-px flex-1 bg-line" />
+      {label}
+      <span className="h-px flex-1 bg-line" />
+    </div>
+  )
+}
+
+function ReplyAction({
+  icon,
+  label,
+  onClick
+}: {
+  icon: IconName
+  label: string
+  onClick: () => void
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      className="flex h-6 w-6 items-center justify-center rounded-md text-faint hover:bg-hover hover:text-muted"
+    >
+      <Icon name={icon} size={13} />
+    </button>
+  )
+}
+
+function CopyAction({ text }: { text: string }): React.JSX.Element {
+  const [copied, setCopied] = useState(false)
+  return (
+    <ReplyAction
+      icon={copied ? 'check' : 'copy'}
+      label={copied ? 'Copied' : 'Copy reply'}
+      onClick={() => {
+        void copyText(text).then((ok) => {
+          if (!ok) return
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1200)
+        })
+      }}
+    />
+  )
+}
+
+function AssistantHeader({ agent, meta }: { agent: ChatAgent; meta?: string }): React.JSX.Element {
+  return (
+    <div className="flex h-7 items-center gap-2">
+      <span className="text-[13px] font-semibold text-ink">{chatAgentLabel(agent)}</span>
+      {meta && <span className="text-[11px] tabular-nums text-faint">{meta}</span>}
     </div>
   )
 }
@@ -490,7 +747,9 @@ function EmptyState({
 function MessageList({
   chat,
   chatId,
+  agent,
   projectId,
+  projectName,
   index,
   draft,
   streaming,
@@ -500,11 +759,14 @@ function MessageList({
   checkpoints,
   canApprove,
   onApprove,
-  onRewind
+  onRewind,
+  onSuggest
 }: {
   chat: { messages: Message[] }
   chatId: string
+  agent: ChatAgent
   projectId: string
+  projectName: string
   index: ProjectIndex | undefined
   draft: string
   streaming: boolean
@@ -515,107 +777,146 @@ function MessageList({
   canApprove: boolean
   onApprove: (verdict: PlanVerdict) => void
   onRewind: (checkpointId: string) => void
+  onSuggest: (text: string) => void
 }): React.JSX.Element {
   const bottom = useRef<HTMLDivElement>(null)
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
   }, [chat.messages, draft, plan, progress, streaming])
 
+  const empty =
+    chat.messages.length === 0 &&
+    !draft &&
+    !streaming &&
+    !(plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()))
+
+  let lastDay = ''
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-10 py-8">
-      {chat.messages.length === 0 &&
-      !draft &&
-      !streaming &&
-      !(plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim())) ? (
-        <div className="mx-auto max-w-[720px] pt-10">
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      {empty ? (
+        <div className="mx-auto flex w-[min(720px,100%-40px)] flex-col gap-8 py-16">
+          <EmptyHero agent={agent} projectName={projectName}>
+            <div className="mt-6 flex flex-wrap justify-center gap-2">
+              {SUGGESTIONS.map((text) => (
+                <button
+                  key={text}
+                  type="button"
+                  data-testid="empty-suggestion"
+                  className="rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-3.5 py-2 text-[13px] text-ink-2 hover:bg-hover hover:text-ink"
+                  onClick={() => onSuggest(text)}
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
+          </EmptyHero>
           <ProjectOrientation projectId={projectId} index={index} />
-          <div className="mt-6 text-[14px] text-muted">
-            Ask Grok about this project. Other chats can keep running in the background.
-          </div>
         </div>
       ) : (
-        <div className="mx-auto flex max-w-[720px] flex-col gap-8">
+        <div className="mx-auto flex w-[min(720px,100%-40px)] flex-col gap-7 py-8">
           {chat.messages.map((message) => {
             const checkpoint = checkpoints.find((item) => item.messageId === message.id)
+            const date = new Date(message.createdAt)
+            const day = Number.isNaN(date.getTime()) ? '' : date.toDateString()
+            const divider = day && day !== lastDay ? dayLabel(date) : null
+            if (day) lastDay = day
+            const side = message.kind === 'btw' ? 'btw' : message.kind === 'steer' ? 'steer' : null
+            const extras = (
+              <>
+                {message.mentions && message.mentions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {message.mentions.map((mention) => (
+                      <MentionChip key={mention.path} mention={mention} />
+                    ))}
+                  </div>
+                )}
+                {message.attachments && message.attachments.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {message.attachments.map((attachment) => (
+                      <img
+                        key={attachment.id}
+                        src={`data:${attachment.mimeType};base64,${attachment.data}`}
+                        alt="Screenshot"
+                        className="max-h-64 max-w-full rounded-[8px] border border-line"
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            )
             return (
-            <article
-              key={message.id}
-              className={
-                message.kind === 'btw' || message.kind === 'steer'
-                  ? 'rounded-xl border border-line/80 bg-surface/60 px-4 py-3'
-                  : undefined
-              }
-            >
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted">
-                  {message.kind === 'btw'
-                    ? message.role === 'user'
-                      ? 'You · btw'
-                      : 'Grok · btw'
-                    : message.kind === 'steer'
-                      ? 'You · steer'
-                      : message.role === 'user'
-                        ? 'You'
-                        : 'Grok'}
-                </div>
-                {checkpoint && (
-                  <button
-                    type="button"
-                    className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted hover:text-ink"
-                    onClick={() => onRewind(checkpoint.id)}
-                  >
-                    Rewind
-                  </button>
+              <div key={message.id} className="flex flex-col gap-7">
+                {divider && <DayDivider label={divider} />}
+                {message.role === 'user' ? (
+                  <article className="group flex flex-col items-end">
+                    {side && <div className="mb-1 text-[11px] text-faint">{side}</div>}
+                    <div className="max-w-[560px] rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-4 py-2.5 text-[14.5px] leading-[1.6] whitespace-pre-wrap text-ink">
+                      {message.content}
+                    </div>
+                    <div className="flex max-w-[560px] flex-col items-end">{extras}</div>
+                    <div className="mt-1 flex h-5 items-center gap-1 text-[11px] tabular-nums text-faint">
+                      {checkpoint && (
+                        <button
+                          type="button"
+                          title="Rewind to before this message"
+                          className="flex items-center gap-1 rounded px-1 opacity-0 group-hover:opacity-100 hover:text-muted focus-visible:opacity-100"
+                          onClick={() => onRewind(checkpoint.id)}
+                        >
+                          <Icon name="retry" size={11} />
+                          Rewind
+                        </button>
+                      )}
+                      {clockTime(message.createdAt)}
+                    </div>
+                  </article>
+                ) : (
+                  <article className="flex gap-3">
+                    <AgentTile agent={agent} />
+                    <div className="min-w-0 flex-1">
+                      <AssistantHeader agent={agent} meta={side === 'btw' ? 'side answer' : undefined} />
+                      <div className="mt-1 text-[14.5px] leading-[1.65]">
+                        {message.content ? <Markdown text={message.content} chatId={chatId} /> : null}
+                        {message.kind === 'btw' && !message.content ? <span className="cursor" /> : null}
+                      </div>
+                      {extras}
+                      {message.content && (
+                        <div className="mt-2 flex items-center gap-0.5">
+                          <CopyAction text={message.content} />
+                          {checkpoint && (
+                            <ReplyAction
+                              icon="retry"
+                              label="Rewind to here"
+                              onClick={() => onRewind(checkpoint.id)}
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </article>
                 )}
               </div>
-              {message.role === 'user' ? (
-                <div className="whitespace-pre-wrap text-[14.5px] leading-7 text-ink/90">
-                  {message.content}
-                </div>
-              ) : (
-                <>
-                  {message.content ? <Markdown text={message.content} chatId={chatId} /> : null}
-                  {message.kind === 'btw' && !message.content ? <span className="cursor" /> : null}
-                </>
-              )}
-              {message.mentions && message.mentions.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {message.mentions.map((mention) => (
-                    <MentionChip key={mention.path} mention={mention} />
-                  ))}
-                </div>
-              )}
-              {message.attachments && message.attachments.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {message.attachments.map((attachment) => (
-                    <img
-                      key={attachment.id}
-                      src={`data:${attachment.mimeType};base64,${attachment.data}`}
-                      alt="Screenshot"
-                      className="max-h-64 max-w-full rounded-lg border border-line"
-                    />
-                  ))}
-                </div>
-              )}
-            </article>
             )
           })}
           {(draft || streaming) && (
-            <article>
-              <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.14em] text-accent">
-                Grok
-              </div>
-              {draft ? <Markdown text={draft} chatId={chatId} /> : null}
-              {streaming && (
-                <div
-                  data-testid="chat-progress"
-                  className={`flex items-start gap-2 ${draft ? 'mt-3' : ''}`}
-                >
-                  <span className="streaming-dot mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                  <div className="text-[14px] leading-6 text-ink/80">{progress}</div>
+            <article className="flex gap-3">
+              <AgentTile agent={agent} />
+              <div className="min-w-0 flex-1">
+                <AssistantHeader agent={agent} />
+                <div className="mt-1 text-[14.5px] leading-[1.65]">
+                  {draft ? <Markdown text={draft} chatId={chatId} /> : null}
                 </div>
-              )}
-              {draft ? <span className="cursor" /> : null}
+                {streaming && (
+                  <div
+                    data-testid="chat-progress"
+                    className={`flex items-start gap-2 ${draft ? 'mt-3' : 'mt-1'}`}
+                  >
+                    <span className="streaming-dot mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                    <div className="text-[13px] leading-6 text-muted">{progress}</div>
+                  </div>
+                )}
+                {draft ? <span className="cursor" /> : null}
+              </div>
             </article>
           )}
           {error && <div className="text-[13px] text-danger">{error}</div>}
@@ -670,10 +971,16 @@ const MODE_LABEL: Record<PermissionMode, string> = {
 }
 
 const MODE_HINT: Record<PermissionMode, string> = {
-  ask: 'Enter to send · Esc Esc rewind · tools wait for Allow',
-  accept: 'Enter to send · Esc Esc rewind · tools auto-approved',
-  plan: 'Enter to send · Esc Esc rewind · read-only until you approve'
+  ask: 'Tools wait for Allow',
+  accept: 'Tools auto-approved',
+  plan: 'Read-only until you approve'
 }
+
+const CARD = 'rounded-[8px] border border-line-strong bg-raised px-4 py-3'
+const PRIMARY_BUTTON =
+  'flex h-8 shrink-0 items-center rounded-[10px] bg-accent px-3.5 text-[12.5px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-45'
+const QUIET_BUTTON =
+  'flex h-8 items-center rounded-[10px] px-3 text-[12.5px] text-muted hover:bg-hover hover:text-ink'
 
 function PlanMark({ status }: { status: PlanEntry['status'] }): React.JSX.Element {
   if (status === 'completed') return <span className="text-accent">✓</span>
@@ -694,17 +1001,15 @@ function PlanCard({
 }): React.JSX.Element {
   const markdown = plan.markdown?.trim()
   return (
-    <div className="rounded-xl border border-accent/30 bg-surface px-4 py-3">
+    <div className={CARD}>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted">
-            {plan.awaitingApproval ? 'Plan ready' : 'Plan'}
-          </div>
-          <div className="mt-0.5 text-[14px] font-medium text-ink">{plan.title}</div>
+          <div className="text-[11px] text-faint">{plan.awaitingApproval ? 'Plan ready' : 'Plan'}</div>
+          <div className="mt-0.5 text-[13px] font-semibold text-ink">{plan.title}</div>
         </div>
       </div>
       {markdown ? (
-        <div className="mt-3 max-h-[min(50vh,420px)] overflow-y-auto rounded-lg border border-line bg-canvas px-3 py-2">
+        <div className="mt-3 max-h-[min(50vh,420px)] overflow-y-auto rounded-[8px] border border-line bg-surface px-3 py-2">
           <Markdown text={markdown} chatId={chatId} />
         </div>
       ) : plan.entries.length > 0 ? (
@@ -713,7 +1018,7 @@ function PlanCard({
             <li
               key={`${index}:${entry.content}`}
               className={`flex gap-2 text-[13px] leading-5 ${
-                entry.status === 'completed' ? 'text-muted line-through' : 'text-ink/90'
+                entry.status === 'completed' ? 'text-muted line-through' : 'text-ink-2'
               }`}
             >
               <span className="w-4 shrink-0 text-center font-mono text-[11px]">
@@ -730,21 +1035,21 @@ function PlanCard({
         <div className="mt-3 flex flex-wrap justify-end gap-2">
           <button
             type="button"
-            className="rounded-md px-3 py-1.5 text-[12px] text-muted hover:bg-raised hover:text-ink"
+            className={QUIET_BUTTON}
             onClick={() => onApprove('abandon')}
           >
             Quit plan
           </button>
           <button
             type="button"
-            className="rounded-md px-3 py-1.5 text-[12px] text-muted hover:bg-raised hover:text-ink"
+            className={QUIET_BUTTON}
             onClick={() => onApprove('revise')}
           >
             Request changes
           </button>
           <button
             type="button"
-            className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
+            className={PRIMARY_BUTTON}
             onClick={() => onApprove('approve')}
           >
             Approve & implement
@@ -763,22 +1068,21 @@ function PermissionBar({
   onDecision: (decision: 'allow' | 'deny') => void
 }): React.JSX.Element {
   return (
-    <div className="mb-3 rounded-xl border border-line bg-surface px-4 py-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted">Permission</div>
-      <div className="mt-1 text-[13.5px] text-ink">{request.title}</div>
+    <div className={`mb-3 ${CARD}`}>
+      <div className="flex items-center gap-1.5 text-[11px] text-faint">
+        <Icon name="shield" size={12} className="text-accent" />
+        Permission
+      </div>
+      <div className="mt-1 text-[13px] font-semibold text-ink">{request.title}</div>
       {request.detail && (
         <div className="mt-1 line-clamp-2 font-mono text-[11.5px] text-muted">{request.detail}</div>
       )}
       <div className="mt-3 flex justify-end gap-2">
-        <button
-          className="rounded-md px-3 py-1.5 text-[12px] text-muted hover:bg-raised hover:text-ink"
-          onClick={() => onDecision('deny')}
+        <button className={QUIET_BUTTON} onClick={() => onDecision('deny')}
         >
           Deny
         </button>
-        <button
-          className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
-          onClick={() => onDecision('allow')}
+        <button className={PRIMARY_BUTTON} onClick={() => onDecision('allow')}
         >
           Allow
         </button>
@@ -834,9 +1138,9 @@ function QuestionCard({
   return (
     <div
       data-testid="question-card"
-      className="mb-3 max-h-[min(70vh,560px)] overflow-y-auto rounded-xl border border-line bg-surface px-4 py-3"
+      className={`mb-3 max-h-[min(70vh,560px)] overflow-y-auto ${CARD}`}
     >
-      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-muted">
+      <div className="text-[11px] text-faint">
         {request.title?.trim() || `Ask ${count} question${count === 1 ? '' : 's'}`}
       </div>
       <div className="mt-3 flex flex-col gap-5">
@@ -846,11 +1150,11 @@ function QuestionCard({
           return (
             <div key={`${index}:${question.question}`}>
               {question.header && question.header !== question.question && (
-                <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.14em] text-muted">
+                <div className="mb-1 text-[11px] text-faint">
                   {question.header}
                 </div>
               )}
-              <div className="text-[13.5px] leading-5 text-ink">{question.question}</div>
+              <div className="text-[13px] leading-5 font-semibold text-ink">{question.question}</div>
               <div className="mt-2 flex flex-col gap-1.5">
                 {question.options.map((option) => {
                   const on = !otherOn && selected.includes(option.label)
@@ -859,10 +1163,10 @@ function QuestionCard({
                     <button
                       key={option.label}
                       type="button"
-                      className={`rounded-lg border px-3 py-2 text-left transition active:translate-y-px ${
+                      className={`rounded-[8px] border px-3 py-2 text-left transition active:translate-y-px ${
                         on
-                          ? 'border-accent bg-accent/10'
-                          : 'border-line bg-canvas hover:border-ink/20 hover:bg-raised'
+                          ? 'border-accent-line bg-accent-soft'
+                          : 'border-line bg-surface hover:border-line-strong hover:bg-hover'
                       }`}
                       onClick={() => toggle(index, option.label, question.multiSelect)}
                     >
@@ -877,10 +1181,10 @@ function QuestionCard({
                 })}
                 <button
                   type="button"
-                  className={`rounded-lg border px-3 py-2 text-left transition ${
+                  className={`rounded-[8px] border px-3 py-2 text-left transition ${
                     otherOn
-                      ? 'border-accent bg-accent/10'
-                      : 'border-line bg-canvas hover:border-ink/20 hover:bg-raised'
+                      ? 'border-accent-line bg-accent-soft'
+                      : 'border-line bg-surface hover:border-line-strong hover:bg-hover'
                   }`}
                   onClick={() => {
                     setUsingOther((current) => current.map((item, i) => (i === index ? true : item)))
@@ -910,14 +1214,14 @@ function QuestionCard({
       <div className="mt-4 flex justify-end gap-2">
         <button
           type="button"
-          className="rounded-md px-3 py-1.5 text-[12px] text-muted hover:bg-raised hover:text-ink"
+          className={QUIET_BUTTON}
           onClick={() => onDecision(request.requestId, { type: 'skip' })}
         >
           Skip
         </button>
         <button
           type="button"
-          className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-40"
+          className={PRIMARY_BUTTON}
           disabled={!ready}
           onClick={() => onDecision(request.requestId, { type: 'submit', answers: answers() })}
         >
@@ -936,13 +1240,16 @@ function ModeToggle({
   onMode: (mode: PermissionMode) => void
 }): React.JSX.Element {
   return (
-    <div className="flex rounded-md bg-canvas p-0.5">
+    <div className="flex shrink-0 gap-0.5 rounded-[8px] bg-surface p-0.5">
       {(['ask', 'accept', 'plan'] as const).map((item) => (
         <button
           key={item}
           type="button"
-          className={`rounded px-2 py-1 text-[11px] ${
-            mode === item ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+          aria-pressed={mode === item}
+          className={`h-6 rounded-[6px] px-2 text-[12.5px] ${
+            mode === item
+              ? 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)]'
+              : 'text-muted hover:text-ink'
           }`}
           onClick={() => onMode(item)}
         >
@@ -953,8 +1260,50 @@ function ModeToggle({
   )
 }
 
+function AgentToggle({
+  agent,
+  onAgent
+}: {
+  agent: ChatAgent
+  onAgent: ((agent: ChatAgent) => void) | null
+}): React.JSX.Element {
+  if (!onAgent) {
+    return (
+      <div
+        data-testid="chat-agent"
+        className="flex h-7 shrink-0 items-center gap-1.5 px-1.5 text-[12.5px] text-muted"
+      >
+        <AgentGlyph agent={agent} size={12} />
+        {chatAgentLabel(agent)}
+      </div>
+    )
+  }
+  return (
+    <label
+      data-testid="chat-agent"
+      className="relative flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-[7px] px-1.5 text-[12.5px] text-muted hover:bg-hover hover:text-ink"
+    >
+      <AgentGlyph agent={agent} size={12} />
+      {chatAgentLabel(agent)}
+      <Icon name="chevronDown" size={11} className="text-faint" />
+      <select
+        aria-label="Agent"
+        className="absolute inset-0 cursor-pointer opacity-0"
+        value={agent}
+        onChange={(event) => onAgent(event.target.value as ChatAgent)}
+      >
+        {(['grok', 'claude'] as const).map((item) => (
+          <option key={item} value={item}>
+            {chatAgentLabel(item)}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
 function recentsKey(projectId: string): string {
-  return `grokcode.mentions.${projectId}`
+  return `workbench.mentions.${projectId}`
 }
 
 function loadRecents(projectId: string): FileMention[] {
@@ -1056,6 +1405,8 @@ function Composer({
   onSlash,
   onStop,
   onMode,
+  agent,
+  onAgent,
   onPermission,
   onQuestion,
   onRewindMenu
@@ -1074,6 +1425,9 @@ function Composer({
   onSlash: (def: SlashDef, args: string, draft: { attachments: Attachment[]; mentions: FileMention[] }) => Promise<string | null>
   onStop: () => void
   onMode: (mode: PermissionMode) => void
+  agent: ChatAgent
+  /** Null once the chat started, or when only one agent is signed in. */
+  onAgent: ((agent: ChatAgent) => void) | null
   onPermission: (requestId: string, decision: 'allow' | 'deny') => void
   onQuestion: (
     requestId: string,
@@ -1091,6 +1445,7 @@ function Composer({
   const [cmdIndex, setCmdIndex] = useState(0)
   const [pasteError, setPasteError] = useState<string | null>(null)
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  const [announced, setAnnounced] = useState<AgentCommand[]>([])
   const draftRef = useRef('')
   const lastEscAt = useRef(0)
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -1139,7 +1494,28 @@ function Composer({
     ref.current?.focus()
   }, [])
 
-  const commands = command ? filterSlashCommands(command.query) : []
+  useEffect(() => {
+    let cancelled = false
+    const load = (): void => {
+      void window.workbench.getChatCommands(chatId).then((next) => {
+        if (!cancelled) setAnnounced(next)
+      })
+    }
+    load()
+    const unsub = window.workbench.onChatEvent((event) => {
+      if (event.chatId !== chatId) return
+      if (event.type === 'commands') setAnnounced(event.commands)
+      // A new or reloaded session can announce before this chat is linked to it.
+      else if (event.type === 'done') load()
+    })
+    return () => {
+      cancelled = true
+      unsub()
+    }
+  }, [chatId])
+
+  const slashList = useMemo(() => slashCommandsFor(agent, announced), [agent, announced])
+  const commands = command ? filterSlashCommands(command.query, slashList) : []
 
   useEffect(() => {
     selectedCmd.current?.scrollIntoView({ block: 'nearest' })
@@ -1153,7 +1529,7 @@ function Composer({
     let cancelled = false
     const timer = window.setTimeout(() => {
       void (async () => {
-        const found = await window.grokcode.searchFiles(projectId, mention.query, chatId)
+        const found = await window.workbench.searchFiles(projectId, mention.query, chatId)
         if (cancelled) return
         const recents = loadRecents(projectId)
         const q = mention.query.toLowerCase()
@@ -1227,7 +1603,7 @@ function Composer({
     }
     setValue('')
     const notice = await onSlash(def, args, { attachments, mentions })
-    if (def.kind === 'prompt' || def.id === 'new' || def.id === 'delete') {
+    if (def.kind === 'prompt' || def.kind === 'agent' || def.id === 'new' || def.id === 'delete') {
       setAttachments([])
       setMentions([])
     }
@@ -1284,7 +1660,7 @@ function Composer({
   }
 
   function submit(): void {
-    const parsed = parseSlashLine(value)
+    const parsed = parseSlashLine(value, slashList)
     if (parsed?.def) {
       void runPicked(parsed.def, parsed.args)
       return
@@ -1303,9 +1679,63 @@ function Composer({
     draftRef.current = ''
   }
 
+  /** Types a trigger character at the caret, as if the user had typed it. */
+  function insertTrigger(char: '@' | '/'): void {
+    const el = ref.current
+    const caret = el?.selectionStart ?? value.length
+    const before = value.slice(0, caret)
+    const lineEmpty = before.slice(before.lastIndexOf('\n') + 1) === ''
+    const lead =
+      char === '/' ? (lineEmpty ? '' : '\n') : before && !/\s$/.test(before) ? ' ' : ''
+    const token = lead + char
+    const next = before + token + value.slice(caret)
+    const pos = caret + token.length
+    setValue(next)
+    setHistoryIndex(null)
+    syncTrigger(next, pos)
+    requestAnimationFrame(() => {
+      ref.current?.focus()
+      ref.current?.setSelectionRange(pos, pos)
+    })
+  }
+
+  async function attachFiles(files: FileList | null): Promise<void> {
+    const images = [...(files ?? [])].filter((file) => file.type.startsWith('image/'))
+    const incoming = (await Promise.all(images.map((file) => fileToAttachment(file, file.type)))).filter(
+      (item): item is Attachment => item !== null
+    )
+    if (images.length > incoming.length) setPasteError('Images over 8 MB were skipped')
+    await addImages(incoming)
+  }
+
+  const empty = !value.trim() && attachments.length === 0 && mentions.length === 0
+  const status = replyMuted
+    ? 'Muted for this request'
+    : (voiceError ??
+      (voiceLive
+        ? voiceStatus === 'listening'
+          ? 'Conversation on · listening — pause to send, work starts now'
+          : voiceStatus === 'transcribing'
+            ? 'Conversation on · transcribing…'
+            : voiceStatus === 'speaking'
+              ? 'Conversation on · speaking — keep talking to steer'
+              : voiceStatus === 'loading'
+                ? 'Conversation on · starting…'
+                : `Conversation on · ${progress || 'working'}`
+        : voiceStatus === 'listening'
+          ? 'Listening… click the mic or pause to send'
+          : voiceStatus === 'transcribing'
+            ? 'Transcribing on this machine…'
+            : voiceStatus === 'speaking'
+              ? 'Speaking…'
+              : voiceStatus === 'loading'
+                ? 'Loading local speech model…'
+                : (pasteError ??
+                  (streaming ? `${progress || 'Still working'} · Esc stops the task` : null))))
+
   return (
-    <div className="px-10 pb-7">
-      <div className="mx-auto max-w-[720px]">
+    <div className="shrink-0 pt-2 pb-[18px]">
+      <div className="mx-auto w-[min(720px,100%-40px)]">
         {question && (
           <QuestionCard
             key={question.requestId}
@@ -1319,11 +1749,7 @@ function Composer({
             onDecision={(decision) => onPermission(permission.requestId, decision)}
           />
         )}
-      <div
-        className={`rounded-2xl border bg-surface px-4 py-3 focus-within:border-accent/50 ${
-          mode === 'plan' ? 'border-accent/40' : 'border-line'
-        }`}
-      >
+      <div className="rounded-[16px] border border-line-strong bg-raised px-3 pt-3 pb-2.5 shadow-[0_18px_40px_-18px_rgba(0,0,0,.7)] focus-within:border-accent-line">
         {(voiceLive || voiceError) && (
           <div className="mb-3 overflow-hidden rounded-xl bg-black">
             {voiceLive && (
@@ -1347,7 +1773,7 @@ function Composer({
                       ? 'You’re talking'
                       : 'Listening…'
                   : voiceMode === 'grok'
-                    ? 'Grok is talking'
+                    ? 'Agent is talking'
                     : voiceMode === 'wait'
                       ? progress ||
                         (voiceStatus === 'loading'
@@ -1393,7 +1819,7 @@ function Composer({
         {command && (
           <div
             data-testid="slash-menu"
-            className="absolute inset-x-0 bottom-full z-10 mb-2 max-h-56 overflow-y-auto rounded-lg border border-line bg-canvas py-1 shadow-xl"
+            className="absolute inset-x-0 bottom-full z-10 mb-2 max-h-56 overflow-y-auto rounded-[8px] border border-line-strong bg-raised py-1 shadow-xl"
           >
             {commands.length === 0 ? (
               <div className="px-3 py-2 text-[12px] text-muted">No matching commands</div>
@@ -1406,7 +1832,7 @@ function Composer({
                   ref={index === cmdIndex ? selectedCmd : undefined}
                   type="button"
                   className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left ${
-                    index === cmdIndex ? 'bg-raised' : 'hover:bg-surface'
+                    index === cmdIndex ? 'bg-hover' : 'hover:bg-hover'
                   }`}
                   onMouseDown={(event) => {
                     event.preventDefault()
@@ -1427,7 +1853,7 @@ function Composer({
           </div>
         )}
         {mention && hasFolder && !command && (
-          <div className="absolute inset-x-0 bottom-full z-10 mb-2 max-h-56 overflow-y-auto rounded-lg border border-line bg-canvas py-1 shadow-xl">
+          <div className="absolute inset-x-0 bottom-full z-10 mb-2 max-h-56 overflow-y-auto rounded-[8px] border border-line-strong bg-raised py-1 shadow-xl">
             {hits.length === 0 ? (
               <div className="px-3 py-2 text-[12px] text-muted">
                 {mention.query ? 'No matching files' : 'Type to search files'}
@@ -1438,7 +1864,7 @@ function Composer({
                   key={`${hit.kind}:${hit.path}`}
                   type="button"
                   className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left ${
-                    index === hitIndex ? 'bg-raised' : 'hover:bg-surface'
+                    index === hitIndex ? 'bg-hover' : 'hover:bg-hover'
                   }`}
                   onMouseDown={(event) => {
                     event.preventDefault()
@@ -1456,17 +1882,17 @@ function Composer({
         )}
         <textarea
           ref={ref}
-          rows={3}
+          rows={2}
           value={value}
           disabled={disabled}
           placeholder={
             streaming
               ? 'Steer the running task…  /btw asks an aside'
               : mode === 'plan'
-                ? 'Plan with Grok…  @ files · reads only until you approve'
-                : 'Ask Grok…  @ a file · / commands · ⌘V pastes a screenshot'
+                ? `Ask ${chatAgentLabel(agent)} to plan a change…`
+                : `Ask ${chatAgentLabel(agent)} anything…`
           }
-          className="w-full resize-none bg-transparent text-[14.5px] leading-6 text-ink outline-none placeholder:text-muted disabled:opacity-60"
+          className="w-full resize-none bg-transparent px-1 text-[14.5px] leading-[1.6] text-ink outline-none placeholder:text-faint focus-visible:outline-none disabled:opacity-60"
           onChange={(event) => {
             setValue(event.target.value)
             setHistoryIndex(null)
@@ -1589,117 +2015,130 @@ function Composer({
           }}
         />
         </div>
-        <div className="mt-2 flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <ModeToggle mode={mode} onMode={onMode} />
-            <div className="truncate font-mono text-[10px] text-muted">
-              {replyMuted
-                ? 'Muted for this request'
-                : voiceError ??
-                (voiceLive
-                  ? voiceStatus === 'listening'
-                    ? 'Conversation on · listening — pause to send, work starts now'
-                    : voiceStatus === 'transcribing'
-                      ? 'Conversation on · transcribing…'
-                      : voiceStatus === 'speaking'
-                        ? 'Conversation on · speaking — keep talking to steer'
-                        : voiceStatus === 'loading'
-                          ? 'Conversation on · starting…'
-                          : `Conversation on · ${progress || 'working'}`
-                  : voiceStatus === 'listening'
-                    ? 'Listening… click the mic or pause to send'
-                    : voiceStatus === 'transcribing'
-                      ? 'Transcribing on this machine…'
-                      : voiceStatus === 'speaking'
-                        ? 'Speaking…'
-                        : voiceStatus === 'loading'
-                          ? 'Loading local speech model…'
-                          : (pasteError ??
-                            (streaming
-                              ? `${progress || 'Still working'} · Esc stops the task`
-                              : MODE_HINT[mode])))}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {voiceSpeaks && (streaming || voiceStatus === 'speaking' || replyMuted) && (
-              <button
-                type="button"
-                data-testid="voice-mute"
-                className={`rounded-md px-2.5 py-1.5 text-[12px] active:translate-y-px ${
-                  replyMuted ? 'bg-raised text-muted' : 'bg-raised text-ink hover:bg-line'
-                }`}
-                aria-label={replyMuted ? 'Unmute this reply' : 'Mute this reply'}
-                onClick={muteReply}
-              >
-                {replyMuted ? 'Muted' : 'Mute'}
-              </button>
-            )}
-            {voiceOn && voiceConversation && (
+        <div className="mt-2 flex items-center gap-1">
+          <label
+            title="Attach images"
+            className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[7px] text-muted hover:bg-hover hover:text-ink focus-within:outline-2 focus-within:outline-accent-line"
+          >
+            <Icon name="clip" />
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              aria-label="Attach images"
+              data-testid="composer-attach"
+              className="sr-only"
+              onChange={(event) => {
+                const input = event.currentTarget
+                void attachFiles(input.files).finally(() => {
+                  input.value = ''
+                })
+              }}
+            />
+          </label>
+          {hasFolder && (
+            <IconButton icon="at" label="Mention a file" onClick={() => insertTrigger('@')} />
+          )}
+          <IconButton icon="slash" label="Commands" onClick={() => insertTrigger('/')} />
+          <span className="mx-1.5 h-4 w-px shrink-0 bg-line" />
+          <ModeToggle mode={mode} onMode={onMode} />
+          <AgentToggle agent={agent} onAgent={onAgent} />
+          <div className="min-w-2 flex-1" />
+          {voiceSpeaks && (streaming || voiceStatus === 'speaking' || replyMuted) && (
+            <button
+              type="button"
+              data-testid="voice-mute"
+              className={`flex h-7 items-center rounded-[7px] px-2 text-[12.5px] active:translate-y-px ${
+                replyMuted ? 'text-faint hover:bg-hover' : 'text-muted hover:bg-hover hover:text-ink'
+              }`}
+              aria-label={replyMuted ? 'Unmute this reply' : 'Mute this reply'}
+              onClick={muteReply}
+            >
+              {replyMuted ? 'Muted' : 'Mute'}
+            </button>
+          )}
+          {voiceOn && voiceConversation && (
             <button
               type="button"
               data-testid="voice-conversation"
-              className={`flex h-8 items-center gap-1.5 rounded-md px-2.5 text-[12px] font-medium active:translate-y-px ${
-                voiceLive ? 'bg-accent text-accent-ink' : 'bg-raised text-ink hover:bg-line'
+              className={`flex h-7 shrink-0 items-center gap-1.5 rounded-[7px] px-2 text-[12.5px] active:translate-y-px ${
+                voiceLive
+                  ? 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)]'
+                  : 'text-muted hover:bg-hover hover:text-ink'
               }`}
               aria-label={voiceLive ? 'Stop conversation' : 'Start conversation'}
               onClick={toggleConversation}
             >
               {voiceLive ? (
-                <span className="h-[22px] w-7 overflow-hidden rounded-sm bg-black">
-                  <VoiceBlob
-                    size="chip"
-                    variant={voiceMode === 'grok' ? 'grok' : 'user'}
-                  />
+                <span className="h-[18px] w-6 overflow-hidden rounded-sm bg-black">
+                  <VoiceBlob size="chip" variant={voiceMode === 'grok' ? 'grok' : 'user'} />
                 </span>
               ) : (
                 <MicIcon listening={false} />
               )}
               Conversation
             </button>
-            )}
-            {voiceOn && !voiceLive && (
-              <button
-                type="button"
-                data-testid="voice-mic"
-                className={`flex h-8 w-8 items-center justify-center rounded-md active:translate-y-px ${
-                  voiceStatus === 'listening'
-                    ? 'bg-accent text-accent-ink'
-                    : 'bg-raised text-ink hover:bg-line'
-                }`}
-                aria-label={voiceStatus === 'listening' ? 'Stop listening' : 'Start listening'}
-                disabled={disabled && voiceStatus !== 'listening'}
-                onClick={toggleListen}
-              >
-                <MicIcon listening={voiceStatus === 'listening'} />
-              </button>
-            )}
-            {streaming ? (
-              <>
+          )}
+          {voiceOn && !voiceLive && (
+            <button
+              type="button"
+              data-testid="voice-mic"
+              title={voiceStatus === 'listening' ? 'Stop listening' : 'Dictate'}
+              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] active:translate-y-px ${
+                voiceStatus === 'listening'
+                  ? 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)]'
+                  : 'text-muted hover:bg-hover hover:text-ink'
+              }`}
+              aria-label={voiceStatus === 'listening' ? 'Stop listening' : 'Start listening'}
+              disabled={disabled && voiceStatus !== 'listening'}
+              onClick={toggleListen}
+            >
+              <MicIcon listening={voiceStatus === 'listening'} />
+            </button>
+          )}
+          {streaming ? (
+            <>
+              {!empty && (
                 <button
-                  className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink transition hover:brightness-110 active:translate-y-px disabled:opacity-40"
-                  disabled={!value.trim() && attachments.length === 0 && mentions.length === 0}
+                  type="button"
+                  className="ml-1 flex h-8 shrink-0 items-center rounded-[10px] px-3 text-[12.5px] font-medium text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)] hover:bg-accent-soft active:translate-y-px"
                   onClick={submit}
                 >
                   Steer
                 </button>
-                <button
-                  className="rounded-md bg-raised px-3 py-1.5 text-[12px] text-ink hover:bg-line active:translate-y-px"
-                  onClick={onStop}
-                >
-                  Stop
-                </button>
-              </>
-            ) : (
+              )}
               <button
-                className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink transition hover:brightness-110 active:translate-y-px disabled:opacity-40"
-                disabled={!value.trim() && attachments.length === 0 && mentions.length === 0}
-                onClick={submit}
+                type="button"
+                data-testid="composer-stop"
+                title="Stop (Esc)"
+                aria-label="Stop"
+                className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-accent text-accent-ink hover:brightness-110 active:translate-y-px"
+                onClick={onStop}
               >
-                Send
+                <span className="h-2.5 w-2.5 rounded-[2px] bg-current" />
               </button>
-            )}
-          </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              data-testid="composer-send"
+              title="Send (↵)"
+              aria-label="Send"
+              className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-accent text-accent-ink transition hover:brightness-110 active:translate-y-px disabled:opacity-45 disabled:hover:brightness-100"
+              disabled={empty}
+              onClick={submit}
+            >
+              <Icon name="arrowUp" size={15} strokeWidth={1.8} />
+            </button>
+          )}
         </div>
+      </div>
+      <div className="mt-2 truncate text-center text-[11px] tabular-nums text-faint" title={status ?? undefined}>
+        {status ?? (
+          <>
+            ↵ send · ⇧↵ new line · Esc Esc rewind · {MODE_HINT[mode]}
+          </>
+        )}
       </div>
       </div>
     </div>
@@ -1752,7 +2191,7 @@ function RewindModal({
         </p>
         {checkpoints.length === 0 ? (
           <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-3 text-[12.5px] text-muted">
-            No checkpoints yet. Send a message so Grok can snapshot the tree first.
+            No checkpoints yet. Send a message so the agent can snapshot the tree first.
           </div>
         ) : (
           <div className="mt-4 max-h-[320px] overflow-y-auto rounded-lg border border-line">
