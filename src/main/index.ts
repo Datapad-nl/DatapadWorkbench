@@ -16,9 +16,12 @@ import {
   sweepWorktreeProcessesSync
 } from './worktreeProcs'
 import { registerIpc } from './ipc'
+import { startScheduler } from './chatTools'
+import { startPrWatcher } from './pullRequests'
 import { ensureStore, purgeUnsafeProjects, syncClaudeSessions, syncGrokSessions } from './store'
 import { applyWindowChrome, getThemeState } from './themes'
 import { attachMediaProtocol } from './media'
+import { attachVisualProtocol } from './visuals'
 import { attachVoiceProtocol, ensureMicAccess, getMicAccess, registerVoiceScheme } from './voice'
 import { loadWindowState, trackWindowState } from './windowState'
 
@@ -133,10 +136,13 @@ app.whenReady().then(async () => {
   await syncClaudeSessions()
   attachVoiceProtocol()
   attachMediaProtocol()
+  attachVisualProtocol()
   void ensureMicAccess()
   await prepareBrowser()
   await startBrowserAgentServer()
   registerIpc()
+  startScheduler()
+  startPrWatcher()
   killOrphanCodegraphInits()
   void sweepWorktreeProcesses()
   startWorktreeReaper()

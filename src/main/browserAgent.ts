@@ -12,7 +12,18 @@ import {
   requestShowBrowser,
   stopBrowser
 } from './browser'
+import { click, consoleLog, evaluate, press, screenshot, snapshot, type, waitFor, type Target } from './browserDrive'
 import { transcribeYoutube } from './youtube'
+import {
+  cancelProjectSchedule,
+  delegateTask,
+  listProjectChats,
+  readProjectChat,
+  scheduleTask,
+  startProjectChat,
+  waitForDelegate
+} from './chatTools'
+import { linkPr, prStatus, unlinkCallerPr } from './pullRequests'
 import type { AcpMcpServer } from '../shared/mcp'
 
 export const BROWSER_SESSION_RULE = [
@@ -20,7 +31,7 @@ export const BROWSER_SESSION_RULE = [
   'Open every web page in the Workbench BrowserPane using the `browser` MCP (`navigate`).',
   'That pane is the in-app browser: you can drive it immediately and verify your own UI work.',
   'Never launch Chrome, Safari, Playwright, Puppeteer, `open`, `xdg-open`, `start`, or any other external browser.',
-  'After a UI change, navigate to the local URL and call `get_state` to confirm the page loaded.',
+  'After a UI change, navigate to the local URL, then call `screenshot` to see it and `snapshot` to read it. Use `click`, `type`, `press` and `wait_for` to try the change the way a user would, and `console` to check for errors.',
   'When the user shares a YouTube URL or asks to transcribe, summarize, or quote a YouTube video, call `transcribe_youtube` with that URL.',
   'Do not scrape the watch page for captions unless that tool fails.',
   'If you start a long-running dev server (`next dev`, vite, webpack) in a Datapad Workbench worktree, stop it when the task is done. Do not leave it running in the background.',
@@ -49,6 +60,52 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
     req.on('error', reject)
   })
+}
+
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const raw = await readBody(req)
+  if (!raw.trim()) return {}
+  const parsed = JSON.parse(raw) as unknown
+  return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+}
+
+const str = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined)
+const num = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined
+
+function targetOf(body: Record<string, unknown>): Target | null {
+  const target: Target = { ref: num(body.ref), selector: str(body.selector), text: str(body.text) }
+  return target.ref == null && !target.selector && !target.text ? null : target
+}
+
+/** Tools that read or drive the open page. Each takes the JSON body and returns JSON. */
+const DRIVE: Record<string, (body: Record<string, unknown>) => Promise<unknown>> = {
+  '/screenshot': () => screenshot(),
+  '/snapshot': (body) => snapshot(num(body.maxChars)),
+  '/click': (body) => {
+    const target = targetOf(body)
+    if (!target) throw new Error('Pass ref, selector or text')
+    return click(target)
+  },
+  '/type': (body) => {
+    const field = targetOf({ ref: body.ref, selector: body.selector, text: body.field })
+    return type(field, typeof body.text === 'string' ? body.text : '', body.clear === true)
+  },
+  '/press': (body) =>
+    press(str(body.key) ?? '', Array.isArray(body.modifiers) ? body.modifiers.map(String) : []),
+  '/wait_for': (body) => waitFor(str(body.selector), str(body.text), num(body.timeoutMs)),
+  '/evaluate': async (body) => ({ result: await evaluate(str(body.expression) ?? 'undefined') }),
+  '/console': async (body) => consoleLog(str(body.level), num(body.limit)),
+  '/chats/list': (body) => listProjectChats(body.from),
+  '/chats/read': (body) => readProjectChat(body),
+  '/chats/start': (body) => startProjectChat(body),
+  '/chats/delegate': (body) => delegateTask(body),
+  '/chats/wait': (body) => waitForDelegate(body),
+  '/chats/schedule': (body) => scheduleTask(body),
+  '/chats/unschedule': (body) => cancelProjectSchedule(body),
+  '/pr/link': (body) => linkPr(body),
+  '/pr/status': (body) => prStatus(body),
+  '/pr/unlink': (body) => unlinkCallerPr(body)
 }
 
 function authorized(req: IncomingMessage, token: string): boolean {
@@ -123,6 +180,23 @@ async function handle(
     return
   }
 
+  const drive = method === 'POST' ? DRIVE[path] : undefined
+  if (drive) {
+    let body: Record<string, unknown>
+    try {
+      body = await readJson(req)
+    } catch {
+      json(res, 400, { error: 'Invalid JSON' })
+      return
+    }
+    try {
+      json(res, 200, await drive(body))
+    } catch (error) {
+      json(res, 422, { error: error instanceof Error ? error.message : String(error) })
+    }
+    return
+  }
+
   if (method === 'POST' && path === '/youtube/transcript') {
     let urlInput = ''
     let lang: string | undefined
@@ -163,18 +237,25 @@ export function startBrowserAgentServer(): Promise<{ url: string; token: string 
   return started
 }
 
-export async function browserMcpServers(): Promise<AcpMcpServer[]> {
+/** The `browser` server, and the `workbench` chat tools (visuals, delegate, other chats) for `chatId`. */
+export async function browserMcpServers(chatId?: string): Promise<AcpMcpServer[]> {
   const { url, token } = await startBrowserAgentServer()
+  const env = [
+    { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
+    { name: 'WORKBENCH_BROWSER_URL', value: url },
+    { name: 'WORKBENCH_BROWSER_TOKEN', value: token }
+  ]
   return [
+    { type: 'stdio', name: 'browser', command: process.execPath, args: [mcpScriptPath()], env },
     {
       type: 'stdio',
-      name: 'browser',
+      name: 'workbench',
       command: process.execPath,
       args: [mcpScriptPath()],
       env: [
-        { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
-        { name: 'WORKBENCH_BROWSER_URL', value: url },
-        { name: 'WORKBENCH_BROWSER_TOKEN', value: token }
+        ...env,
+        { name: 'WORKBENCH_TOOLSET', value: 'workbench' },
+        { name: 'WORKBENCH_CHAT_ID', value: chatId ?? '' }
       ]
     }
   ]

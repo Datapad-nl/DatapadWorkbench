@@ -414,6 +414,22 @@ function SectionLabel({
   )
 }
 
+/** "5m" / "3h" / "2d" until a scheduled run. */
+function untilTime(iso: string): string {
+  const minutes = Math.max(0, Math.round((new Date(iso).getTime() - Date.now()) / 60_000))
+  if (minutes < 1) return 'now'
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${hours}h`
+  return `${Math.round(hours / 24)}d`
+}
+
+function scheduleTitle(schedule: NonNullable<ChatSummary['schedule']>): string {
+  const when = schedule.cron ? `Repeats: ${schedule.cron}` : 'Runs once'
+  const next = schedule.nextRunAt ? `\nNext run: ${new Date(schedule.nextRunAt).toLocaleString()}` : ''
+  return `${when}${next}\n\n${schedule.prompt}`
+}
+
 function ChatRow({ chat, project }: { chat: ChatSummary; project: Project }): React.JSX.Element {
   const { activeChatId, openChat, deleteChat } = useWorkspace()
   const streams = useStreams()
@@ -450,13 +466,34 @@ function ChatRow({ chat, project }: { chat: ChatSummary; project: Project }): Re
             </span>
           )}
         </button>
-        <span className="flex w-9 shrink-0 items-center justify-end pr-2">
+        <span className={`flex ${chat.schedule ? 'w-14' : 'w-9'} shrink-0 items-center justify-end pr-2`}>
           {streaming ? (
             <span className="streaming-dot h-1.5 w-1.5 rounded-full bg-accent" title="Working" />
+          ) : chat.schedule?.nextRunAt ? (
+            <span
+              data-testid="chat-schedule"
+              className="flex items-center gap-0.5 text-[11px] text-faint tabular-nums group-hover:hidden group-focus-within:hidden"
+              title={scheduleTitle(chat.schedule)}
+            >
+              <Icon name="clock" size={11} />
+              {untilTime(chat.schedule.nextRunAt)}
+            </span>
           ) : (
             <span className="text-[11px] text-faint tabular-nums group-hover:hidden group-focus-within:hidden">
               {relativeTime(chat.updatedAt)}
             </span>
+          )}
+          {!streaming && chat.schedule && (
+            <button
+              className="hidden h-5 w-5 items-center justify-center rounded text-muted group-hover:flex group-focus-within:flex hover:text-danger"
+              title="Stop schedule"
+              aria-label={`Stop the schedule of ${chat.title}`}
+              onClick={() => {
+                if (confirm('Stop this schedule? The chat stays.')) void window.workbench.stopSchedule(chat.id)
+              }}
+            >
+              <Icon name="clock" size={12} />
+            </button>
           )}
           {!streaming && (
             <button

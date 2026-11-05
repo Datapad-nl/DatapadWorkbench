@@ -520,7 +520,9 @@ export async function listChats(): Promise<ChatSummary[]> {
       updatedAt: chat.updatedAt,
       messageCount: chat.messages.length,
       worktreePath: chat.worktreePath ?? null,
-      worktreeBranch: chat.worktreeBranch ?? null
+      worktreeBranch: chat.worktreeBranch ?? null,
+      schedule: chat.schedule ?? null,
+      pr: chat.pr ?? null
     })
   }
   return chats.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))

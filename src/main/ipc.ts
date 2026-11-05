@@ -3,6 +3,7 @@ import { writeFile } from 'fs/promises'
 import { basename, join } from 'path'
 import type {
   BrowserBounds,
+  Chat,
   ChatAgent,
   ChatEvent,
   CreateProjectInput,
@@ -82,6 +83,8 @@ import {
   resolvePermission
 } from './permissions'
 import { maybeStartProjectIntake, scheduleProjectIntake } from './intake'
+import { registerChatTools, stopSchedule } from './chatTools'
+import { unlinkPr } from './pullRequests'
 import { onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
 import {
   createChat,
@@ -175,7 +178,44 @@ function emitIndex(event: IndexEvent): void {
   }
 }
 
+/** Add the user's message and run the turn; `done` settles when the reply is in. */
+async function sendTurn(
+  chatId: string,
+  content: string,
+  attachments: Array<{ id: string; mimeType: string; data: string }> = [],
+  mentions: FileMention[] = []
+): Promise<{ chat: Chat; done: Promise<Chat | null> }> {
+  const chat = await appendUserMessage(chatId, content, attachments, mentions)
+  const project = (await listProjects()).find((item) => item.id === chat.projectId)
+
+  const done = streamAssistant(chat, project, (text) => {
+    emitDelta(chatId, text)
+  })
+    .then((done) => {
+      flushDeltas()
+      if (!done) return null
+      emit({ type: 'done', chatId, chat: done })
+      const reply = done.messages.at(-1)
+      notifyChat(done, reply?.role === 'assistant' && reply.content ? reply.content : 'Finished', openFromNotice)
+      drainAsideSteers(chatId, project)
+      return done
+    })
+    .catch((error: unknown) => {
+      flushDeltas()
+      if (!isStreaming(chatId)) {
+        const message = error instanceof Error ? error.message : 'Grok request failed'
+        emit({ type: 'error', chatId, error: message })
+        void noticeFor(chatId, `Stopped: ${message}`)
+      }
+      drainAsideSteers(chatId, project)
+      throw error
+    })
+
+  return { chat, done }
+}
+
 export function registerIpc(): void {
+  registerChatTools({ send: sendTurn, emit })
   startActivityBridge()
   watchAttention()
   onIndexChange((index) => {
@@ -315,6 +355,8 @@ export function registerIpc(): void {
     return chat
   })
 
+  ipcMain.handle('chat:stopSchedule', (_event, chatId: string) => stopSchedule(String(chatId)))
+  ipcMain.handle('chat:unlinkPr', (_event, chatId: string) => unlinkPr(String(chatId)))
   ipcMain.handle('chat:search', (_event, query: string) => searchChats(String(query ?? '')))
   ipcMain.handle('mcp:get', () => getMcpServers())
   ipcMain.handle('mcp:set', async (_event, text: string) => {
@@ -400,35 +442,13 @@ export function registerIpc(): void {
       )
       return started
     }
-    const chat = await appendUserMessage(
+    const { chat, done } = await sendTurn(
       input.chatId,
       input.content,
       input.attachments ?? [],
       input.mentions ?? []
     )
-    const project = projects.find((item) => item.id === chat.projectId)
-
-    void streamAssistant(chat, project, (text) => {
-      emitDelta(input.chatId, text)
-    })
-      .then((done) => {
-        flushDeltas()
-        if (!done) return
-        emit({ type: 'done', chatId: input.chatId, chat: done })
-        const reply = done.messages.at(-1)
-        notifyChat(done, reply?.role === 'assistant' && reply.content ? reply.content : 'Finished', openFromNotice)
-        drainAsideSteers(input.chatId, project)
-      })
-      .catch((error: unknown) => {
-        flushDeltas()
-        if (!isStreaming(input.chatId)) {
-          const message = error instanceof Error ? error.message : 'Grok request failed'
-          emit({ type: 'error', chatId: input.chatId, error: message })
-          void noticeFor(input.chatId, `Stopped: ${message}`)
-        }
-        drainAsideSteers(input.chatId, project)
-      })
-
+    done.catch(() => {})
     return chat
   })
 

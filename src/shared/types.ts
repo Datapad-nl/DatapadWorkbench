@@ -139,6 +139,37 @@ export type Chat = {
   checkpoints?: Checkpoint[]
   worktreePath?: string | null
   worktreeBranch?: string | null
+  /** Sends `prompt` to this chat once (`at`) or on a cron schedule. */
+  schedule?: ChatSchedule | null
+  /** A GitHub pull request linked to this chat (`link_pr`). */
+  pr?: ChatPullRequest | null
+}
+
+export type ChatPullRequest = {
+  number: number
+  url: string
+  title: string
+  /** OPEN, CLOSED or MERGED. */
+  state: string
+  isDraft: boolean
+  checks: 'none' | 'pending' | 'passing' | 'failing'
+  /** "3 passed, 1 failed (build)". */
+  checksSummary: string
+  /** GitHub's reviewDecision: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or null. */
+  review: string | null
+  reviewCount: number
+  /** Wake the chat when checks finish, a review comes in or the PR closes. */
+  watch: boolean
+  checkedAt: string
+}
+
+export type ChatSchedule = {
+  prompt: string
+  /** Five-field cron in local time; missing for a one-off run. */
+  cron?: string
+  /** When the next run is due; null once a one-off has run. */
+  nextRunAt: string | null
+  lastRunAt?: string
 }
 
 export type ChatSummary = Omit<Chat, 'messages'> & {

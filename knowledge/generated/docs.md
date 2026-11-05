@@ -14,6 +14,7 @@ Top-level area `docs/`.
 
 ## Contains
 
+- `docs/agent-tools.md`
 - `docs/screenshot.png`
 
 ## Related

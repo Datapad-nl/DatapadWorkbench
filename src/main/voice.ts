@@ -7,6 +7,7 @@ import { finished } from 'stream/promises'
 import { Readable } from 'stream'
 import type { VoiceModelStatus } from '../shared/types'
 import { mediaSchemePrivilege } from './media'
+import { visualSchemePrivilege } from './visuals'
 
 const SCHEME = 'workbench-model'
 
@@ -102,7 +103,8 @@ export function registerVoiceScheme(): void {
         bypassCSP: true
       }
     },
-    mediaSchemePrivilege()
+    mediaSchemePrivilege(),
+    visualSchemePrivilege()
   ])
 }
 

@@ -460,17 +460,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       }
       if (event.type === 'chat') {
         setChatsById((current) => ({ ...current, [event.chatId]: event.chat }))
-        setChats((current) =>
-          current.map((item) =>
+        setChats((current) => {
+          // An agent opened this chat (start_chat, delegate): load it into the sidebar.
+          if (!current.some((item) => item.id === event.chatId)) queueMicrotask(() => void refresh())
+          return current.map((item) =>
             item.id === event.chatId
               ? {
                   ...item,
                   worktreePath: event.chat.worktreePath ?? null,
-                  worktreeBranch: event.chat.worktreeBranch ?? null
+                  worktreeBranch: event.chat.worktreeBranch ?? null,
+                  schedule: event.chat.schedule ?? null,
+                  pr: event.chat.pr ?? null
                 }
               : item
           )
-        )
+        })
         setStreams((current) => {
           if (!current[event.chatId] || current[event.chatId].status !== 'streaming') {
             return { ...current, [event.chatId]: emptyStream }

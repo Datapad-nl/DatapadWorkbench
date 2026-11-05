@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   Attachment,
   ChatPlan,
+  ChatPullRequest,
   ChatSummary,
   Checkpoint,
   FileHit,
@@ -286,6 +287,7 @@ export function ChatPane(): React.JSX.Element {
             }
           />
         )}
+        {activeChat?.pr && <PrChip chatId={activeChat.id} pr={activeChat.pr} />}
         <div className="min-w-2 flex-1" />
         <PaneToggles />
       </header>
@@ -449,6 +451,63 @@ function BranchChip({ branch }: { branch: string | null }): React.JSX.Element {
     >
       <Icon name="branch" size={12} className="text-faint" />
       <span className="truncate">{branch ?? 'no git'}</span>
+    </span>
+  )
+}
+
+const PR_REVIEW: Record<string, string> = {
+  APPROVED: 'approved',
+  CHANGES_REQUESTED: 'changes requested',
+  REVIEW_REQUIRED: 'needs review'
+}
+
+/** The pull request linked to the chat: checks as a dot, review state, click to open it. */
+function PrChip({ chatId, pr }: { chatId: string; pr: ChatPullRequest }): React.JSX.Element {
+  const open = pr.state === 'OPEN'
+  const dot = !open
+    ? 'bg-faint'
+    : pr.checks === 'failing'
+      ? 'bg-danger'
+      : pr.checks === 'pending'
+        ? 'bg-accent animate-pulse'
+        : pr.checks === 'passing'
+          ? 'bg-ok'
+          : 'bg-line-strong'
+  const label = open ? (pr.isDraft ? 'draft' : pr.review ? PR_REVIEW[pr.review] : null) : pr.state.toLowerCase()
+  const title = [
+    `#${pr.number} ${pr.title}`,
+    `Checks: ${pr.checksSummary}`,
+    `Review: ${pr.review ? (PR_REVIEW[pr.review] ?? pr.review.toLowerCase()) : 'none required'}`,
+    pr.watch ? 'Watching: this chat gets a message when checks finish or a review comes in' : 'Not watching',
+    'Click to open it in the browser'
+  ].join('\n')
+  return (
+    <span
+      data-testid="chat-pr"
+      className="no-drag group/pr flex h-[22px] max-w-[260px] shrink-0 items-center rounded-md border border-line-strong text-[11px] text-muted"
+    >
+      <button
+        type="button"
+        title={title}
+        onClick={() => void window.workbench.navigateBrowser(pr.url)}
+        className="flex min-w-0 items-center gap-1.5 px-1.5 hover:text-ink"
+      >
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
+        <span className="font-mono">#{pr.number}</span>
+        {label && <span className="truncate">{label}</span>}
+        {pr.watch && <Icon name="eye" size={11} className="shrink-0 text-faint" />}
+      </button>
+      <button
+        type="button"
+        title="Unlink this pull request"
+        aria-label="Unlink pull request"
+        onClick={() => {
+          if (window.confirm(`Unlink #${pr.number} from this chat and stop watching it?`)) void window.workbench.unlinkPr(chatId)
+        }}
+        className="hidden pr-1 text-faint hover:text-ink group-hover/pr:block"
+      >
+        <Icon name="close" size={10} />
+      </button>
     </span>
   )
 }

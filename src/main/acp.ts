@@ -773,14 +773,15 @@ function sessionRules(agent: ChatAgent, rules: string): Record<string, unknown> 
 async function sessionConfig(
   agent: ChatAgent,
   cwd: string,
-  extraRules?: string | null
+  extraRules?: string | null,
+  chatId?: string
 ): Promise<Record<string, unknown>> {
   const rules = extraRules?.trim()
     ? `${BROWSER_SESSION_RULE}\n\n${extraRules.trim()}`
     : BROWSER_SESSION_RULE
   return {
     cwd,
-    mcpServers: [...(await browserMcpServers()), ...toAcpMcpServers(await getMcpServers())],
+    mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(await getMcpServers())],
     ...sessionRules(agent, rules)
   }
 }
@@ -920,14 +921,15 @@ async function applySessionSettings(agent: ChatAgent, sessionId: string): Promis
 export async function newSession(
   cwd: string,
   extraRules?: string | null,
-  agent: ChatAgent = 'grok'
+  agent: ChatAgent = 'grok',
+  chatId?: string
 ): Promise<string> {
   await ensureAgent(agent)
   const conn = conns[agent]
   const result = await request<{
     sessionId: string
     modes?: { currentModeId?: string; availableModes?: SessionMode[] }
-  }>(conn, 'session/new', await sessionConfig(agent, cwd, extraRules), 30_000)
+  }>(conn, 'session/new', await sessionConfig(agent, cwd, extraRules, chatId), 30_000)
   sessionAgents.set(result.sessionId, agent)
   rememberModes(result.sessionId, result)
   conn.liveSessions.add(result.sessionId)
@@ -939,7 +941,8 @@ export async function loadSession(
   sessionId: string,
   cwd: string,
   extraRules?: string | null,
-  agent: ChatAgent = 'grok'
+  agent: ChatAgent = 'grok',
+  chatId?: string
 ): Promise<void> {
   await ensureAgent(agent)
   const conn = conns[agent]
@@ -947,7 +950,7 @@ export async function loadSession(
   const result = await request<unknown>(
     conn,
     'session/load',
-    { sessionId, ...(await sessionConfig(agent, cwd, extraRules)) },
+    { sessionId, ...(await sessionConfig(agent, cwd, extraRules, chatId)) },
     60_000
   )
   rememberModes(sessionId, result)

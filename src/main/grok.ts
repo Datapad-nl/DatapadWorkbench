@@ -52,6 +52,7 @@ import { clearGrokPlanApproval, grokBuildSignedIn, readGrokPlan } from './sessio
 import { chatWorkingDir, isolateChatIfNeeded } from './git'
 import { projectSessionRules } from './intake'
 import { getApiKey, getChat, listChats, mutateChat, saveChat } from './store'
+import { saveVisual, visualFromUpdate } from './visuals'
 
 const BTW_INSTRUCTION = [
   'You are answering a /btw aside on the ongoing main task in this chat.',
@@ -271,6 +272,7 @@ onSessionUpdate((event) => {
       void hydrateExitPlan(chatId, event.sessionId)
     }
     if (chatId) void snapshotTouched(chatId, event.update)
+    showVisual(event.sessionId, event.update)
     return
   }
   if (event.update.sessionUpdate !== 'agent_message_chunk') return
@@ -282,6 +284,19 @@ onSessionUpdate((event) => {
 })
 
 const deltaListeners = new Map<string, (text: string) => void>()
+const shownVisuals = new Set<string>()
+
+/** Put a `show_visual` page into the reply as a block the chat renders in a frame. */
+function showVisual(sessionId: string, update: SessionUpdate['update']): void {
+  const key = `${sessionId}:${update.toolCallId ?? ''}`
+  if (!update.toolCallId || shownVisuals.has(key)) return
+  const visual = visualFromUpdate(update)
+  if (!visual) return
+  shownVisuals.add(key)
+  const block = saveVisual(visual.html, visual.title)
+  drafts.set(sessionId, (drafts.get(sessionId) ?? '') + block)
+  deltaListeners.get(sessionId)?.(block)
+}
 
 /** The slash commands the chat's agent announced for its current session. */
 export async function chatCommands(chatId: string): Promise<AgentCommand[]> {
@@ -478,7 +493,7 @@ async function resolveSession(chat: Chat, project: Project | undefined): Promise
     bindPermissionSession(sessionId, chat.id, normalizePermissionMode(chat.mode))
     bindExitPlanSession(sessionId, chat.id)
     try {
-      await loadSession(sessionId, cwd, await projectSessionRules(project?.id), normalizeChatAgent(chat.agent))
+      await loadSession(sessionId, cwd, await projectSessionRules(project?.id), normalizeChatAgent(chat.agent), chat.id)
       return { chat, sessionId }
     } catch {
       // Session is gone in this agent process. Prompting the dead id returns
@@ -488,7 +503,8 @@ async function resolveSession(chat: Chat, project: Project | undefined): Promise
   const sessionId = await newSession(
     cwd,
     await projectSessionRules(project?.id),
-    normalizeChatAgent(chat.agent)
+    normalizeChatAgent(chat.agent),
+    chat.id
   )
   chat.grokSessionId = sessionId
   const saved = await saveChat(chat)

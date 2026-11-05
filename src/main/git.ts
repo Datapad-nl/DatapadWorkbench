@@ -125,6 +125,21 @@ export async function removeChatWorktree(projectPath: string, worktreePath: stri
   if (removed.code !== 0) await runGit(projectPath, ['worktree', 'prune'])
 }
 
+/** Remove a chat's worktree and branch when it has no uncommitted files and no commits of its own. */
+export async function dropWorktreeIfUnchanged(
+  projectPath: string,
+  worktreePath: string,
+  branch: string
+): Promise<boolean> {
+  const status = await runGit(worktreePath, ['status', '--porcelain'])
+  if (status.code !== 0 || status.stdout.trim()) return false
+  const ahead = await runGit(projectPath, ['rev-list', '--count', `HEAD..${branch}`])
+  if (ahead.code !== 0 || ahead.stdout.trim() !== '0') return false
+  await removeChatWorktree(projectPath, worktreePath)
+  await runGit(projectPath, ['branch', '-d', branch])
+  return true
+}
+
 const READ_RE =
   /\b(explain|describe|what does|what is|how does|how do|why (is|does|do)|summarize|summary|where is|find where|show me|walk me through|don't (edit|change|touch)|do not (edit|change|write)|read only|readonly)\b/i
 const WRITE_RE =

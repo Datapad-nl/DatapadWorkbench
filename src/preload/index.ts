@@ -54,6 +54,8 @@ const api = {
     ipcRenderer.invoke('chat:exportMarkdown', { title, markdown }),
   getChatCommands: (chatId: string) => ipcRenderer.invoke('chat:commands', chatId) as Promise<AgentCommand[]>,
   deleteChat: (chatId: string) => ipcRenderer.invoke('chat:delete', chatId),
+  stopSchedule: (chatId: string) => ipcRenderer.invoke('chat:stopSchedule', chatId) as Promise<Chat>,
+  unlinkPr: (chatId: string) => ipcRenderer.invoke('chat:unlinkPr', chatId) as Promise<Chat>,
   renameChat: (id: string, title: string) => ipcRenderer.invoke('chat:rename', { id, title }),
   setChatAgent: (id: string, agent: ChatAgent) =>
     ipcRenderer.invoke('chat:setAgent', { id, agent }) as Promise<Chat>,

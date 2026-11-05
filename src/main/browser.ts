@@ -18,6 +18,10 @@ let emitTimer: ReturnType<typeof setTimeout> | null = null
 let loadedPersisted = false
 let picking = false
 
+export type ConsoleEntry = { level: string; message: string; source: string; at: string }
+const CONSOLE_LIMIT = 200
+const consoleEntries: ConsoleEntry[] = []
+
 function persistPath(): string {
   return join(app.getPath('userData'), 'workbench', 'browser.json')
 }
@@ -46,6 +50,16 @@ function guestSession(): Electron.Session {
 function contents(): Electron.WebContents | null {
   if (!view || view.webContents.isDestroyed()) return null
   return view.webContents
+}
+
+/** The BrowserPane page, created on demand, for tools that read or drive it. */
+export function browserContents(): Electron.WebContents {
+  return ensureView().webContents
+}
+
+/** The page's console since the last navigation, oldest first. */
+export function browserConsole(): ConsoleEntry[] {
+  return [...consoleEntries]
 }
 
 function stateKey(state: BrowserState): string {
@@ -138,6 +152,19 @@ function wireContents(wc: Electron.WebContents): void {
     emit()
   }
 
+  wc.on('console-message', (details) => {
+    const where = details.sourceId ? `${details.sourceId}:${details.lineNumber}` : ''
+    consoleEntries.push({
+      level: details.level,
+      message: details.message,
+      source: where,
+      at: new Date().toISOString()
+    })
+    if (consoleEntries.length > CONSOLE_LIMIT) consoleEntries.splice(0, consoleEntries.length - CONSOLE_LIMIT)
+  })
+  wc.on('did-navigate', () => {
+    consoleEntries.length = 0
+  })
   wc.on('did-navigate', onChange)
   wc.on('did-navigate-in-page', onChange)
   wc.on('page-title-updated', () => emit())
