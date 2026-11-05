@@ -474,8 +474,8 @@ export async function getChat(chatId: string): Promise<Chat> {
     const cwd = chat.worktreePath || project?.path
     if (cwd) {
       chat.messages = onGrok
-        ? readGrokHistory(chat.grokSessionId, cwd)
-        : readClaudeHistory(chat.grokSessionId, cwd)
+        ? await readGrokHistory(chat.grokSessionId, cwd)
+        : await readClaudeHistory(chat.grokSessionId, cwd)
     }
   }
   if (onGrok && chat.grokSessionId) {
@@ -589,8 +589,8 @@ export async function createChat(
 const GROK_DEFAULT_TITLE = 'Grok session'
 const retitleTried = new Set<string>()
 
-function grokPromptTitle(sessionId: string, cwd: string): string | null {
-  const first = readGrokHistory(sessionId, cwd).find((message) => message.role === 'user')
+async function grokPromptTitle(sessionId: string, cwd: string): Promise<string | null> {
+  const first = (await readGrokHistory(sessionId, cwd)).find((message) => message.role === 'user')
   return first ? titleFromPrompt(first.content) : null
 }
 
@@ -604,7 +604,7 @@ async function retitleChat(chatId: string, title: string): Promise<void> {
 }
 
 export async function syncGrokSessions(): Promise<void> {
-  const sessions = listGrokSessions()
+  const sessions = await listGrokSessions()
   if (sessions.length === 0) return
   const projects = await loadProjects()
   const chats = await listChats()
@@ -616,7 +616,7 @@ export async function syncGrokSessions(): Promise<void> {
     if (chat.title !== GROK_DEFAULT_TITLE || !chat.grokSessionId || retitleTried.has(chat.id)) continue
     retitleTried.add(chat.id)
     const session = sessions.find((item) => item.id === chat.grokSessionId)
-    const title = session ? grokPromptTitle(session.id, session.cwd) : null
+    const title = session ? await grokPromptTitle(session.id, session.cwd) : null
     if (title) await retitleChat(chat.id, title)
   }
 
@@ -635,7 +635,7 @@ export async function syncGrokSessions(): Promise<void> {
       id: session.id,
       title:
         session.title === GROK_DEFAULT_TITLE
-          ? (grokPromptTitle(session.id, session.cwd) ?? session.title)
+          ? ((await grokPromptTitle(session.id, session.cwd)) ?? session.title)
           : session.title,
       agent: 'grok',
       grokSessionId: session.id
@@ -648,7 +648,7 @@ export async function syncGrokSessions(): Promise<void> {
 export async function syncClaudeSessions(): Promise<void> {
   const projects = (await loadProjects()).filter((project) => project.path)
   if (projects.length === 0) return
-  const sessions = listClaudeSessions(projects.map((project) => project.path as string))
+  const sessions = await listClaudeSessions(projects.map((project) => project.path as string))
   if (sessions.length === 0) return
   const known = new Set((await listChats()).map((chat) => chat.grokSessionId).filter(Boolean))
   for (const session of sessions) {

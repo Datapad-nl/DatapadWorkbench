@@ -1,8 +1,10 @@
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
+import { existsSync } from 'fs'
+import { open, readdir, stat as statFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message } from '../shared/types'
 import { id } from './ids'
+import { jsonLines } from './jsonl'
 
 // Claude Code keeps one JSONL transcript per session under
 // ~/.claude/projects/<cwd with every non-alphanumeric char as "-">/<id>.jsonl.
@@ -54,14 +56,14 @@ function parseRows(text: string): Row[] {
   return rows
 }
 
-function readRange(path: string, start: number, length: number): string {
-  const fd = openSync(path, 'r')
+async function readRange(path: string, start: number, length: number): Promise<string> {
+  const file = await open(path, 'r')
   try {
     const buffer = Buffer.alloc(length)
-    const read = readSync(fd, buffer, 0, length, start)
-    return buffer.subarray(0, read).toString('utf8')
+    const { bytesRead } = await file.read(buffer, 0, length, start)
+    return buffer.subarray(0, bytesRead).toString('utf8')
   } finally {
-    closeSync(fd)
+    await file.close()
   }
 }
 
@@ -94,9 +96,9 @@ function assistantText(row: Row): string {
     .trim()
 }
 
-function readSessionFile(path: string, size: number, mtime: Date): ClaudeSession | null {
-  const head = parseRows(readRange(path, 0, Math.min(size, HEAD_BYTES)))
-  const tail = size > HEAD_BYTES ? parseRows(readRange(path, size - TAIL_BYTES, TAIL_BYTES)) : []
+async function readSessionFile(path: string, size: number, mtime: Date): Promise<ClaudeSession | null> {
+  const head = parseRows(await readRange(path, 0, Math.min(size, HEAD_BYTES)))
+  const tail = size > HEAD_BYTES ? parseRows(await readRange(path, size - TAIL_BYTES, TAIL_BYTES)) : []
   const first = head.find((row) => row.cwd && row.sessionId)
   if (!first?.cwd || !first.sessionId) return null
   // Headless SDK runs (asides, other tools, and Workbench's own chats) are not user sessions.
@@ -118,20 +120,20 @@ function readSessionFile(path: string, size: number, mtime: Date): ClaudeSession
 }
 
 /** Claude Code sessions whose working directory is one of `cwds`. */
-export function listClaudeSessions(cwds: string[]): ClaudeSession[] {
+export async function listClaudeSessions(cwds: string[]): Promise<ClaudeSession[]> {
   const found: ClaudeSession[] = []
   for (const cwd of new Set(cwds)) {
     const dir = claudeProjectDir(cwd)
     if (!existsSync(dir)) continue
-    for (const name of readdirSync(dir)) {
+    for (const name of await readdir(dir)) {
       if (!name.endsWith('.jsonl')) continue
       const path = join(dir, name)
       try {
-        const stat = statSync(path)
+        const stat = await statFile(path)
         const hit = cache.get(path)
         let session = hit?.session ?? null
         if (!hit || hit.mtimeMs !== stat.mtimeMs || hit.size !== stat.size) {
-          session = readSessionFile(path, stat.size, stat.mtime)
+          session = await readSessionFile(path, stat.size, stat.mtime)
           cache.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, session })
         }
         if (session && session.cwd === cwd) found.push(session)
@@ -143,14 +145,15 @@ export function listClaudeSessions(cwds: string[]): ClaudeSession[] {
   return found.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
-export function readClaudeHistory(sessionId: string, cwd: string): Message[] {
+export async function readClaudeHistory(sessionId: string, cwd: string): Promise<Message[]> {
   const path = join(claudeProjectDir(cwd), `${sessionId}.jsonl`)
   if (!existsSync(path)) return []
   const messages: Message[] = []
   // Claude Code writes one line per content block, so consecutive assistant
   // lines belong to the same reply until the next real user prompt.
   let reply: Message | null = null
-  for (const row of parseRows(readFileSync(path, 'utf8'))) {
+  for await (const value of jsonLines(path)) {
+    const row = value as Row
     const prompt = userText(row)
     if (prompt) {
       reply = null

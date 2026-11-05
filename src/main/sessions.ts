@@ -1,8 +1,10 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs'
+import { readFile, readdir } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type { Message } from '../shared/types'
 import { id, now } from './ids'
+import { jsonLines } from './jsonl'
 
 export type GrokSession = {
   id: string
@@ -161,19 +163,18 @@ export function grokBuildSignedIn(): boolean {
   }
 }
 
-export function listGrokSessions(): GrokSession[] {
+export async function listGrokSessions(): Promise<GrokSession[]> {
   const root = sessionsRoot()
   if (!existsSync(root)) return []
   const found: GrokSession[] = []
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const folder = join(root, entry.name)
-    for (const child of readdirSync(folder, { withFileTypes: true })) {
+    for (const child of await readdir(folder, { withFileTypes: true })) {
       if (!child.isDirectory()) continue
       const summaryPath = join(folder, child.name, 'summary.json')
-      if (!existsSync(summaryPath)) continue
       try {
-        const summary = JSON.parse(readFileSync(summaryPath, 'utf8')) as {
+        const summary = JSON.parse(await readFile(summaryPath, 'utf8')) as {
           info?: { id?: string; cwd?: string }
           session_summary?: string
           generated_title?: string
@@ -191,26 +192,20 @@ export function listGrokSessions(): GrokSession[] {
           updatedAt: summary.updated_at ?? now()
         })
       } catch {
-        // skip corrupt summaries
+        // skip missing or corrupt summaries
       }
     }
   }
   return found.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }
 
-export function readGrokHistory(sessionId: string, cwd: string): Message[] {
+export async function readGrokHistory(sessionId: string, cwd: string): Promise<Message[]> {
   const encoded = encodeURIComponent(cwd)
   const path = join(sessionsRoot(), encoded, sessionId, 'chat_history.jsonl')
   if (!existsSync(path)) return []
   const messages: Message[] = []
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
-    if (!line.trim()) continue
-    let row: { type?: string; content?: unknown }
-    try {
-      row = JSON.parse(line)
-    } catch {
-      continue
-    }
+  for await (const value of jsonLines(path)) {
+    const row = value as { type?: string; content?: unknown }
     if (row.type === 'user') {
       const text = visibleUserText(extractText(row.content))
       if (!text) continue
