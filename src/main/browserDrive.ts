@@ -107,8 +107,10 @@ export async function screenshot(): Promise<{ png: string; width: number; height
   }
   let image = await browserContents().capturePage()
   if (image.isEmpty()) throw new Error('The BrowserPane is hidden or has no size, so there is nothing to capture.')
-  const { width } = image.getSize()
-  if (width > 1280) image = image.resize({ width: 1280 })
+  // Keep the long side within 1568px: a 1280×1617 capture came back to the agent as UnknownVizError.
+  const { width, height } = image.getSize()
+  const scale = Math.min(1280 / width, 1568 / height, 1)
+  if (scale < 1) image = image.resize({ width: Math.floor(width * scale), height: Math.floor(height * scale) })
   const size = image.getSize()
   return { png: image.toPNG().toString('base64'), width: size.width, height: size.height }
 }
