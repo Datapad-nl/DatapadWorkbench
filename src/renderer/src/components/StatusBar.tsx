@@ -139,6 +139,9 @@ export function StatusBar(): React.JSX.Element {
       <span className="flex shrink-0 items-center gap-1 text-faint">
         <Icon name="command" size={12} />K Search
       </span>
+      <span className="shrink-0 tabular-nums text-faint" data-testid="app-version">
+        v{__APP_VERSION__}
+      </span>
     </footer>
   )
 }

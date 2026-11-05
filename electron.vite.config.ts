@@ -1,6 +1,8 @@
-import { existsSync, realpathSync } from 'fs'
+import { existsSync, readFileSync, realpathSync } from 'fs'
 import { resolve } from 'path'
 import { defineConfig } from 'electron-vite'
+
+const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as { version: string }
 
 // register-mac-app.mjs links dist/Electron.app to the renamed app. macOS names the
 // Dock icon after the folder it was launched from, so launch the real bundle.
@@ -15,6 +17,9 @@ export default defineConfig({
   main: {},
   preload: {},
   renderer: {
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version)
+    },
     publicDir: resolve('src/renderer/public'),
     resolve: {
       alias: {
