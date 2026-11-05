@@ -150,6 +150,11 @@ textarea {
   margin: 0 0 0.9em;
 }
 
+/* Room for the copy button so it never covers the end of a line. */
+.markdown .code-block pre {
+  padding-right: 46px;
+}
+
 .markdown pre code {
   background: transparent;
   padding: 0;

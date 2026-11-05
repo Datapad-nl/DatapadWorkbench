@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'reac
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { isMediaSrc, isRemoteSrc, isVideoSrc, mediaUrl } from '../../../shared/media'
+import { Icon } from './icons'
 
 const PLUGINS = [remarkGfm]
 
@@ -76,10 +77,41 @@ function VisualFrame({ id, title }: Visual): React.JSX.Element {
   )
 }
 
+function CodeBlock({ children }: { children: ReactNode }): React.JSX.Element {
+  const pre = useRef<HTMLPreElement>(null)
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(timer)
+  }, [copied])
+  const copy = (): void => {
+    const text = (pre.current?.textContent ?? '').replace(/\n$/, '')
+    void navigator.clipboard.writeText(text).then(
+      () => setCopied(true),
+      () => undefined
+    )
+  }
+  return (
+    <div className="code-block relative">
+      <pre ref={pre}>{children}</pre>
+      <button
+        type="button"
+        title={copied ? 'Copied' : 'Copy'}
+        aria-label={copied ? 'Copied' : 'Copy code'}
+        onClick={copy}
+        className="absolute top-2 right-2 flex h-[26px] w-[26px] items-center justify-center rounded-[7px] border border-line bg-code-block text-muted transition-colors hover:bg-hover hover:text-ink"
+      >
+        <Icon name={copied ? 'check' : 'copy'} size={13} />
+      </button>
+    </div>
+  )
+}
+
 const visualComponents: Components = {
   pre: ({ node, children }) => {
     const visual = visualBlock(node)
-    return visual ? <VisualFrame {...visual} /> : <pre>{children}</pre>
+    return visual ? <VisualFrame {...visual} /> : <CodeBlock>{children}</CodeBlock>
   }
 }
 
