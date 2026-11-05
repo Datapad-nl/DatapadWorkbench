@@ -1,7 +1,7 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
-import { autoUpdater } from 'electron-updater'
+import { startUpdater } from './updater'
 import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
 import { attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
@@ -147,8 +147,7 @@ app.whenReady().then(async () => {
   void sweepWorktreeProcesses()
   startWorktreeReaper()
   createWindow()
-  // Installed builds fetch new GitHub releases in the background and install them on quit.
-  if (app.isPackaged) void autoUpdater.checkForUpdatesAndNotify().catch(() => undefined)
+  startUpdater()
   const { active } = await getThemeState()
   applyWindowChrome(active)
 

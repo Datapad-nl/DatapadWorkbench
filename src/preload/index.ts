@@ -25,6 +25,7 @@ import type {
   PermissionMode,
   PlanVerdict,
   UpdateProjectInput,
+  UpdateState,
   UsageSnapshot,
   ClaudeOptions,
   ClaudeUsage,
@@ -103,6 +104,16 @@ const api = {
     ipcRenderer.on('voice:modelStatus', wrapped)
     return () => {
       ipcRenderer.removeListener('voice:modelStatus', wrapped)
+    }
+  },
+  getUpdateState: () => ipcRenderer.invoke('update:state') as Promise<UpdateState>,
+  checkForUpdates: () => ipcRenderer.invoke('update:check') as Promise<UpdateState>,
+  installUpdate: () => ipcRenderer.invoke('update:install') as Promise<void>,
+  onUpdateState: (listener: (state: UpdateState) => void) => {
+    const wrapped = (_event: unknown, payload: UpdateState): void => listener(payload)
+    ipcRenderer.on('update:state', wrapped)
+    return () => {
+      ipcRenderer.removeListener('update:state', wrapped)
     }
   },
   getThemeState: (): Promise<{ active: ThemeFile; themes: ThemeSummary[]; activeId: string }> =>

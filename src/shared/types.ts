@@ -210,6 +210,16 @@ export const DEFAULT_VOICE: VoiceSettings = {
 
 const NEURAL_VOICE = /^(F|M)[1-5]$/
 
+/** Where the app update stands. `unsupported` is a dev build, which cannot update itself. */
+export type UpdateState =
+  | { status: 'unsupported' }
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'latest' }
+  | { status: 'downloading'; version: string; percent: number }
+  | { status: 'ready'; version: string }
+  | { status: 'error'; message: string }
+
 export type VoiceModelStatus = {
   ready: boolean
   downloading: boolean

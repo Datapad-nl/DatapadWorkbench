@@ -111,6 +111,7 @@ import {
   onVoiceModelStatus,
   openMicPrivacySettings
 } from './voice'
+import { checkForUpdates, getUpdateState, installUpdate, onUpdateState } from './updater'
 import {
   checkoutGit,
   chatWorkingDir,
@@ -546,6 +547,17 @@ export function registerIpc(): void {
   onVoiceModelStatus((payload) => {
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send('voice:modelStatus', payload)
+    }
+  })
+
+  ipcMain.handle('update:state', () => getUpdateState())
+  ipcMain.handle('update:check', async () => checkForUpdates())
+  ipcMain.handle('update:install', () => {
+    installUpdate()
+  })
+  onUpdateState((payload) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send('update:state', payload)
     }
   })
 

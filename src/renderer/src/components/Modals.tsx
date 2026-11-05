@@ -12,6 +12,7 @@ import {
   formatGrokCli,
   normalizeChatAgent,
   type PublicSettings,
+  type UpdateState,
   type UsageSnapshot,
   type VoiceLanguage,
   type VoiceModelStatus,
@@ -350,6 +351,77 @@ function Toggle({
         style={{ left: on ? 18 : 2 }}
       />
     </button>
+  )
+}
+
+function updateText(state: UpdateState): string {
+  switch (state.status) {
+    case 'unsupported':
+      return 'This is a development build. Installed builds update themselves.'
+    case 'idle':
+      return 'Updates download in the background and install when you quit.'
+    case 'checking':
+      return 'Checking for updates…'
+    case 'latest':
+      return 'You are on the latest version.'
+    case 'downloading':
+      return `Downloading ${state.version}… ${Math.round(state.percent)}%`
+    case 'ready':
+      return `Version ${state.version} is ready. Restart to install it.`
+    case 'error':
+      return `Could not check for updates: ${state.message}`
+  }
+}
+
+function UpdateSection(): React.JSX.Element {
+  const [state, setState] = useState<UpdateState>({ status: 'idle' })
+
+  useEffect(() => {
+    let live = true
+    void window.workbench.getUpdateState().then((next) => {
+      if (live) setState(next)
+    })
+    const off = window.workbench.onUpdateState(setState)
+    return () => {
+      live = false
+      off()
+    }
+  }, [])
+
+  const busy = state.status === 'checking' || state.status === 'downloading'
+  return (
+    <div data-testid="settings-updates" className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[12px] font-medium text-ink">Updates</div>
+        <span className="font-mono text-[11px] text-muted">v{__APP_VERSION__}</span>
+      </div>
+      <p
+        data-testid="settings-update-status"
+        className={`mt-1 text-[12px] leading-5 ${state.status === 'error' ? 'text-danger' : 'text-muted'}`}
+      >
+        {updateText(state)}
+      </p>
+      {state.status === 'unsupported' ? null : state.status === 'ready' ? (
+        <button
+          type="button"
+          data-testid="settings-update-install"
+          className="mt-3 rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
+          onClick={() => void window.workbench.installUpdate()}
+        >
+          Restart to update
+        </button>
+      ) : (
+        <button
+          type="button"
+          data-testid="settings-update-check"
+          disabled={busy}
+          className="mt-3 rounded-lg border border-line bg-raised px-3 py-2 text-[12px] font-medium text-ink hover:bg-surface active:translate-y-px disabled:opacity-50"
+          onClick={() => void window.workbench.checkForUpdates().then(setState)}
+        >
+          {busy ? 'Checking…' : 'Check for updates'}
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -747,6 +819,7 @@ export function SettingsModal(): React.JSX.Element | null {
                 </div>
               )}
             </div>
+            <UpdateSection />
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="text-[12px] font-medium text-ink">Support</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">
