@@ -11,6 +11,7 @@ import {
   DEFAULT_VOICE,
   formatGrokCli,
   normalizeChatAgent,
+  type PublicSettings,
   type UsageSnapshot,
   type VoiceLanguage,
   type VoiceModelStatus,
@@ -352,6 +353,48 @@ function Toggle({
   )
 }
 
+/** Sign-in state for the agent new chats run on. The other agent stays out of sight. */
+function AgentStatus({ settings }: { settings: PublicSettings }): React.JSX.Element {
+  let ok: boolean
+  let text: string
+  let detail: string | null = null
+  if (settings.defaultAgent === 'claude') {
+    const { signedIn, subscription, email } = settings.claude
+    ok = signedIn
+    text = signedIn
+      ? `Signed in${email ? ` as ${email}` : ''}${
+          subscription ? ` · ${subscription.charAt(0).toUpperCase()}${subscription.slice(1)}` : ''
+        }`
+      : 'Not signed in. Run claude auth login in a terminal.'
+  } else if (!settings.grokCli.version) {
+    ok = false
+    text = 'Grok Build CLI not found. Install it and restart, or set GROK_BIN.'
+  } else {
+    ok = settings.hasKey
+    text = settings.grokBuildSignedIn
+      ? 'Signed in with grok login'
+      : settings.hasKey
+        ? `Using xAI API key${settings.keySource === 'env' ? ' from XAI_API_KEY' : ''} ${settings.keyPreview ?? ''}`
+        : 'Not signed in. Run grok login in a terminal, or add an xAI API key below.'
+    detail = `CLI ${formatGrokCli(settings.grokCli)}`
+  }
+  return (
+    <div data-testid="settings-agent-status" className="mt-2 flex items-start gap-2 text-[12px] leading-5">
+      <span className={`mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full ${ok ? 'bg-ok' : 'bg-danger'}`} />
+      <span className={ok ? 'text-muted' : 'text-ink'}>{text}</span>
+      {detail ? (
+        <span
+          data-testid="settings-grok-cli"
+          className="ml-auto shrink-0 font-mono text-[11px] text-muted"
+          title={settings.grokCli.path}
+        >
+          {detail}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 export function SettingsModal(): React.JSX.Element | null {
   const { showSettings, setShowSettings, settings, saveSettings } = useWorkspace()
   const { model: voiceModel } = useVoice()
@@ -454,133 +497,109 @@ export function SettingsModal(): React.JSX.Element | null {
 
         {tab === 'general' ? (
           <>
-            <p className="mt-1 text-[12.5px] leading-5 text-muted">
-              Chats run through Grok Build on your machine. Sign in once with `grok login`
-              (SuperGrok). Existing Grok Build sessions for a folder show up in that project.
-              With a Claude subscription, `claude auth login` lets chats run on Claude Code too.
-            </p>
-            <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-2 text-[12px] text-muted">
+            <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-[12px] font-medium text-ink">Agent for new chats</div>
-                <select
-                  data-testid="settings-default-agent"
-                  value={settings.defaultAgent}
-                  onChange={(event) =>
-                    void saveSettings({ defaultAgent: normalizeChatAgent(event.target.value) })
-                  }
-                  className="rounded-md border border-line bg-canvas px-2 py-1 text-[12px] text-ink outline-none focus:border-accent/60"
-                >
-                  <option value="grok">Grok Build</option>
-                  <option value="claude">Claude Code</option>
-                </select>
+                <div data-testid="settings-default-agent" className="flex rounded-md bg-surface p-0.5">
+                  {(
+                    [
+                      ['grok', 'Grok Build'],
+                      ['claude', 'Claude Code']
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={settings.defaultAgent === value}
+                      className={`rounded px-2.5 py-1 text-[11px] ${
+                        settings.defaultAgent === value ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+                      }`}
+                      onClick={() => void saveSettings({ defaultAgent: normalizeChatAgent(value) })}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div data-testid="settings-claude" className="mt-1.5 leading-5">
-                {settings.claude.signedIn
-                  ? `Claude is signed in${
-                      settings.claude.subscription ? ` (${settings.claude.subscription})` : ''
-                    }${settings.claude.email ? ` as ${settings.claude.email}` : ''}.`
-                  : 'Claude is not signed in. Run claude auth login in a terminal to use your subscription.'}
-              </div>
-            </div>
-            <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-2 text-[12px] text-muted">
-              {settings.grokBuildSignedIn
-                ? 'Grok Build is signed in. New chats continue as real Grok sessions.'
-                : settings.hasKey
-                  ? `Fallback API key (${settings.keySource}): ${settings.keyPreview}`
-                  : 'Not signed in. Run grok login in a terminal.'}
-            </div>
-            <div
-              data-testid="settings-grok-cli"
-              className="mt-3 rounded-lg border border-line bg-canvas px-3 py-2 text-[12px] text-muted"
-            >
-              <div className="text-[12px] font-medium text-ink">Grok Build CLI</div>
-              <div className="mt-1 text-ink">{formatGrokCli(settings.grokCli)}</div>
-              <div className="mt-0.5 break-all font-mono text-[11px]">{settings.grokCli.path}</div>
-              {settings.grokCli.version ? null : (
-                <p className="mt-1 leading-5">
-                  Install the Grok Build CLI and restart, or set GROK_BIN to the grok binary.
-                </p>
-              )}
-            </div>
-            {onClaude ? null : (
-              <>
-                <label className="mt-4 block text-[12px] text-muted">xAI API key (fallback)</label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(event) => {
-                    setApiKey(event.target.value)
-                    setSaved(false)
-                  }}
-                  className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
-                  placeholder="xai-…"
-                />
-              </>
-            )}
-            <div className="mt-4 grid grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)] gap-3">
-              <div className="min-w-0">
-                <label className="block text-[12px] text-muted">
-                  {onClaude ? 'Claude model' : 'Grok model'}
-                </label>
-                {onClaude ? (
+              <AgentStatus settings={settings} />
+              <div className="mt-3 grid grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)] gap-3">
+                <div className="min-w-0">
+                  <label className="block text-[12px] text-muted">Model</label>
+                  {onClaude ? (
+                    <select
+                      data-testid="settings-claude-model"
+                      value={claudeModel}
+                      onChange={(event) => {
+                        setClaudeModel(event.target.value)
+                        setSaved(false)
+                      }}
+                      className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
+                    >
+                      {claudeModels.some((option) => option.value === claudeModel) ? null : (
+                        <option value={claudeModel}>{claudeModel}</option>
+                      )}
+                      {claudeModels.map((option) => (
+                        <option key={option.value} value={option.value} title={option.description}>
+                          {option.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <select
+                      data-testid="settings-model"
+                      value={model}
+                      onChange={(event) => {
+                        setModel(event.target.value)
+                        setSaved(false)
+                      }}
+                      className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
+                    >
+                      {modelOptions(settings.grokCli.models, model).map((id) => (
+                        <option key={id} value={id}>
+                          {id}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <label className="block text-[12px] text-muted">Effort</label>
                   <select
-                    data-testid="settings-claude-model"
-                    value={claudeModel}
+                    data-testid="settings-effort"
+                    value={effort}
                     onChange={(event) => {
-                      setClaudeModel(event.target.value)
+                      setEffort(event.target.value as ReasoningEffort | '')
                       setSaved(false)
                     }}
                     className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
                   >
-                    {claudeModels.some((option) => option.value === claudeModel) ? null : (
-                      <option value={claudeModel}>{claudeModel}</option>
-                    )}
-                    {claudeModels.map((option) => (
-                      <option key={option.value} value={option.value} title={option.description}>
-                        {option.name}
+                    <option value="">Default</option>
+                    {effort && !efforts.includes(effort) ? (
+                      <option value={effort}>{reasoningEffortLabel(effort)}</option>
+                    ) : null}
+                    {efforts.map((id) => (
+                      <option key={id} value={id}>
+                        {reasoningEffortLabel(id)}
                       </option>
                     ))}
                   </select>
-                ) : (
-                  <select
-                    data-testid="settings-model"
-                    value={model}
+                </div>
+              </div>
+              {onClaude || settings.grokBuildSignedIn ? null : (
+                <>
+                  <label className="mt-3 block text-[12px] text-muted">xAI API key (instead of grok login)</label>
+                  <input
+                    type="password"
+                    value={apiKey}
                     onChange={(event) => {
-                      setModel(event.target.value)
+                      setApiKey(event.target.value)
                       setSaved(false)
                     }}
                     className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
-                  >
-                    {modelOptions(settings.grokCli.models, model).map((id) => (
-                      <option key={id} value={id}>
-                        {id}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-              <div className="min-w-0">
-                <label className="block text-[12px] text-muted">Effort</label>
-                <select
-                  data-testid="settings-effort"
-                  value={effort}
-                  onChange={(event) => {
-                    setEffort(event.target.value as ReasoningEffort | '')
-                    setSaved(false)
-                  }}
-                  className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
-                >
-                  <option value="">Default</option>
-                  {effort && !efforts.includes(effort) ? (
-                    <option value={effort}>{reasoningEffortLabel(effort)}</option>
-                  ) : null}
-                  {efforts.map((id) => (
-                    <option key={id} value={id}>
-                      {reasoningEffortLabel(id)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                    placeholder={settings.keyPreview ?? 'xai-…'}
+                  />
+                </>
+              )}
             </div>
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="flex items-center justify-between gap-3">
@@ -588,7 +607,7 @@ export function SettingsModal(): React.JSX.Element | null {
                   <div className="text-[12px] font-medium text-ink">Voice</div>
                   <p className="mt-1 text-[12px] leading-5 text-muted">
                     Talk to the agent on this machine. Listening uses a local Whisper model. Replies use
-                    your system voice. Audio never leaves the computer.
+                    a local Supertonic voice. Audio never leaves the computer.
                   </p>
                 </div>
                 <Toggle
