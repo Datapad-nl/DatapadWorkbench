@@ -335,7 +335,7 @@ export function registerIpc(): void {
     const window = BrowserWindow.getFocusedWindow()
     const options = {
       title: 'Choose project folder',
-      properties: ['openDirectory' as const]
+      properties: ['openDirectory' as const, 'createDirectory' as const]
     }
     const result = window
       ? await dialog.showOpenDialog(window, options)
