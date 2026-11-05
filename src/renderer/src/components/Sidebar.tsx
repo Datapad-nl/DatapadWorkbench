@@ -343,16 +343,13 @@ function isWorktree(project: Project): boolean {
   return Boolean(project.path && WORKTREE_MARKERS.some((marker) => project.path!.includes(marker)))
 }
 
-/**
- * Worktrees live at `<dir>/.workbench-worktrees/<repo>-<id>` next to `<dir>/<repo>`.
- * Show the parent project's own name, so a renamed project renames its worktrees too.
- */
-function worktreeParent(project: Project, projects: Project[]): string {
+/** Worktrees live at `<dir>/.workbench-worktrees/<repo>-<id>` next to `<dir>/<repo>`. */
+function worktreeParent(project: Project, projects: Project[]): Project | null {
   const path = project.path ?? ''
   const repo = (path.split('/').pop() ?? project.name).replace(/-[0-9a-f]{6,}$/i, '')
   const marker = WORKTREE_MARKERS.find((item) => path.includes(item))
   const parentPath = marker ? `${path.slice(0, path.indexOf(marker))}/${repo}` : null
-  return projects.find((item) => item.path === parentPath)?.name ?? repo
+  return projects.find((item) => item.path === parentPath) ?? null
 }
 
 function relativeTime(iso: string): string {
@@ -391,13 +388,11 @@ function KeyHint({ children }: { children: React.ReactNode }): React.JSX.Element
 
 function SectionLabel({
   label,
-  count,
   onAdd,
   addLabel,
   addTestId
 }: {
   label: string
-  count?: number
   onAdd?: () => void
   addLabel?: string
   addTestId?: string
@@ -405,11 +400,7 @@ function SectionLabel({
   return (
     <div className="mt-3 mb-1 flex h-6 items-center justify-between pr-1 pl-2">
       <span className="text-[11px] font-semibold text-faint">{label}</span>
-      {onAdd ? (
-        <IconButton icon="plus" label={addLabel ?? 'Add'} size={22} onClick={onAdd} testId={addTestId} />
-      ) : count != null ? (
-        <span className="text-[11px] text-faint tabular-nums">{count}</span>
-      ) : null}
+      {onAdd && <IconButton icon="plus" label={addLabel ?? 'Add'} size={22} onClick={onAdd} testId={addTestId} />}
     </div>
   )
 }
@@ -430,11 +421,21 @@ function scheduleTitle(schedule: NonNullable<ChatSummary['schedule']>): string {
   return `${when}${next}\n\n${schedule.prompt}`
 }
 
-function ChatRow({ chat, project }: { chat: ChatSummary; project: Project }): React.JSX.Element {
+function ChatRow({
+  chat,
+  project,
+  worktreeBranch
+}: {
+  chat: ChatSummary
+  project: Project
+  /** Branch of the worktree project this chat runs in, when it is folded under its parent. */
+  worktreeBranch?: string | null
+}): React.JSX.Element {
   const { activeChatId, openChat, deleteChat } = useWorkspace()
   const streams = useStreams()
   const streaming = streams[chat.id]?.status === 'streaming'
   const active = activeChatId === chat.id
+  const branch = chat.worktreeBranch ?? worktreeBranch ?? null
   return (
     <div className="relative">
       {active && <span className="absolute top-1 bottom-1 -left-[9px] w-[2px] rounded-full bg-accent" />}
@@ -457,12 +458,12 @@ function ChatRow({ chat, project }: { chat: ChatSummary; project: Project }): Re
               Claude
             </span>
           )}
-          {chat.worktreeBranch && (
+          {branch && (
             <span
               className="min-w-0 shrink truncate font-mono text-[10.5px] text-faint"
-              title={chat.worktreePath || chat.worktreeBranch}
+              title={chat.worktreePath || branch}
             >
-              {chat.worktreeBranch.replace(/^workbench\//, '')}
+              {branch.replace(/^workbench\//, '')}
             </span>
           )}
         </button>
@@ -609,14 +610,24 @@ export function Sidebar(): React.JSX.Element | null {
     target.addEventListener('pointerup', onUp)
   }
 
+  // A worktree folds into its parent project: its chats list there, and the Git window shows the worktree.
+  const ownerOf = useMemo(() => {
+    const owner: Record<string, string> = {}
+    for (const project of projects) {
+      owner[project.id] = (isWorktree(project) && worktreeParent(project, projects)?.id) || project.id
+    }
+    return owner
+  }, [projects])
+
   const chatsByProject = useMemo(() => {
     const grouped: Record<string, typeof chats> = {}
     for (const chat of chats) {
-      grouped[chat.projectId] ??= []
-      grouped[chat.projectId].push(chat)
+      const owner = ownerOf[chat.projectId] ?? chat.projectId
+      grouped[owner] ??= []
+      grouped[owner].push(chat)
     }
     return grouped
-  }, [chats])
+  }, [chats, ownerOf])
 
   const needle = query.trim().toLowerCase()
 
@@ -642,6 +653,7 @@ export function Sidebar(): React.JSX.Element | null {
   // While searching, a project shows when its name matches or when any of its chats does.
   const filtered = useMemo(() => {
     return projects
+      .filter((project) => ownerOf[project.id] === project.id)
       .map((project) => {
         const all = chatsByProject[project.id] ?? []
         if (!needle) return { project, chats: all }
@@ -651,10 +663,7 @@ export function Sidebar(): React.JSX.Element | null {
         return { project, chats: nameHit && hits.length === 0 ? all : hits }
       })
       .filter((item): item is { project: Project; chats: ChatSummary[] } => item !== null)
-  }, [projects, chatsByProject, needle, contentHits])
-
-  const regular = filtered.filter((item) => !isWorktree(item.project))
-  const worktrees = filtered.filter((item) => isWorktree(item.project))
+  }, [projects, ownerOf, chatsByProject, needle, contentHits])
 
   const menuProject = menu ? (projects.find((item) => item.id === menu.projectId) ?? null) : null
 
@@ -669,9 +678,11 @@ export function Sidebar(): React.JSX.Element | null {
   ].filter(Boolean)
   const accountName = account ?? (plans.length ? 'Signed in' : 'Not signed in')
 
-  function renderProject(project: Project, projectChats: ChatSummary[], worktree: boolean): React.JSX.Element {
+  function renderProject(project: Project, projectChats: ChatSummary[]): React.JSX.Element {
+    // Only a worktree whose parent project is not in the sidebar still shows as its own row.
+    const worktree = isWorktree(project)
     const open = needle ? true : !collapsed[project.id]
-    const selected = activeProjectId === project.id
+    const selected = activeProjectId != null && ownerOf[activeProjectId] === project.id
     const git = gitSummaries[project.id]
     const branch = git?.available ? (git.branch ?? 'HEAD') : null
     const limit = showAll[project.id] || needle ? projectChats.length : VISIBLE_CHATS
@@ -729,7 +740,7 @@ export function Sidebar(): React.JSX.Element | null {
                   worktree ? 'text-muted' : open ? 'font-medium text-ink' : 'text-ink-2'
                 }`}
               >
-                {worktree ? worktreeParent(project, projects) : project.name}
+                {project.name}
               </span>
             </button>
           )}
@@ -787,7 +798,14 @@ export function Sidebar(): React.JSX.Element | null {
                   No chats yet · start one
                 </button>
               ) : (
-                shown.map((chat) => <ChatRow key={chat.id} chat={chat} project={project} />)
+                shown.map((chat) => (
+                  <ChatRow
+                    key={chat.id}
+                    chat={chat}
+                    project={project}
+                    worktreeBranch={chat.projectId === project.id ? null : gitSummaries[chat.projectId]?.branch}
+                  />
+                ))
               )}
               {hidden > 0 && (
                 <button
@@ -872,16 +890,10 @@ export function Sidebar(): React.JSX.Element | null {
           >
             Add a project folder to start chatting.
           </button>
-        ) : regular.length === 0 && worktrees.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <div className="px-2 py-2 text-[12.5px] text-faint">Nothing matches “{query.trim()}”.</div>
         ) : (
-          regular.map((item) => renderProject(item.project, item.chats, false))
-        )}
-        {worktrees.length > 0 && (
-          <>
-            <SectionLabel label="Worktrees" count={worktrees.length} />
-            {worktrees.map((item) => renderProject(item.project, item.chats, true))}
-          </>
+          filtered.map((item) => renderProject(item.project, item.chats))
         )}
       </div>
 
