@@ -11,11 +11,15 @@ files:
   - package.json
 # The agents start these as their own processes, so they must be real files.
 # The Dock icon is loaded by path, which needs a real file as well.
+# An unpacked module cannot import from inside the asar, so the Claude adapter's
+# dependencies (zod, diff) are unpacked with it.
 asarUnpack:
   - src/main/browser-mcp.mjs
   - resources/icon.png
   - node_modules/@agentclientprotocol/**
   - node_modules/@anthropic-ai/**
+  - node_modules/zod/**
+  - node_modules/diff/**
 artifactName: Datapad-Workbench-${version}-${os}-${arch}.${ext}
 publish:
   provider: github
