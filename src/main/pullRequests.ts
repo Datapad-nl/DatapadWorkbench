@@ -1,9 +1,8 @@
 import { execFile } from "child_process";
 import { homedir } from "os";
 import type { Chat, ChatPullRequest } from "../shared/types";
-import { callerChat, emitChat, send } from "./chatTools";
+import { callerChat, chatRunning, emitChat, send } from "./chatTools";
 import { chatWorkingDir } from "./git";
-import { isStreaming } from "./grok";
 import { listChats, listProjects, mutateChat } from "./store";
 
 /**
@@ -237,8 +236,9 @@ function changes(
   pr: GhPr,
 ): string[] {
   const notes: string[] = [];
+  // Also when checks re-ran and finished within one interval, e.g. passing to failing.
   if (
-    before.checks === "pending" &&
+    before.checks !== after.checks &&
     (after.checks === "passing" || after.checks === "failing")
   ) {
     notes.push(`Checks finished: ${after.checksSummary}.`);
@@ -283,13 +283,15 @@ async function checkWatchedPrs(): Promise<void> {
     for (const summary of await listChats()) {
       const before = summary.pr;
       // A busy chat is checked again next time, so nothing it should hear about is lost.
-      if (!before?.watch || isStreaming(summary.id)) continue;
+      if (!before?.watch || chatRunning(summary.id)) continue;
       let pr: GhPr;
       try {
         pr = await fetchPr(await chatDir(summary), before.url);
       } catch {
         continue;
       }
+      // The chat may have started a turn while gh ran.
+      if (chatRunning(summary.id)) continue;
       const after = summarise(pr, true);
       const notes = changes(before, after, pr);
       const same = (
@@ -306,15 +308,27 @@ async function checkWatchedPrs(): Promise<void> {
       if (same && !notes.length) continue;
       let linked = false;
       const chat = await mutateChat(summary.id, (next) => {
-        linked = next.pr?.url === before.url;
+        // link_pr, pr_status or unlink wrote newer data while gh ran; the next check uses it.
+        linked =
+          next.pr?.url === before.url &&
+          next.pr.checkedAt === before.checkedAt;
         if (linked) next.pr = after;
       });
       if (!linked) continue;
       emitChat(chat);
-      if (notes.length)
-        (
-          await send(chat.id, wakeMessage(after, notes)).catch(() => null)
-        )?.done.catch(() => {});
+      if (!notes.length) continue;
+      const turn = await send(chat.id, wakeMessage(after, notes)).catch(
+        () => null,
+      );
+      if (turn) {
+        turn.done.catch(() => {});
+        continue;
+      }
+      // Not delivered: restore the old sample so the next check reports these changes again.
+      const restored = await mutateChat(summary.id, (next) => {
+        if (next.pr?.checkedAt === after.checkedAt) next.pr = before;
+      });
+      emitChat(restored);
     }
   } finally {
     checking = false;

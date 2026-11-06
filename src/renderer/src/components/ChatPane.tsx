@@ -75,12 +75,17 @@ type SlashRun = {
     content: string,
     attachments?: Attachment[],
     mentions?: FileMention[]
-  ) => Promise<void>
+  ) => Promise<boolean>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
   saveSettings: (input: { model?: string; claudeModel?: string; effort?: string | null }) => Promise<void>
   setShowSettings: (open: boolean | 'mcp') => void
   setShowUsage: (open: boolean) => void
   openRewind: () => void
+}
+
+function errorText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : fallback
+  return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -102,20 +107,24 @@ function conversationMarkdown(messages: Message[]): string {
     .join('\n\n')
 }
 
+async function sendSlash(input: SlashRun, content: string): Promise<void> {
+  const ok = await input.sendMessage(input.chatId, content, input.draft.attachments, input.draft.mentions)
+  if (!ok) throw new Error(`Could not send /${input.def.id}`)
+}
+
 async function runSlash(input: SlashRun): Promise<string | null> {
   const { def, args } = input
   if (def.kind === 'unavailable') {
     return `/${def.id} is a ${chatAgentLabel(input.agent)} terminal command. Not available in Datapad Workbench.`
   }
   if (def.kind === 'agent') {
-    const line = args ? `/${def.id} ${args}` : `/${def.id}`
-    await input.sendMessage(input.chatId, line, input.draft.attachments, input.draft.mentions)
+    await sendSlash(input, args ? `/${def.id} ${args}` : `/${def.id}`)
     return null
   }
   if (def.kind === 'prompt') {
     const body = args ? `${def.prompt ?? ''} ${args}`.trim() : (def.prompt ?? '').trim()
     if (!body) return `Usage: /${def.id} <args>`
-    await input.sendMessage(input.chatId, body, input.draft.attachments, input.draft.mentions)
+    await sendSlash(input, body)
     return null
   }
   switch (def.id) {
@@ -127,9 +136,7 @@ async function runSlash(input: SlashRun): Promise<string | null> {
       return null
     case 'plan':
       await input.setChatMode(input.chatId, 'plan')
-      if (args) {
-        await input.sendMessage(input.chatId, args, input.draft.attachments, input.draft.mentions)
-      }
+      if (args) await sendSlash(input, args)
       return args ? null : 'Plan mode on'
     case 'ask':
       await input.setChatMode(input.chatId, 'ask')
@@ -246,9 +253,19 @@ export function ChatPane(): React.JSX.Element {
   } = useWorkspace()
   const { stopAll } = useVoice()
   const streams = useStreams()
-  const [rewindOpen, setRewindOpen] = useState(false)
-  const [rewindSelected, setRewindSelected] = useState<string | null>(null)
+  const [rewind, setRewind] = useState<{ chatId: string; selected: string | null } | null>(null)
   const [rewindBusy, setRewindBusy] = useState(false)
+  const [rewindError, setRewindError] = useState<string | null>(null)
+  const drafts = useRef(new Map<string, ComposerDraft>())
+
+  if (rewind && rewind.chatId !== activeChatId && !rewindBusy && !rewindError) setRewind(null)
+  const rewindTarget = rewind ? chatsById[rewind.chatId] : undefined
+
+  function openRewind(chatId: string, checkpointId: string | null): void {
+    if (rewindBusy) return
+    setRewind({ chatId, selected: checkpointId })
+    setRewindError(null)
+  }
 
   const activeChat = activeChatId ? chatsById[activeChatId] : null
   const activeProject = projects.find(
@@ -333,16 +350,12 @@ export function ChatPane(): React.JSX.Element {
             plan={planStillOpen(activeChat.plan) ? (activeChat.plan ?? null) : null}
             checkpoints={activeChat.checkpoints ?? []}
             canApprove={Boolean(activeChat.plan?.awaitingApproval)}
-            onApprove={(verdict) => void approvePlan(activeChat.id, verdict)}
-            onRewind={(checkpointId) => {
-              setRewindSelected(checkpointId)
-              setRewindOpen(true)
-            }}
+            onApprove={(verdict) => approvePlan(activeChat.id, verdict)}
+            onRewind={(checkpointId) => openRewind(activeChat.id, checkpointId)}
             onSuggest={(text) => void sendMessage(activeChat.id, text)}
           />
           <Composer
             key={activeChat.id}
-            disabled={false}
             streaming={Boolean(streamingNow)}
             progress={streamingNow ? progress.label : ''}
             mode={normalizePermissionMode(activeChat.mode)}
@@ -354,8 +367,9 @@ export function ChatPane(): React.JSX.Element {
             projectId={activeChat.projectId}
             chatId={activeChat.id}
             hasFolder={Boolean(activeProject?.path)}
+            drafts={drafts}
             onSend={(text, attachments, mentions) =>
-              void sendMessage(activeChat.id, text, attachments, mentions)
+              sendMessage(activeChat.id, text, attachments, mentions)
             }
             onSlash={(def, args, draft) =>
               runSlash({
@@ -377,7 +391,7 @@ export function ChatPane(): React.JSX.Element {
                           settings.model,
                           settings.effort ? reasoningEffortLabel(settings.effort) : null,
                           settings.grokBuildSignedIn ? 'Grok Build' : settings.keySource,
-                          formatGrokCli(settings.grokCli)
+                          settings.cliChecking ? null : formatGrokCli(settings.grokCli)
                         ]
                     )
                       .filter(Boolean)
@@ -392,11 +406,7 @@ export function ChatPane(): React.JSX.Element {
                 saveSettings,
                 setShowSettings,
                 setShowUsage,
-                openRewind: () => {
-                  const latest = activeChat.checkpoints?.at(-1)
-                  setRewindSelected(latest?.id ?? null)
-                  setRewindOpen(true)
-                }
+                openRewind: () => openRewind(activeChat.id, activeChat.checkpoints?.at(-1)?.id ?? null)
               })
             }
             onStop={() => {
@@ -412,34 +422,37 @@ export function ChatPane(): React.JSX.Element {
                 ? (agent) => void setChatAgent(activeChat.id, agent)
                 : null
             }
-            onPermission={(requestId, decision) => void resolvePermission(requestId, decision)}
-            onQuestion={(requestId, decision) => void resolveQuestion(requestId, decision)}
-            onRewindMenu={() => {
-              const latest = activeChat.checkpoints?.at(-1)
-              setRewindSelected(latest?.id ?? null)
-              setRewindOpen(true)
-            }}
+            onPermission={resolvePermission}
+            onQuestion={resolveQuestion}
+            onRewindMenu={() => openRewind(activeChat.id, activeChat.checkpoints?.at(-1)?.id ?? null)}
           />
-          {rewindOpen && (
-            <RewindModal
-              checkpoints={[...(activeChat.checkpoints ?? [])].reverse()}
-              selectedId={rewindSelected}
-              busy={rewindBusy}
-              onSelect={setRewindSelected}
-              onClose={() => {
-                if (rewindBusy) return
-                setRewindOpen(false)
-              }}
-              onRewind={() => {
-                if (!rewindSelected || rewindBusy) return
-                setRewindBusy(true)
-                void rewindChat(activeChat.id, rewindSelected)
-                  .then(() => setRewindOpen(false))
-                  .finally(() => setRewindBusy(false))
-              }}
-            />
-          )}
         </>
+      )}
+      {rewind && rewindTarget && (
+        <RewindModal
+          checkpoints={[...(rewindTarget.checkpoints ?? [])].reverse()}
+          selectedId={rewind.selected}
+          busy={rewindBusy}
+          error={rewindError}
+          onSelect={(selected) => {
+            setRewind({ ...rewind, selected })
+            setRewindError(null)
+          }}
+          onClose={() => {
+            if (rewindBusy) return
+            setRewind(null)
+            setRewindError(null)
+          }}
+          onRewind={() => {
+            if (!rewind.selected || rewindBusy) return
+            setRewindBusy(true)
+            setRewindError(null)
+            void rewindChat(rewind.chatId, rewind.selected)
+              .then(() => setRewind(null))
+              .catch((error: unknown) => setRewindError(errorText(error, 'Could not rewind')))
+              .finally(() => setRewindBusy(false))
+          }}
+        />
       )}
     </section>
   )
@@ -781,6 +794,8 @@ function ReplyAction({
 
 function CopyAction({ text }: { text: string }): React.JSX.Element {
   const [copied, setCopied] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
   return (
     <ReplyAction
       icon={copied ? 'check' : 'copy'}
@@ -789,7 +804,8 @@ function CopyAction({ text }: { text: string }): React.JSX.Element {
         void copyText(text).then((ok) => {
           if (!ok) return
           setCopied(true)
-          setTimeout(() => setCopied(false), 1200)
+          window.clearTimeout(timer.current)
+          timer.current = window.setTimeout(() => setCopied(false), 1200)
         })
       }}
     />
@@ -836,7 +852,7 @@ function MessageList({
   plan: ChatPlan | null
   checkpoints: Checkpoint[]
   canApprove: boolean
-  onApprove: (verdict: PlanVerdict) => void
+  onApprove: (verdict: PlanVerdict) => Promise<void>
   onRewind: (checkpointId: string) => void
   onSuggest: (text: string) => void
 }): React.JSX.Element {
@@ -982,7 +998,7 @@ function MessageList({
           )}
           {error && <div className="text-[13px] text-danger">{error}</div>}
           {plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()) && (
-            <PlanCard plan={plan} chatId={chatId} canApprove={canApprove} onApprove={onApprove} />
+            <PlanCard key={chatId} plan={plan} chatId={chatId} canApprove={canApprove} onApprove={onApprove} />
           )}
         </div>
       )}
@@ -1041,7 +1057,25 @@ const CARD = 'rounded-[8px] border border-line-strong bg-raised px-4 py-3'
 const PRIMARY_BUTTON =
   'flex h-8 shrink-0 items-center rounded-[10px] bg-accent px-3.5 text-[12.5px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-45'
 const QUIET_BUTTON =
-  'flex h-8 items-center rounded-[10px] px-3 text-[12.5px] text-muted hover:bg-hover hover:text-ink'
+  'flex h-8 items-center rounded-[10px] px-3 text-[12.5px] text-muted hover:bg-hover hover:text-ink disabled:opacity-45'
+
+function usePending(fallback: string): {
+  busy: boolean
+  error: string | null
+  run: (action: () => Promise<void>) => void
+} {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  function run(action: () => Promise<void>): void {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    void action()
+      .catch((caught: unknown) => setError(errorText(caught, fallback)))
+      .finally(() => setBusy(false))
+  }
+  return { busy, error, run }
+}
 
 function PlanMark({ status }: { status: PlanEntry['status'] }): React.JSX.Element {
   if (status === 'completed') return <span className="text-accent">✓</span>
@@ -1058,8 +1092,9 @@ function PlanCard({
   plan: ChatPlan
   chatId: string
   canApprove: boolean
-  onApprove: (verdict: PlanVerdict) => void
+  onApprove: (verdict: PlanVerdict) => Promise<void>
 }): React.JSX.Element {
+  const { busy, error, run } = usePending('Could not answer the plan')
   const markdown = plan.markdown?.trim()
   return (
     <div className={CARD}>
@@ -1092,26 +1127,30 @@ function PlanCard({
       ) : (
         <div className="mt-3 text-[13px] text-muted">No plan written yet.</div>
       )}
+      {canApprove && error && <div className="mt-3 text-[13px] text-danger">{error}</div>}
       {canApprove && (
         <div className="mt-3 flex flex-wrap justify-end gap-2">
           <button
             type="button"
             className={QUIET_BUTTON}
-            onClick={() => onApprove('abandon')}
+            disabled={busy}
+            onClick={() => run(() => onApprove('abandon'))}
           >
             Quit plan
           </button>
           <button
             type="button"
             className={QUIET_BUTTON}
-            onClick={() => onApprove('revise')}
+            disabled={busy}
+            onClick={() => run(() => onApprove('revise'))}
           >
             Request changes
           </button>
           <button
             type="button"
             className={PRIMARY_BUTTON}
-            onClick={() => onApprove('approve')}
+            disabled={busy}
+            onClick={() => run(() => onApprove('approve'))}
           >
             Approve & implement
           </button>
@@ -1126,8 +1165,9 @@ function PermissionBar({
   onDecision
 }: {
   request: PermissionRequest
-  onDecision: (decision: 'allow' | 'deny') => void
+  onDecision: (decision: 'allow' | 'deny') => Promise<void>
 }): React.JSX.Element {
+  const { busy, error, run } = usePending('Could not answer the request')
   return (
     <div className={`mb-3 ${CARD}`}>
       <div className="flex items-center gap-1.5 text-[11px] text-faint">
@@ -1138,12 +1178,13 @@ function PermissionBar({
       {request.detail && (
         <div className="mt-1 line-clamp-2 font-mono text-[11.5px] text-muted">{request.detail}</div>
       )}
+      {error && <div className="mt-2 text-[13px] text-danger">{error}</div>}
       <div className="mt-3 flex justify-end gap-2">
-        <button className={QUIET_BUTTON} onClick={() => onDecision('deny')}
+        <button className={QUIET_BUTTON} disabled={busy} onClick={() => run(() => onDecision('deny'))}
         >
           Deny
         </button>
-        <button className={PRIMARY_BUTTON} onClick={() => onDecision('allow')}
+        <button className={PRIMARY_BUTTON} disabled={busy} onClick={() => run(() => onDecision('allow'))}
         >
           Allow
         </button>
@@ -1162,8 +1203,9 @@ function QuestionCard({
   onDecision: (
     requestId: string,
     decision: { type: 'skip' } | { type: 'submit'; answers: string[][] }
-  ) => void
+  ) => Promise<void>
 }): React.JSX.Element {
+  const { busy, error, run } = usePending('Could not send the answer')
   const [picked, setPicked] = useState<string[][]>(() => request.questions.map(() => []))
   const [other, setOther] = useState<string[]>(() => request.questions.map(() => ''))
   const [usingOther, setUsingOther] = useState<boolean[]>(() => request.questions.map(() => false))
@@ -1272,19 +1314,21 @@ function QuestionCard({
           )
         })}
       </div>
+      {error && <div className="mt-3 text-[13px] text-danger">{error}</div>}
       <div className="mt-4 flex justify-end gap-2">
         <button
           type="button"
           className={QUIET_BUTTON}
-          onClick={() => onDecision(request.requestId, { type: 'skip' })}
+          disabled={busy}
+          onClick={() => run(() => onDecision(request.requestId, { type: 'skip' }))}
         >
           Skip
         </button>
         <button
           type="button"
           className={PRIMARY_BUTTON}
-          disabled={!ready}
-          onClick={() => onDecision(request.requestId, { type: 'submit', answers: answers() })}
+          disabled={!ready || busy}
+          onClick={() => run(() => onDecision(request.requestId, { type: 'submit', answers: answers() }))}
         >
           Submit
         </button>
@@ -1451,8 +1495,9 @@ function MentionChip({
   )
 }
 
+type ComposerDraft = { value: string; attachments: Attachment[]; mentions: FileMention[] }
+
 function Composer({
-  disabled,
   streaming,
   progress,
   mode,
@@ -1462,6 +1507,7 @@ function Composer({
   chatId,
   hasFolder,
   history,
+  drafts,
   onSend,
   onSlash,
   onStop,
@@ -1472,7 +1518,6 @@ function Composer({
   onQuestion,
   onRewindMenu
 }: {
-  disabled: boolean
   streaming: boolean
   progress: string
   mode: PermissionMode
@@ -1482,24 +1527,28 @@ function Composer({
   chatId: string
   hasFolder: boolean
   history: string[]
-  onSend: (text: string, attachments: Attachment[], mentions: FileMention[]) => void
+  drafts: React.RefObject<Map<string, ComposerDraft>>
+  onSend: (text: string, attachments: Attachment[], mentions: FileMention[]) => Promise<boolean>
   onSlash: (def: SlashDef, args: string, draft: { attachments: Attachment[]; mentions: FileMention[] }) => Promise<string | null>
   onStop: () => void
   onMode: (mode: PermissionMode) => void
   agent: ChatAgent
   /** Null once the chat started, or when only one agent is signed in. */
   onAgent: ((agent: ChatAgent) => void) | null
-  onPermission: (requestId: string, decision: 'allow' | 'deny') => void
+  onPermission: (requestId: string, decision: 'allow' | 'deny') => Promise<void>
   onQuestion: (
     requestId: string,
     decision: { type: 'skip' } | { type: 'submit'; answers: string[][] }
-  ) => void
+  ) => Promise<void>
   onRewindMenu: () => void
 }): React.JSX.Element {
-  const [value, setValue] = useState('')
-  const [attachments, setAttachments] = useState<Attachment[]>([])
-  const [mentions, setMentions] = useState<FileMention[]>([])
+  const [value, setValue] = useState(() => drafts.current.get(chatId)?.value ?? '')
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    () => drafts.current.get(chatId)?.attachments ?? []
+  )
+  const [mentions, setMentions] = useState<FileMention[]>(() => drafts.current.get(chatId)?.mentions ?? [])
   const [hits, setHits] = useState<FileHit[]>([])
+  const [hitsQuery, setHitsQuery] = useState<string | null>(null)
   const [hitIndex, setHitIndex] = useState(0)
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null)
   const [command, setCommand] = useState<{ start: number; query: string } | null>(null)
@@ -1508,6 +1557,7 @@ function Composer({
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [announced, setAnnounced] = useState<AgentCommand[]>([])
   const draftRef = useRef('')
+  const historyRef = useRef<string[]>([])
   const lastEscAt = useRef(0)
   const ref = useRef<HTMLTextAreaElement>(null)
   const selectedCmd = useRef<HTMLButtonElement>(null)
@@ -1556,16 +1606,26 @@ function Composer({
   }, [])
 
   useEffect(() => {
+    if (!value && attachments.length === 0 && mentions.length === 0) drafts.current.delete(chatId)
+    else drafts.current.set(chatId, { value, attachments, mentions })
+  }, [attachments, chatId, drafts, mentions, value])
+
+  useEffect(() => {
     let cancelled = false
+    let seq = 0
     const load = (): void => {
+      const mine = ++seq
       void window.workbench.getChatCommands(chatId).then((next) => {
-        if (!cancelled) setAnnounced(next)
+        if (!cancelled && mine === seq) setAnnounced(next)
       })
     }
     load()
     const unsub = window.workbench.onChatEvent((event) => {
       if (event.chatId !== chatId) return
-      if (event.type === 'commands') setAnnounced(event.commands)
+      if (event.type === 'commands') {
+        seq++
+        setAnnounced(event.commands)
+      }
       // A new or reloaded session can announce before this chat is linked to it.
       else if (event.type === 'done') load()
     })
@@ -1582,8 +1642,10 @@ function Composer({
     selectedCmd.current?.scrollIntoView({ block: 'nearest' })
   }, [cmdIndex, command?.query])
 
+  const commandOpen = command !== null
+
   useEffect(() => {
-    if (command || !mention || !hasFolder) {
+    if (commandOpen || !mention || !hasFolder) {
       setHits([])
       return
     }
@@ -1604,6 +1666,7 @@ function Composer({
         const seen = new Set(recentHits.map((item) => item.path))
         const merged = [...recentHits, ...found.filter((item) => !seen.has(item.path))].slice(0, 30)
         setHits(merged)
+        setHitsQuery(mention.query)
         setHitIndex(0)
       })()
     }, 60)
@@ -1611,7 +1674,7 @@ function Composer({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [chatId, hasFolder, mention, projectId])
+  }, [chatId, commandOpen, hasFolder, mention, projectId])
 
   function syncTrigger(text: string, caret: number): void {
     const nextCommand = commandAt(text, caret)
@@ -1663,12 +1726,27 @@ function Composer({
       return
     }
     setValue('')
-    const notice = await onSlash(def, args, { attachments, mentions })
-    if (def.kind === 'prompt' || def.kind === 'agent' || def.id === 'new' || def.id === 'delete') {
-      setAttachments([])
-      setMentions([])
+    try {
+      const notice = await onSlash(def, args, { attachments, mentions })
+      if (def.kind === 'prompt' || def.kind === 'agent' || def.id === 'new' || def.id === 'delete') {
+        setAttachments([])
+        setMentions([])
+      }
+      if (notice) setPasteError(notice)
+    } catch (error) {
+      const line = args ? `/${def.id} ${args}` : `/${def.id}`
+      setValue((current) => current || line)
+      setPasteError(errorText(error, `/${def.id} failed`))
     }
-    if (notice) setPasteError(notice)
+  }
+
+  /** Puts a failed send back, unless the user has started a new draft. */
+  function restore(sent: ComposerDraft): void {
+    if (drafts.current.has(chatId)) return
+    drafts.current.set(chatId, sent)
+    setValue(sent.value)
+    setAttachments(sent.attachments)
+    setMentions(sent.mentions)
   }
 
   function pickHit(hit: FileHit): void {
@@ -1695,16 +1773,20 @@ function Composer({
   }
 
   function recall(nextIndex: number): void {
-    if (history.length === 0) return
-    if (historyIndex === null) draftRef.current = value
+    if (historyIndex === null) {
+      if (history.length === 0) return
+      historyRef.current = history
+      draftRef.current = value
+    }
+    const list = historyRef.current
     if (nextIndex < 0) nextIndex = 0
-    if (nextIndex >= history.length) {
+    if (nextIndex >= list.length) {
       setHistoryIndex(null)
       setValue(draftRef.current)
       return
     }
     setHistoryIndex(nextIndex)
-    setValue(history[nextIndex])
+    setValue(list[nextIndex])
   }
 
   async function addImages(incoming: Attachment[]): Promise<void> {
@@ -1727,8 +1809,11 @@ function Composer({
       return
     }
     const text = value.trim()
-    if ((!text && attachments.length === 0 && mentions.length === 0) || disabled) return
-    onSend(text, attachments, mentions)
+    if (!text && attachments.length === 0 && mentions.length === 0) return
+    const sent: ComposerDraft = { value, attachments, mentions }
+    void onSend(text, attachments, mentions).then((ok) => {
+      if (!ok) restore(sent)
+    })
     setValue('')
     setAttachments([])
     setMentions([])
@@ -1738,6 +1823,7 @@ function Composer({
     setPasteError(null)
     setHistoryIndex(null)
     draftRef.current = ''
+    drafts.current.delete(chatId)
   }
 
   /** Types a trigger character at the caret, as if the user had typed it. */
@@ -1806,6 +1892,7 @@ function Composer({
         )}
         {permission && (
           <PermissionBar
+            key={permission.requestId}
             request={permission}
             onDecision={(decision) => onPermission(permission.requestId, decision)}
           />
@@ -1945,7 +2032,6 @@ function Composer({
           ref={ref}
           rows={2}
           value={value}
-          disabled={disabled}
           placeholder={
             streaming
               ? 'Steer the running task…  /btw asks an aside'
@@ -2012,7 +2098,7 @@ function Composer({
               }
               if (event.key === 'Enter' || event.key === 'Tab') {
                 event.preventDefault()
-                pickHit(hits[hitIndex] ?? hits[0])
+                if (hitsQuery === mention.query) pickHit(hits[hitIndex] ?? hits[0])
                 return
               }
             }
@@ -2063,7 +2149,7 @@ function Composer({
             }
             if (event.altKey || event.metaKey || event.ctrlKey) return
             const el = ref.current
-            if (!el || history.length === 0) return
+            if (!el || (historyIndex === null && history.length === 0)) return
             if (event.key === 'ArrowUp' && (historyIndex !== null || caretOnFirstLine(el))) {
               event.preventDefault()
               recall(historyIndex === null ? history.length - 1 : historyIndex - 1)
@@ -2151,7 +2237,6 @@ function Composer({
                   : 'text-muted hover:bg-hover hover:text-ink'
               }`}
               aria-label={voiceStatus === 'listening' ? 'Stop listening' : 'Start listening'}
-              disabled={disabled && voiceStatus !== 'listening'}
               onClick={toggleListen}
             >
               <MicIcon listening={voiceStatus === 'listening'} />
@@ -2216,6 +2301,7 @@ function RewindModal({
   checkpoints,
   selectedId,
   busy,
+  error,
   onSelect,
   onClose,
   onRewind
@@ -2223,6 +2309,7 @@ function RewindModal({
   checkpoints: Checkpoint[]
   selectedId: string | null
   busy: boolean
+  error: string | null
   onSelect: (id: string) => void
   onClose: () => void
   onRewind: () => void
@@ -2287,6 +2374,7 @@ function RewindModal({
             })}
           </div>
         )}
+        {error && <div className="mt-3 text-[12.5px] text-danger">{error}</div>}
         <div className="mt-5 flex justify-end gap-2">
           <button
             className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink"

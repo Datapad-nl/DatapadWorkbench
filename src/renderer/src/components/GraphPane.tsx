@@ -336,6 +336,8 @@ export function GraphPane(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [note, setNote] = useState<{ title: string; body: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  const projectIdRef = useRef(activeProjectId)
+  projectIdRef.current = activeProjectId
   const project = projects.find((item) => item.id === activeProjectId) ?? null
   const otherPanes = showGit || showBrowser || showActivity
 
@@ -355,11 +357,18 @@ export function GraphPane(): React.JSX.Element {
       setSnapshot(empty)
       return
     }
-    void window.workbench.getKnowledgeSnapshot(activeProjectId).then(setSnapshot)
-    return window.workbench.onKnowledgeSnapshot((next) => {
+    let cancelled = false
+    void window.workbench.getKnowledgeSnapshot(activeProjectId).then((next) => {
+      if (!cancelled) setSnapshot(next)
+    })
+    const unsubscribe = window.workbench.onKnowledgeSnapshot((next) => {
       if (next.projectId !== activeProjectId) return
       setSnapshot(next)
     })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
   }, [activeProjectId])
 
   useEffect(() => {
@@ -386,8 +395,12 @@ export function GraphPane(): React.JSX.Element {
   async function rebuild(): Promise<void> {
     if (!activeProjectId || busy) return
     setBusy(true)
-    setSnapshot(await window.workbench.rebuildKnowledge(activeProjectId))
-    setBusy(false)
+    try {
+      const next = await window.workbench.rebuildKnowledge(activeProjectId)
+      if (next.projectId === projectIdRef.current) setSnapshot(next)
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (

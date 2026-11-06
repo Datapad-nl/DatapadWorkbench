@@ -32,7 +32,8 @@ type PendingAsk = {
 
 const sessionModes = new Map<string, PermissionMode>()
 const sessionChats = new Map<string, string>()
-const asideSessions = new Set<string>()
+/** Sessions whose turn the user stopped. Tools they ask for afterwards are refused. */
+const stoppedSessions = new Set<string>()
 const pending = new Map<string, PendingAsk>()
 const promptListeners = new Set<(request: PermissionRequest) => void>()
 const settleListeners = new Set<(request: PermissionRequest) => void>()
@@ -51,19 +52,34 @@ export function setSessionMode(sessionId: string, mode: PermissionMode): void {
 }
 
 export function modeForSession(sessionId: string): PermissionMode {
-  return sessionModes.get(sessionId) ?? 'accept'
+  // A session we cannot place asks, so an unknown request never runs on its own.
+  return sessionModes.get(sessionId) ?? 'ask'
+}
+
+/** Forget a deleted chat's sessions, so they stop counting for fallbackSessionId. */
+export function forgetChatSessions(chatId: string): void {
+  for (const [sessionId, owner] of [...sessionChats]) {
+    if (owner !== chatId) continue
+    sessionChats.delete(sessionId)
+    sessionModes.delete(sessionId)
+    stoppedSessions.delete(sessionId)
+  }
+}
+
+export function markSessionStopped(sessionId: string): void {
+  if (sessionId) stoppedSessions.add(sessionId)
+}
+
+export function clearSessionStopped(sessionId: string): void {
+  stoppedSessions.delete(sessionId)
+}
+
+export function isSessionStopped(sessionId: string): boolean {
+  return Boolean(sessionId) && stoppedSessions.has(sessionId)
 }
 
 export function chatIdForSession(sessionId: string): string | null {
   return sessionChats.get(sessionId) ?? null
-}
-
-export function markAsideSession(sessionId: string): void {
-  asideSessions.add(sessionId)
-}
-
-export function unmarkAsideSession(sessionId: string): void {
-  asideSessions.delete(sessionId)
 }
 
 export function fallbackSessionId(): string {
@@ -149,13 +165,18 @@ export function isPlanGateTool(params: PermissionParams): boolean {
 export function resolveChatPlanApproval(chatId: string, decision: 'allow' | 'deny'): boolean {
   let found = false
   for (const item of [...pending.values()]) {
-    const blob = `${item.request.title} ${item.request.toolKind ?? ''}`.toLowerCase()
     if (item.request.chatId !== chatId) continue
-    if (!/exit_plan_mode|enter_plan_mode|exit plan|plan: exit/.test(blob)) continue
+    if (!isPlanGateText(`${item.request.title} ${item.request.toolKind ?? ''}`)) continue
     item.resolve(outcomeFor(item.options, decision))
     found = true
   }
   return found
+}
+
+/** "Exit plan mode", "exit_plan_mode", "Plan: enter", "enter-plan" and the like. */
+export function isPlanGateText(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/[_-]+/g, ' ')
+  return /\b(exit|enter) plan\b|\bplan:? (exit|enter)\b/.test(normalized)
 }
 
 export function isMutatingTool(kind?: string, title?: string, name?: string): boolean {
@@ -209,12 +230,6 @@ function requestDetail(params: PermissionParams): string | null {
 }
 
 export function decidePermission(mode: PermissionMode, params: PermissionParams): 'allow' | 'deny' | 'ask' {
-  const sessionId = params.sessionId || fallbackSessionId()
-  if (sessionId && asideSessions.has(sessionId)) {
-    const tool = params.toolCall
-    if (isPlanGateTool(params) || isMutatingTool(tool?.kind, tool?.title, tool?.name)) return 'deny'
-    return 'allow'
-  }
   if (isExitPlanTool(params)) return 'allow'
   if (isEnterPlanTool(params)) return mode === 'plan' ? 'allow' : 'ask'
   if (mode === 'accept') return 'allow'
@@ -229,7 +244,8 @@ export function askPermission(
   params: PermissionParams
 ): Promise<PermissionOutcome> {
   const chatId = chatIdForSession(sessionId)
-  if (!chatId) return Promise.resolve(outcomeFor(params.options ?? [], 'allow'))
+  // Nobody can be asked, so the tool does not run.
+  if (!chatId) return Promise.resolve(outcomeFor(params.options ?? [], 'deny'))
 
   const request: PermissionRequest = {
     requestId,
@@ -271,6 +287,11 @@ export function cancelChatPermissions(chatId: string): void {
   for (const item of [...pending.values()]) {
     if (item.request.chatId === chatId) item.resolve({ outcome: { outcome: 'cancelled' } })
   }
+}
+
+/** The cards still waiting for an answer, so a reloaded window can show them again. */
+export function pendingPermissionRequests(): PermissionRequest[] {
+  return [...pending.values()].map((item) => item.request)
 }
 
 export function cancelAllPermissions(): void {

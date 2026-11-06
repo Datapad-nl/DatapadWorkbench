@@ -102,6 +102,7 @@ async function toDataUrl(file: string): Promise<string | null> {
 }
 
 const cache = new Map<string, Promise<string | null>>()
+const RETRY_MS = 60_000
 
 /** The project's icon as a small data URL, or null when the folder has none. */
 export function projectIcon(root: string): Promise<string | null> {
@@ -111,6 +112,10 @@ export function projectIcon(root: string): Promise<string | null> {
       .then((file) => (file ? toDataUrl(file) : null))
       .catch(() => null)
     cache.set(root, pending)
+    // No icon, or a failed read: look again later, so an icon added since shows up.
+    void pending.then((icon) => {
+      if (icon === null) setTimeout(() => cache.delete(root), RETRY_MS)
+    })
   }
   return pending
 }

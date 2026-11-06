@@ -17,6 +17,11 @@ export function grokBinary(): string {
   return 'grok'
 }
 
+/** What the last probe found, however old. Null until one has finished. */
+export function peekGrokCliInfo(): GrokCliInfo | null {
+  return cached
+}
+
 export async function getGrokCliInfo(): Promise<GrokCliInfo> {
   if (cached && Date.now() - cachedAt < TTL_MS) return cached
   if (inflight) return inflight

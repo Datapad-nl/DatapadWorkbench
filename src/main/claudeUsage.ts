@@ -3,9 +3,11 @@ import type { ClaudeUsage } from '../shared/types'
 import { promptIsolated } from './acp'
 
 const TTL_MS = 60_000
+const RETRY_MS = 30_000
 
 let cached: { at: number; usage: ClaudeUsage } | null = null
 let inflight: Promise<ClaudeUsage> | null = null
+let failed: { at: number; error: unknown } | null = null
 
 /**
  * Plan limits from Claude Code's local `/usage` command. It makes no model
@@ -24,6 +26,11 @@ export function parseClaudeUsage(markdown: string): ClaudeUsage {
 export async function fetchClaudeUsage(): Promise<ClaudeUsage> {
   if (cached && Date.now() - cached.at < TTL_MS) return cached.usage
   if (inflight) return inflight
+  // After a failure, wait before starting another Claude process. Until then, the last good value stands in.
+  if (failed && Date.now() - failed.at < RETRY_MS) {
+    if (cached) return cached.usage
+    throw failed.error
+  }
   inflight = promptIsolated(homedir(), '/usage', [], undefined, undefined, {
     agent: 'claude',
     timeoutMs: 30_000,
@@ -33,7 +40,13 @@ export async function fetchClaudeUsage(): Promise<ClaudeUsage> {
       const usage = parseClaudeUsage(markdown)
       if (usage.limits.length === 0) throw new Error('Claude Code did not report plan limits.')
       cached = { at: Date.now(), usage }
+      failed = null
       return usage
+    })
+    .catch((error: unknown) => {
+      failed = { at: Date.now(), error }
+      if (cached) return cached.usage
+      throw error
     })
     .finally(() => {
       inflight = null

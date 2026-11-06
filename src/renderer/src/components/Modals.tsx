@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   CLAUDE_MODELS,
   type ClaudeUsage,
@@ -19,16 +19,30 @@ import {
   VOICE_LANGUAGES
 } from '../../../shared/types'
 import { useVoice } from '../voice/VoiceProvider'
-import { listMicInputs, listVoices, primeTtsOutput, speakText, type MicInput } from '../voice/engine'
+import {
+  isSpeaking,
+  listMicInputs,
+  listVoices,
+  primeTtsOutput,
+  speakAside,
+  speakText,
+  type MicInput
+} from '../voice/engine'
 import { useWorkspace } from '../workspace'
 import { type McpServers, parseMcpServers } from '../../../shared/mcp'
 import { ThemeEditor } from './ThemeEditor'
+
+function errorText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : fallback
+  return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
+}
 
 export function NewProjectModal(): React.JSX.Element | null {
   const { showNewProject, setShowNewProject, createProject, pickFolder } = useWorkspace()
   const [name, setName] = useState('')
   const [path, setPath] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   if (!showNewProject) return null
 
@@ -43,12 +57,15 @@ export function NewProjectModal(): React.JSX.Element | null {
   }
 
   async function submit(): Promise<void> {
-    if (busy) return
+    if (busy || (!name.trim() && !path)) return
     setBusy(true)
+    setError(null)
     try {
       await createProject(name, path)
       setName('')
       setPath(null)
+    } catch (caught) {
+      setError(errorText(caught, 'Could not create the project'))
     } finally {
       setBusy(false)
     }
@@ -85,10 +102,16 @@ export function NewProjectModal(): React.JSX.Element | null {
             Browse
           </button>
         </div>
+        {error && <p className="mt-2 text-[11px] leading-4 text-red-400">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
           <button
             className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink"
-            onClick={() => setShowNewProject(false)}
+            onClick={() => {
+              setShowNewProject(false)
+              setName('')
+              setPath(null)
+              setError(null)
+            }}
           >
             Cancel
           </button>
@@ -322,8 +345,8 @@ const VOICE_TEST: Partial<Record<VoiceLanguage, string>> = {
 }
 
 function voiceModelHint(voiceModel: VoiceModelStatus): string {
-  if (voiceModel.downloading) return `Downloading speech model… ${voiceModel.file ?? ''}`
-  if (voiceModel.ready) return 'Local speech model ready'
+  if (voiceModel.state === 'downloading') return `Downloading speech model… ${voiceModel.file ?? ''}`
+  if (voiceModel.state === 'ready') return 'Local speech model ready'
   if (voiceModel.error) return voiceModel.error
   return 'Will download local Whisper + TTS (~500MB) once, then stay offline'
 }
@@ -354,6 +377,51 @@ function Toggle({
   )
 }
 
+/** Saves the speed once the slider rests, so a drag is not a save per step. */
+function RateSlider({ value, onSave }: { value: number; onSave: (rate: number) => void }): React.JSX.Element {
+  const [draft, setDraft] = useState(value)
+  const pending = useRef<number | null>(null)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const saveRef = useRef(onSave)
+  saveRef.current = onSave
+
+  // A value saved elsewhere shows unless a drag here is still waiting to save.
+  useEffect(() => {
+    if (pending.current === null) setDraft(value)
+  }, [value])
+
+  // Closing settings mid-drag still saves the last position.
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current)
+      if (pending.current !== null) saveRef.current(pending.current)
+    },
+    []
+  )
+
+  return (
+    <input
+      type="range"
+      min={0.7}
+      max={2}
+      step={0.05}
+      value={draft}
+      className="mt-1 w-full"
+      onChange={(event) => {
+        const next = Number(event.target.value)
+        setDraft(next)
+        pending.current = next
+        if (timer.current) clearTimeout(timer.current)
+        timer.current = setTimeout(() => {
+          timer.current = null
+          pending.current = null
+          saveRef.current(next)
+        }, 250)
+      }}
+    />
+  )
+}
+
 function updateText(state: UpdateState): string {
   switch (state.status) {
     case 'unsupported':
@@ -375,18 +443,31 @@ function updateText(state: UpdateState): string {
 
 function UpdateSection(): React.JSX.Element {
   const [state, setState] = useState<UpdateState>({ status: 'idle' })
+  // Main pushes every change. A reply lands only if no push came after its request, so it cannot undo a newer state.
+  const pushes = useRef(0)
 
   useEffect(() => {
     let live = true
+    const seen = pushes.current
     void window.workbench.getUpdateState().then((next) => {
-      if (live) setState(next)
+      if (live && pushes.current === seen) setState(next)
     })
-    const off = window.workbench.onUpdateState(setState)
+    const off = window.workbench.onUpdateState((next) => {
+      pushes.current += 1
+      setState(next)
+    })
     return () => {
       live = false
       off()
     }
   }, [])
+
+  function check(): void {
+    const seen = pushes.current
+    void window.workbench.checkForUpdates().then((next) => {
+      if (pushes.current === seen) setState(next)
+    })
+  }
 
   const busy = state.status === 'checking' || state.status === 'downloading'
   return (
@@ -416,7 +497,7 @@ function UpdateSection(): React.JSX.Element {
           data-testid="settings-update-check"
           disabled={busy}
           className="mt-3 rounded-lg border border-line bg-raised px-3 py-2 text-[12px] font-medium text-ink hover:bg-surface active:translate-y-px disabled:opacity-50"
-          onClick={() => void window.workbench.checkForUpdates().then(setState)}
+          onClick={check}
         >
           {busy ? 'Checking…' : 'Check for updates'}
         </button>
@@ -430,7 +511,10 @@ function AgentStatus({ settings }: { settings: PublicSettings }): React.JSX.Elem
   let ok: boolean
   let text: string
   let detail: string | null = null
-  if (settings.defaultAgent === 'claude') {
+  if (settings.cliChecking) {
+    ok = true
+    text = 'Checking the CLI…'
+  } else if (settings.defaultAgent === 'claude') {
     const { signedIn, subscription, email } = settings.claude
     ok = signedIn
     text = signedIn
@@ -477,16 +561,24 @@ export function SettingsModal(): React.JSX.Element | null {
   const [claudeModel, setClaudeModel] = useState(settings?.claudeModel ?? '')
   const [claudeOptions, setClaudeOptions] = useState<ClaudeOptions | null>(null)
   const [saved, setSaved] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
   const voices = listVoices()
   const voice = settings?.voice ?? DEFAULT_VOICE
+
+  useEffect(() => {
+    if (!showSettings) return
+    setTab(showSettings === 'mcp' ? 'mcp' : 'general')
+    setSaved(false)
+    setSaveError(null)
+  }, [showSettings])
 
   // This dialog stays mounted from the first frame, while settings are still
   // null. Seed the select from the saved model each time it opens, otherwise
   // a restart shows the grok-4.6 fallback even after Save wrote grok-4.7.
   useEffect(() => {
     if (!showSettings) return
-    if (showSettings === 'mcp') setTab('mcp')
     setModel(settings?.model || DEFAULT_MODEL)
     setEffort(settings?.effort ?? '')
     setClaudeModel(settings?.claudeModel ?? '')
@@ -512,14 +604,29 @@ export function SettingsModal(): React.JSX.Element | null {
     claudeOptions?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label }))
   const efforts: readonly ReasoningEffort[] = onClaude ? (claudeOptions?.efforts ?? REASONING_EFFORTS) : GROK_REASONING_EFFORTS
 
+  // A toggle saves at once. A failed save shows below, like the Save button's own error.
+  function save(patch: Parameters<typeof saveSettings>[0]): void {
+    setSaveError(null)
+    void saveSettings(patch).catch((caught: unknown) => setSaveError(errorText(caught, 'Could not save settings')))
+  }
+
   async function submit(): Promise<void> {
-    await saveSettings(
-      onClaude
-        ? { claudeModel, effort: effort || null }
-        : { apiKey: apiKey.trim() ? apiKey.trim() : undefined, model, effort: effort || null }
-    )
-    setApiKey('')
-    setSaved(true)
+    if (busy) return
+    setBusy(true)
+    setSaveError(null)
+    try {
+      await saveSettings(
+        onClaude
+          ? { claudeModel, effort: effort || null }
+          : { apiKey: apiKey.trim() ? apiKey.trim() : undefined, model, effort: effort || null }
+      )
+      setApiKey('')
+      setSaved(true)
+    } catch (caught) {
+      setSaveError(errorText(caught, 'Could not save settings'))
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
@@ -586,7 +693,7 @@ export function SettingsModal(): React.JSX.Element | null {
                       className={`rounded px-2.5 py-1 text-[11px] ${
                         settings.defaultAgent === value ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
                       }`}
-                      onClick={() => void saveSettings({ defaultAgent: normalizeChatAgent(value) })}
+                      onClick={() => save({ defaultAgent: normalizeChatAgent(value) })}
                     >
                       {label}
                     </button>
@@ -687,7 +794,7 @@ export function SettingsModal(): React.JSX.Element | null {
                   on={voice.enabled}
                   onClick={() => {
                     const next = !voice.enabled
-                    void saveSettings({ voice: { enabled: next } })
+                    save({ voice: { enabled: next } })
                     if (next) {
                       void window.workbench.ensureMic()
                       void window.workbench.ensureVoiceModel()
@@ -711,7 +818,7 @@ export function SettingsModal(): React.JSX.Element | null {
                       on={voice.conversation}
                       onClick={() => {
                         const next = !voice.conversation
-                        void saveSettings({
+                        save({
                           voice: next
                             ? { conversation: true, speakReplies: true, autoSend: true }
                             : { conversation: false }
@@ -724,7 +831,7 @@ export function SettingsModal(): React.JSX.Element | null {
                     <Toggle
                       label="Speak replies"
                       on={voice.speakReplies}
-                      onClick={() => void saveSettings({ voice: { speakReplies: !voice.speakReplies } })}
+                      onClick={() => save({ voice: { speakReplies: !voice.speakReplies } })}
                     />
                   </label>
                   <label className="flex items-center justify-between gap-3 text-[12px] text-ink">
@@ -732,7 +839,7 @@ export function SettingsModal(): React.JSX.Element | null {
                     <Toggle
                       label="Send after I stop talking"
                       on={voice.autoSend}
-                      onClick={() => void saveSettings({ voice: { autoSend: !voice.autoSend } })}
+                      onClick={() => save({ voice: { autoSend: !voice.autoSend } })}
                     />
                   </label>
                   <label className="flex items-center justify-between gap-3 text-[12px] text-ink">
@@ -740,19 +847,19 @@ export function SettingsModal(): React.JSX.Element | null {
                     <Toggle
                       label="Keep listening after replies"
                       on={voice.handsFree}
-                      onClick={() => void saveSettings({ voice: { handsFree: !voice.handsFree } })}
+                      onClick={() => save({ voice: { handsFree: !voice.handsFree } })}
                     />
                   </label>
                   <MicPicker
                     value={voice.micDeviceId}
-                    onChange={(deviceId) => void saveSettings({ voice: { micDeviceId: deviceId } })}
+                    onChange={(deviceId) => save({ voice: { micDeviceId: deviceId } })}
                   />
                   <label className="block text-[12px] text-muted">
                     Voice
                     <select
                       className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-[12px] text-ink outline-none"
                       value={voice.voiceURI}
-                      onChange={(event) => void saveSettings({ voice: { voiceURI: event.target.value } })}
+                      onChange={(event) => save({ voice: { voiceURI: event.target.value } })}
                     >
                       {voices.map((item) => (
                         <option key={item.voiceURI} value={item.voiceURI}>
@@ -766,7 +873,7 @@ export function SettingsModal(): React.JSX.Element | null {
                     <select
                       className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-[12px] text-ink outline-none"
                       value={voice.language}
-                      onChange={(event) => void saveSettings({ voice: { language: event.target.value } })}
+                      onChange={(event) => save({ voice: { language: event.target.value } })}
                     >
                       <option value="auto">Auto-detect</option>
                       {SPEECH_LANGUAGES.map((item) => (
@@ -778,17 +885,7 @@ export function SettingsModal(): React.JSX.Element | null {
                   </label>
                   <label className="block text-[12px] text-muted">
                     Speed
-                    <input
-                      type="range"
-                      min={0.7}
-                      max={2}
-                      step={0.05}
-                      value={voice.rate}
-                      className="mt-1 w-full"
-                      onChange={(event) =>
-                        void saveSettings({ voice: { rate: Number(event.target.value) } })
-                      }
-                    />
+                    <RateSlider value={voice.rate} onSave={(rate) => save({ voice: { rate } })} />
                   </label>
                   {testError && (
                     <p className="text-[11px] leading-4 text-red-400">{testError}</p>
@@ -803,12 +900,13 @@ export function SettingsModal(): React.JSX.Element | null {
                       onClick={() => {
                         setTestError(null)
                         primeTtsOutput()
-                        void speakText(
-                          VOICE_TEST[voice.language as VoiceLanguage] ?? VOICE_TEST.en ?? '',
-                          voice,
-                          // The same line every time, so skip the check that drops lines already spoken.
-                          { repeat: true }
-                        ).catch((err) => {
+                        const line = VOICE_TEST[voice.language as VoiceLanguage] ?? VOICE_TEST.en ?? ''
+                        // A reply being read pauses for the test line and then goes on, instead of being cut off.
+                        const run = isSpeaking()
+                          ? speakAside(line, voice)
+                          : // The same line every time, so skip the check that drops lines already spoken.
+                            speakText(line, voice, { repeat: true })
+                        void run.catch((err) => {
                           setTestError(err instanceof Error ? err.message : 'Could not play a test clip')
                         })
                       }}
@@ -837,6 +935,7 @@ export function SettingsModal(): React.JSX.Element | null {
                 Buy me a coffee
               </button>
             </div>
+            {saveError && <p className="mt-2 text-[11px] leading-4 text-red-400">{saveError}</p>}
             <div className="mt-5 flex justify-end gap-2">
               <button
                 className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink"
@@ -845,7 +944,8 @@ export function SettingsModal(): React.JSX.Element | null {
                 Close
               </button>
               <button
-                className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
+                className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-40"
+                disabled={busy}
                 onClick={() => void submit()}
               >
                 {saved ? 'Saved' : 'Save'}

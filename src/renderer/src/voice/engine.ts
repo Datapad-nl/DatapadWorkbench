@@ -7,8 +7,6 @@ const SAMPLE_RATE = 16000
 const SILENCE_MS = 1400
 const SPEECH_RMS = 0.0008
 const MAX_MS = 60_000
-const PARTIAL_MS = 1600
-const PARTIAL_MAX_SEC = 6
 const ASR_MAX_SEC = 8
 
 export type TtsVoice = { voiceURI: string; name: string }
@@ -81,7 +79,7 @@ export async function loadTts(): Promise<void> {
 
 async function getTts(): Promise<void> {
   const ready = await window.workbench.ensureVoiceModel()
-  if (!ready.ready) throw new Error(ready.error || 'Speech model is not ready')
+  if (ready.state !== 'ready') throw new Error(ready.error || 'Speech model is not ready')
   await loadSupertonic()
 }
 
@@ -406,6 +404,9 @@ let drainPromise: Promise<void> | null = null
 export function stopSpeaking(): void {
   speakGen += 1
   speakQueue = []
+  drainPromise = null
+  wakeReplyWaiters()
+  cancelTtsJobs(false)
   stopPlayback()
   if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel()
 }
@@ -423,6 +424,10 @@ let asideContext: AudioContext | null = null
 let asideGain: GainNode | null = null
 let asideGen = 0
 let asideJob: Promise<void> | null = null
+/** The line playing, and the newest line waiting behind it. */
+let asideSpoken = ''
+let asideQueued = ''
+let asideTicket = 0
 let replyHeld = false
 let replyHoldWait: Array<() => void> = []
 const asideSources = new Set<AudioBufferSourceNode>()
@@ -438,14 +443,28 @@ type TtsOut =
  * worker cannot run.
  */
 let ttsWorker: Worker | null = null
-let ttsWorkerBroken = false
+let ttsWorkerBrokenUntil = 0
 let ttsWorkerReady: Promise<void> | null = null
 let ttsReadyWait: { resolve: () => void; reject: (error: Error) => void } | null = null
 let ttsSeq = 0
-const ttsPending = new Map<number, { resolve: (audio: Pcm) => void; reject: (error: Error) => void }>()
+type TtsJob = {
+  message: { type: 'synth'; id: number; text: string; lang: VoiceLanguage; voice: string; speed: number; urgent: boolean }
+  resolve: (audio: Pcm) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout> | null
+}
+const ttsPending = new Map<number, TtsJob>()
+/** A job the worker has not answered in this long is stuck. */
+const TTS_JOB_MS = 30_000
 /** The model takes several hundred MB. After this long without speech the worker goes; loading again takes under a second. */
 const TTS_IDLE_MS = 3 * 60_000
 let ttsIdleTimer: ReturnType<typeof setTimeout> | null = null
+/** A worker that failed sits out this long. The next request after that tries a fresh one. */
+const WORKER_RETRY_MS = 60_000
+
+function ttsWorkerBroken(): boolean {
+  return Date.now() < ttsWorkerBrokenUntil
+}
 
 function scheduleTtsRelease(): void {
   if (ttsIdleTimer) clearTimeout(ttsIdleTimer)
@@ -532,13 +551,27 @@ function stopAsideSources(): void {
 }
 
 export function isAsideSpeaking(): boolean {
-  return asideJob !== null
+  return asideJob !== null || asideQueued !== ''
 }
 
 export function stopAside(): void {
   asideGen += 1
+  asideQueued = ''
+  cancelTtsJobs(true)
   stopAsideSources()
   void releaseReply()
+}
+
+/** Closes both audio contexts once voice is off. The next speech opens new ones. */
+export function releaseAudio(): void {
+  stopPlayback()
+  stopAsideSources()
+  void ttsContext?.close().catch(() => undefined)
+  void asideContext?.close().catch(() => undefined)
+  ttsContext = null
+  ttsGain = null
+  asideContext = null
+  asideGain = null
 }
 
 function asideError(error: unknown): Error {
@@ -548,13 +581,56 @@ function asideError(error: unknown): Error {
 function rejectTtsJobs(error: Error): void {
   ttsReadyWait?.reject(error)
   ttsReadyWait = null
-  for (const pending of ttsPending.values()) pending.reject(error)
-  ttsPending.clear()
+  for (const id of [...ttsPending.keys()]) takeTtsJob(id)?.reject(error)
+}
+
+/** Removes a job so it settles once. */
+function takeTtsJob(id: number): TtsJob | undefined {
+  const job = ttsPending.get(id)
+  if (!job) return undefined
+  ttsPending.delete(id)
+  if (job.timer) clearTimeout(job.timer)
+  return job
+}
+
+function postTtsJob(worker: Worker, job: TtsJob): void {
+  if (job.timer) clearTimeout(job.timer)
+  job.timer = setTimeout(() => timeOutTtsJob(job.message.id), TTS_JOB_MS)
+  worker.postMessage(job.message)
+}
+
+/** Only the stuck job fails. The worker is replaced and the jobs behind it go to the new one. */
+function timeOutTtsJob(id: number): void {
+  takeTtsJob(id)?.reject(new Error('Speech timed out'))
+  ttsWorker?.terminate()
+  ttsWorker = null
+  ttsWorkerReady = null
+  // The others wait for the new worker. Their clocks start again when they are sent to it.
+  for (const job of ttsPending.values()) {
+    if (job.timer) clearTimeout(job.timer)
+    job.timer = null
+  }
+  if (ttsPending.size === 0) return
+  loadTtsWorker().then(
+    () => {
+      const worker = ttsWorkerHandle()
+      for (const job of ttsPending.values()) postTtsJob(worker, job)
+    },
+    (error: unknown) => rejectTtsJobs(error instanceof Error ? error : new Error('Speech worker failed'))
+  )
+}
+
+/** Ends one lane's jobs with no audio, and tells the worker to skip the ones it has not started. */
+function cancelTtsJobs(urgent: boolean): void {
+  const ids = [...ttsPending.values()].filter((job) => job.message.urgent === urgent).map((job) => job.message.id)
+  if (ids.length === 0) return
+  for (const id of ids) takeTtsJob(id)?.resolve({ samples: new Float32Array(0), sampleRate: SAMPLE_RATE })
+  ttsWorker?.postMessage({ type: 'cancel', ids })
 }
 
 function failTtsWorker(error: Error): void {
-  ttsWorkerBroken = true
-  rejectTtsJobs(error)
+  ttsWorkerBrokenUntil = Date.now() + WORKER_RETRY_MS
+  resetTtsWorker(error)
 }
 
 /** Drop a stuck worker. The next request starts a fresh one. */
@@ -582,14 +658,10 @@ function ttsWorkerHandle(): Worker {
         failTtsWorker(new Error(message.message))
         return
       }
-      ttsPending.get(id)?.reject(new Error(message.message))
-      ttsPending.delete(id)
+      takeTtsJob(id)?.reject(new Error(message.message))
       return
     }
-    const pending = ttsPending.get(message.id)
-    if (!pending) return
-    ttsPending.delete(message.id)
-    pending.resolve({ samples: message.samples, sampleRate: message.sampleRate })
+    takeTtsJob(message.id)?.resolve({ samples: message.samples, sampleRate: message.sampleRate })
   }
   worker.onerror = (event) => failTtsWorker(new Error(event.message || 'Speech worker failed'))
   ttsWorker = worker
@@ -601,7 +673,7 @@ function loadTtsWorker(): Promise<void> {
   if (ttsWorkerReady) return ttsWorkerReady
   const ready = (async () => {
     const model = await window.workbench.ensureVoiceModel()
-    if (!model.ready) throw new Error(model.error || 'Speech model is not ready')
+    if (model.state !== 'ready') throw new Error(model.error || 'Speech model is not ready')
     let worker: Worker
     try {
       worker = ttsWorkerHandle()
@@ -622,37 +694,36 @@ function loadTtsWorker(): Promise<void> {
 }
 
 export function warmAsideVoice(): void {
-  if (ttsWorkerBroken) return
+  if (ttsWorkerBroken()) return
   loadTtsWorker().catch((error: unknown) => console.error('voice worker', error))
 }
 
 async function synthOnWorker(text: string, lang: VoiceLanguage, settings: VoiceSettings, urgent: boolean): Promise<Pcm> {
+  const gen = urgent ? asideGen : speakGen
   await loadTtsWorker()
+  // Speech that stopped while the model loaded is not sent; callers drop empty audio.
+  if (gen !== (urgent ? asideGen : speakGen)) return { samples: new Float32Array(0), sampleRate: SAMPLE_RATE }
   const worker = ttsWorkerHandle()
   const id = ++ttsSeq
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resetTtsWorker(new Error('Speech timed out')), 30_000)
-    ttsPending.set(id, {
-      resolve: (audio) => {
-        clearTimeout(timer)
-        resolve(audio)
-      },
-      reject: (error) => {
-        clearTimeout(timer)
-        reject(error)
-      }
-    })
-    worker.postMessage({ type: 'synth', id, text, lang, voice: voiceId(settings), speed: speechSpeed(settings), urgent })
+    const job: TtsJob = {
+      message: { type: 'synth', id, text, lang, voice: voiceId(settings), speed: speechSpeed(settings), urgent },
+      resolve,
+      reject,
+      timer: null
+    }
+    ttsPending.set(id, job)
+    postTtsJob(worker, job)
   })
 }
 
 /** Synthesize on the shared worker. Falls back to the UI thread only when the worker cannot run. */
 async function synth(text: string, lang: VoiceLanguage, settings: VoiceSettings, urgent: boolean): Promise<Pcm> {
-  if (!ttsWorkerBroken) {
+  if (!ttsWorkerBroken()) {
     try {
       return await synthOnWorker(text, lang, settings, urgent)
     } catch (error) {
-      if (!ttsWorkerBroken) throw error
+      if (!ttsWorkerBroken()) throw error
       console.error('voice worker', error)
     }
   }
@@ -702,22 +773,38 @@ async function playAside(samples: Float32Array, sampleRate: number, gen: number)
 
 export async function speakAside(text: string, settings: VoiceSettings): Promise<void> {
   const spoken = speakableText(text)
-  if (!spoken || asideJob) return
+  if (!spoken) return
+  if (asideJob) {
+    // One line waits behind the one playing. A newer line takes its place, and a repeat is dropped.
+    if (spoken === asideSpoken || spoken === asideQueued) return
+    asideQueued = spoken
+    const ticket = ++asideTicket
+    const waitGen = asideGen
+    while (asideJob) await asideJob.catch(() => undefined)
+    if (ticket !== asideTicket || waitGen !== asideGen) return
+    asideQueued = ''
+  }
   const gen = asideGen
-  const run = (async () => {
-    const audio = await synth(spoken, speechLanguage(spoken, settings), settings, true)
-    if (gen !== asideGen) return
-    await playAside(audio.samples, audio.sampleRate, gen)
+  asideSpoken = spoken
+  // The job clears itself before it settles, so a line waiting on it finds the slot free.
+  let run: Promise<void> | null = null
+  run = (async () => {
+    try {
+      const audio = await synth(spoken, speechLanguage(spoken, settings), settings, true)
+      if (gen !== asideGen) return
+      await playAside(audio.samples, audio.sampleRate, gen)
+    } catch (error) {
+      if (gen === asideGen) await releaseReply()
+      throw asideError(error)
+    } finally {
+      if (asideJob === run) {
+        asideJob = null
+        asideSpoken = ''
+      }
+    }
   })()
   asideJob = run
-  try {
-    await run
-  } catch (error) {
-    if (gen === asideGen) await releaseReply()
-    throw asideError(error)
-  } finally {
-    if (asideJob === run) asideJob = null
-  }
+  await run
 }
 
 export function listVoices(): TtsVoice[] {
@@ -728,7 +815,8 @@ function drainQueue(): Promise<void> {
   if (drainPromise) return drainPromise
   if (speakQueue.length === 0) return Promise.resolve()
   const gen = speakGen
-  drainPromise = (async () => {
+  let run: Promise<void> | null = null
+  run = (async () => {
     try {
       while (speakQueue.length) {
         if (gen !== speakGen) return
@@ -739,18 +827,19 @@ function drainQueue(): Promise<void> {
           if (gen !== speakGen) return
           if (samples.length === 0) continue
           await playPcm(samples, sampleRate, gen)
+          if (gen !== speakGen) return
           playedKeys.add(normKey(job.text))
         } catch (error) {
-          speakQueue.unshift(job)
+          if (gen === speakGen) speakQueue.unshift(job)
           throw error
         }
       }
     } finally {
-      drainPromise = null
-      if (speakQueue.length > 0) await drainQueue()
+      if (drainPromise === run) drainPromise = null
     }
   })()
-  return drainPromise
+  drainPromise = run
+  return run
 }
 
 const playedKeys = new Set<string>()
@@ -771,11 +860,7 @@ export async function speakText(
   const spoken = speakableText(text)
   // One language for the whole text, so a short sentence does not switch accents.
   const lang = opts?.lang ?? speechLanguage(spoken, settings)
-  if (!opts?.append) {
-    speakGen += 1
-    speakQueue = []
-    stopPlayback()
-  }
+  if (!opts?.append) stopSpeaking()
   if (spoken) {
     for (const chunk of splitSpeakChunks(spoken)) {
       const key = normKey(chunk)
@@ -803,10 +888,10 @@ async function browserVoices(): Promise<SpeechSynthesisVoice[]> {
   if (have.length > 0) return have
   await new Promise<void>((resolve) => {
     const done = (): void => {
-      speechSynthesis.onvoiceschanged = null
+      speechSynthesis.removeEventListener('voiceschanged', done)
       resolve()
     }
-    speechSynthesis.onvoiceschanged = done
+    speechSynthesis.addEventListener('voiceschanged', done)
     setTimeout(done, 400)
   })
   return speechSynthesis.getVoices()
@@ -830,7 +915,6 @@ async function speakBrowser(text: string, settings: VoiceSettings, gen: number):
     if (match) utter.voice = match
     utter.onend = () => resolve()
     utter.onerror = () => resolve()
-    speechSynthesis.cancel()
     speechSynthesis.speak(utter)
   })
 }
@@ -876,9 +960,22 @@ type AsrOut = { id: number; text: string } | { id: number; error: string }
 
 /** Recognition runs on its own worker so the UI keeps moving. The UI thread runs it only when the worker cannot. */
 let asrWorker: Worker | null = null
-let asrWorkerBroken = false
+let asrWorkerBrokenUntil = 0
 let asrSeq = 0
 const asrPending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
+const ASR_TIMEOUT_MS = 60_000
+
+function asrWorkerBroken(): boolean {
+  return Date.now() < asrWorkerBrokenUntil
+}
+
+/** Drop the worker and fail its jobs. The next clip starts a fresh one. */
+function resetAsrWorker(error: Error): void {
+  asrWorker?.terminate()
+  asrWorker = null
+  for (const pending of asrPending.values()) pending.reject(error)
+  asrPending.clear()
+}
 
 function asrWorkerHandle(): Worker {
   if (asrWorker) return asrWorker
@@ -886,7 +983,7 @@ function asrWorkerHandle(): Worker {
   try {
     worker = new Worker(new URL('./asr.worker.ts', import.meta.url), { type: 'module' })
   } catch (error) {
-    asrWorkerBroken = true
+    asrWorkerBrokenUntil = Date.now() + WORKER_RETRY_MS
     throw error
   }
   worker.onmessage = (event: MessageEvent<AsrOut>) => {
@@ -898,10 +995,8 @@ function asrWorkerHandle(): Worker {
     else pending.resolve(message.text)
   }
   worker.onerror = (event) => {
-    asrWorkerBroken = true
-    const error = new Error(event.message || 'Speech recognition worker failed')
-    for (const pending of asrPending.values()) pending.reject(error)
-    asrPending.clear()
+    asrWorkerBrokenUntil = Date.now() + WORKER_RETRY_MS
+    resetAsrWorker(new Error(event.message || 'Speech recognition worker failed'))
   }
   asrWorker = worker
   return worker
@@ -913,7 +1008,17 @@ function transcribeOnWorker(audio: Float32Array): Promise<string> {
   // A copy, so transferring it never detaches the caller's samples.
   const copy = audio.slice()
   return new Promise((resolve, reject) => {
-    asrPending.set(id, { resolve, reject })
+    const timer = setTimeout(() => resetAsrWorker(new Error('Speech recognition timed out')), ASR_TIMEOUT_MS)
+    asrPending.set(id, {
+      resolve: (text) => {
+        clearTimeout(timer)
+        resolve(text)
+      },
+      reject: (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    })
     worker.postMessage({ id, audio: copy }, [copy.buffer])
   })
 }
@@ -926,11 +1031,11 @@ export async function transcribePcm(
   const audio = resample(samples, sampleRate, SAMPLE_RATE)
   const max = SAMPLE_RATE * ASR_MAX_SEC
   const clipped = audio.length > max ? audio.subarray(audio.length - max) : audio
-  if (!asrWorkerBroken) {
+  if (!asrWorkerBroken()) {
     try {
       return cleanTranscript(await transcribeOnWorker(clipped), heardSpeech)
     } catch (error) {
-      if (!asrWorkerBroken) throw error
+      if (!asrWorkerBroken()) throw error
       console.error('speech recognition worker', error)
     }
   }
@@ -1091,75 +1196,15 @@ export async function openLiveMicStream(preferredId?: string): Promise<MediaStre
       continue
     }
     const score = await streamSignalScore(stream, 220)
-    if (score > 80) return stream
+    if (score > 80) {
+      fallback?.getTracks().forEach((track) => track.stop())
+      return stream
+    }
     if (!fallback) fallback = stream
     else stream.getTracks().forEach((track) => track.stop())
   }
   if (fallback) return fallback
   return openMicStream()
-}
-
-export type NativeSpeech = { stop: () => void }
-
-type RecInstance = {
-  continuous: boolean
-  interimResults: boolean
-  lang: string
-  onresult: ((event: {
-    resultIndex: number
-    results: ArrayLike<{ isFinal: boolean; 0?: { transcript?: string } }>
-  }) => void) | null
-  onerror: ((event: { error: string }) => void) | null
-  onend: (() => void) | null
-  start: () => void
-  stop: () => void
-}
-
-export function startNativeSpeech(handlers: {
-  onCaption: (text: string) => void
-  onFinal: (text: string) => void
-  onError: (message: string) => void
-  onEnd: () => void
-}): NativeSpeech {
-  const Ctor = (window as unknown as { SpeechRecognition?: new () => RecInstance }).SpeechRecognition
-    ?? (window as unknown as { webkitSpeechRecognition?: new () => RecInstance }).webkitSpeechRecognition
-  if (!Ctor) throw new Error('Native speech recognition is not available in this window')
-  const rec = new Ctor()
-  rec.continuous = true
-  rec.interimResults = true
-  rec.lang = 'en-US'
-  rec.onresult = (event) => {
-    let interim = ''
-    let finals = ''
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const piece = event.results[i]?.[0]?.transcript ?? ''
-      if (event.results[i]?.isFinal) finals += piece
-      else interim += piece
-    }
-    if (interim.trim()) handlers.onCaption(interim.trim())
-    if (finals.trim()) {
-      handlers.onCaption('')
-      handlers.onFinal(finals.trim())
-    }
-  }
-  rec.onerror = (event) => {
-    if (event.error === 'no-speech' || event.error === 'aborted') return
-    handlers.onError(event.error)
-  }
-  rec.onend = () => handlers.onEnd()
-  rec.start()
-  return {
-    stop: () => {
-      rec.onend = null
-      rec.onresult = null
-      rec.onerror = null
-      try {
-        rec.stop()
-      } catch {
-        /* already stopped */
-      }
-    }
-  }
 }
 
 export async function startRecorder(handlers: {
@@ -1169,13 +1214,15 @@ export async function startRecorder(handlers: {
   idleStop?: boolean
   onLevel: (rms: number, silentFor: number, heardSpeech: boolean) => void
   onBands?: (bands: number[]) => void
-  onPartial?: (clip: PcmClip) => void
   onAutoStop: (clip: PcmClip) => void
 }): Promise<Recorder> {
   const stream = handlers.stream ?? (await openLiveMicStream(handlers.deviceId))
   for (const track of stream.getAudioTracks()) track.enabled = true
   const track = stream.getAudioTracks()[0]
-  if (!track) throw new Error('No microphone track')
+  if (!track) {
+    stream.getTracks().forEach((item) => item.stop())
+    throw new Error('No microphone track')
+  }
   const chunks: Float32Array[] = []
   let sampleRate = track.getSettings().sampleRate ?? SAMPLE_RATE
   let heard = false
@@ -1183,33 +1230,11 @@ export async function startRecorder(handlers: {
   let last = performance.now()
   const started = last
   let stopping = false
-  let lastPartialAt = started
-  let captured = 0
-
-  function snapshot(): Float32Array {
-    const max = Math.floor(sampleRate * PARTIAL_MAX_SEC)
-    const total = captured
-    let skip = Math.max(0, total - max)
-    const out = new Float32Array(Math.min(total, max))
-    let offset = 0
-    for (const chunk of chunks) {
-      if (skip >= chunk.length) {
-        skip -= chunk.length
-        continue
-      }
-      const start = skip
-      skip = 0
-      out.set(chunk.subarray(start), offset)
-      offset += chunk.length - start
-    }
-    return out
-  }
 
   function onPcm(input: Float32Array, rate: number): void {
     if (stopping || input.length === 0) return
     sampleRate = rate
     chunks.push(new Float32Array(input))
-    captured += input.length
     let sum = 0
     let peak = 0
     for (let i = 0; i < input.length; i++) {
@@ -1241,10 +1266,6 @@ export async function startRecorder(handlers: {
     }
     handlers.onBands?.(bands)
     voiceMotion = { bands, level: voice }
-    if (heard && handlers.onPartial && now - lastPartialAt >= PARTIAL_MS && captured >= sampleRate * 0.7) {
-      lastPartialAt = now
-      handlers.onPartial({ samples: snapshot(), sampleRate, heardSpeech: true })
-    }
     if (handlers.idleStop === false) return
     if (now - started > MAX_MS || (heard && silentMs >= SILENCE_MS)) {
       void stop().then(handlers.onAutoStop)
@@ -1252,7 +1273,10 @@ export async function startRecorder(handlers: {
   }
 
   const processor = trackProcessor(track)
-  if (!processor) throw new Error('This Chromium build cannot read microphone PCM')
+  if (!processor) {
+    stream.getTracks().forEach((item) => item.stop())
+    throw new Error('This Chromium build cannot read microphone PCM')
+  }
   const reader = processor.readable.getReader()
   const pump = (async () => {
     try {

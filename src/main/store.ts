@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
+import { mkdir, readdir, rm } from 'fs/promises'
 import { join, normalize } from 'path'
 import { type McpServers, parseMcpServers } from '../shared/mcp'
 import { normalizeHexColor, pickProjectColor } from '../shared/projectColor'
@@ -22,9 +22,10 @@ import {
 } from '../shared/types'
 import { isUnsafeProjectPath, queueIndex } from './codegraph'
 import { id, now, titleFromPrompt } from './ids'
-import { getClaudeCliInfo } from './claudeCli'
+import { getClaudeCliInfo, peekClaudeCliInfo } from './claudeCli'
 import { listClaudeSessions, readClaudeHistory } from './claudeSessions'
-import { getGrokCliInfo } from './grokCli'
+import { getGrokCliInfo, grokBinary, peekGrokCliInfo } from './grokCli'
+import { readJsonFile, withLock, writeFileAtomic } from './storeIo'
 import {
   findGrokSessionDir,
   grokBuildSignedIn,
@@ -51,24 +52,14 @@ type StoreData = {
   projects: Project[]
 }
 
-const chatLocks = new Map<string, Promise<unknown>>()
+/** Chats deleted in this run. A late save from a stream that outlived its chat must not bring it back. */
+const deletedChats = new Set<string>()
 
-async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const previous = chatLocks.get(key) ?? Promise.resolve()
-  let release!: () => void
-  const gate = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  chatLocks.set(
-    key,
-    previous.then(() => gate)
-  )
-  await previous
-  try {
-    return await fn()
-  } finally {
-    release()
-  }
+/** Set when projects.json didn't parse and was moved aside. No projects are imported on top of it until restart. */
+let projectsRecovered = false
+
+function markProjectsRecovered(): void {
+  projectsRecovered = true
 }
 
 function dataDir(): string {
@@ -101,21 +92,16 @@ function chatPath(chatId: string): string {
 }
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as T
-  } catch {
-    return fallback
-  }
+  return readJsonFile(path, fallback)
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {
-  await mkdir(join(path, '..'), { recursive: true })
-  await writeFile(path, JSON.stringify(value, null, 2), 'utf8')
+  await writeFileAtomic(path, JSON.stringify(value, null, 2))
 }
 
 export async function ensureStore(): Promise<void> {
   await mkdir(chatsDir(), { recursive: true })
-  const existing = await readJson<StoreData | null>(projectsPath(), null)
+  const existing = await readJsonFile<StoreData | null>(projectsPath(), null, markProjectsRecovered)
   if (!existing) {
     await writeJson(projectsPath(), { projects: [] } satisfies StoreData)
   }
@@ -132,30 +118,30 @@ export async function ensureStore(): Promise<void> {
   await mkdir(join(dataDir(), 'themes'), { recursive: true })
 }
 
-function withProjectColors(projects: Project[]): { projects: Project[]; changed: boolean } {
-  let changed = false
+/** Fills in missing colors. They are deterministic, so they reach disk with the next locked save. */
+function withProjectColors(projects: Project[]): Project[] {
   const taken: string[] = []
-  const next = projects.map((project) => {
+  return projects.map((project) => {
     const existing = normalizeHexColor(project.color)
     if (existing) {
       taken.push(existing)
       if (existing === project.color) return project
-      changed = true
       return { ...project, color: existing }
     }
     const color = pickProjectColor(taken)
     taken.push(color)
-    changed = true
     return { ...project, color }
   })
-  return { projects: next, changed }
 }
 
 async function loadProjects(): Promise<Project[]> {
-  const data = await readJson<StoreData>(projectsPath(), { projects: [] })
-  const { projects, changed } = withProjectColors(data.projects)
-  if (changed) await saveProjects(projects)
-  return projects
+  const data = await readJsonFile<StoreData>(projectsPath(), { projects: [] }, markProjectsRecovered)
+  return withProjectColors(data.projects)
+}
+
+/** Every projects.json read-modify-write runs under this lock. */
+function withProjectsLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withLock(projectsPath(), fn)
 }
 
 async function saveProjects(projects: Project[]): Promise<void> {
@@ -173,16 +159,20 @@ async function saveDismissedPaths(paths: Set<string>): Promise<void> {
 
 async function dismissProjectPath(path: string | null | undefined): Promise<void> {
   if (!path?.trim()) return
-  const dismissed = await loadDismissedPaths()
-  dismissed.add(normalizeProjectPath(path))
-  await saveDismissedPaths(dismissed)
+  await withLock(dismissedPathsFile(), async () => {
+    const dismissed = await loadDismissedPaths()
+    dismissed.add(normalizeProjectPath(path))
+    await saveDismissedPaths(dismissed)
+  })
 }
 
 async function rememberProjectPath(path: string | null | undefined): Promise<void> {
   if (!path?.trim()) return
-  const dismissed = await loadDismissedPaths()
-  if (!dismissed.delete(normalizeProjectPath(path))) return
-  await saveDismissedPaths(dismissed)
+  await withLock(dismissedPathsFile(), async () => {
+    const dismissed = await loadDismissedPaths()
+    if (!dismissed.delete(normalizeProjectPath(path))) return
+    await saveDismissedPaths(dismissed)
+  })
 }
 
 async function loadSettingsFile(): Promise<SettingsFile> {
@@ -215,8 +205,10 @@ export async function getMcpServers(): Promise<McpServers> {
 /** Save the MCP editor text. Throws the parse error so the editor can show it. */
 export async function setMcpServers(text: string): Promise<McpServers> {
   const mcpServers = parseMcpServers(text)
-  const current = await loadSettingsFile()
-  await writeJson(settingsPath(), { ...current, mcpServers } satisfies SettingsFile)
+  await withLock(settingsPath(), async () => {
+    const current = await loadSettingsFile()
+    await writeJson(settingsPath(), { ...current, mcpServers } satisfies SettingsFile)
+  })
   return mcpServers
 }
 
@@ -226,17 +218,46 @@ export async function getThemeId(): Promise<string> {
 }
 
 export async function setThemeId(themeId: string): Promise<void> {
-  const current = await loadSettingsFile()
-  await writeJson(settingsPath(), {
-    ...current,
-    themeId: themeId || DEFAULT_THEME_ID,
-    voice: normalizeVoiceSettings(current.voice)
-  } satisfies SettingsFile)
+  await withLock(settingsPath(), async () => {
+    const current = await loadSettingsFile()
+    await writeJson(settingsPath(), {
+      ...current,
+      themeId: themeId || DEFAULT_THEME_ID,
+      voice: normalizeVoiceSettings(current.voice)
+    } satisfies SettingsFile)
+  })
 }
 
 function maskKey(key: string): string {
   if (key.length < 8) return '••••'
   return `${key.slice(0, 4)}…${key.slice(-4)}`
+}
+
+let cliChanged: () => void = () => undefined
+
+/** Called when a CLI probe lands with something the windows haven't seen. */
+export function onCliInfoChange(listener: () => void): void {
+  cliChanged = listener
+}
+
+/**
+ * What the CLIs said last, at once. Each probe can take seconds (`grok models`, `claude auth status`),
+ * so it runs behind the answer and its news reaches the windows through `onCliInfoChange`.
+ */
+function currentCliInfo(): Pick<PublicSettings, 'grokCli' | 'claude' | 'cliChecking'> {
+  const grokCli = peekGrokCliInfo()
+  const claude = peekClaudeCliInfo()
+  const shown = JSON.stringify([grokCli, claude])
+  void Promise.all([getGrokCliInfo(), getClaudeCliInfo()])
+    .then((fresh) => {
+      if (JSON.stringify(fresh) !== shown) cliChanged()
+    })
+    .catch(() => undefined)
+  return {
+    grokCli: grokCli ?? { path: grokBinary(), version: null, channel: 'unknown', models: [DEFAULT_MODEL] },
+    claude: claude ?? { signedIn: false, subscription: null, email: null },
+    cliChecking: !grokCli || !claude
+  }
 }
 
 export async function getPublicSettings(): Promise<PublicSettings> {
@@ -247,11 +268,12 @@ export async function getPublicSettings(): Promise<PublicSettings> {
   const model = file.model || DEFAULT_MODEL
   const effort = file.effort || null
   const voice = file.voice
-  const [grokCli, claude] = await Promise.all([getGrokCliInfo(), getClaudeCliInfo()])
+  const { grokCli, claude, cliChecking } = currentCliInfo()
   const agent = {
     defaultAgent: normalizeChatAgent(file.defaultAgent),
     claude,
-    claudeModel: file.claudeModel ?? ''
+    claudeModel: file.claudeModel ?? '',
+    cliChecking
   }
   if (signedIn) {
     return {
@@ -340,19 +362,21 @@ export async function updateSettings(input: {
   defaultAgent?: ChatAgent
   claudeModel?: string
 }): Promise<PublicSettings> {
-  const current = await loadSettingsFile()
-  await writeJson(settingsPath(), {
-    defaultAgent:
-      input.defaultAgent !== undefined ? normalizeChatAgent(input.defaultAgent) : current.defaultAgent,
-    claudeModel: input.claudeModel !== undefined ? input.claudeModel.trim() : current.claudeModel,
-    apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
-    model: input.model?.trim() || current.model || DEFAULT_MODEL,
-    effort:
-      input.effort !== undefined ? (normalizeReasoningEffort(input.effort) ?? '') : current.effort,
-    themeId: current.themeId || DEFAULT_THEME_ID,
-    voice: normalizeVoiceSettings({ ...current.voice, ...input.voice }),
-    mcpServers: current.mcpServers
-  } satisfies SettingsFile)
+  await withLock(settingsPath(), async () => {
+    const current = await loadSettingsFile()
+    await writeJson(settingsPath(), {
+      defaultAgent:
+        input.defaultAgent !== undefined ? normalizeChatAgent(input.defaultAgent) : current.defaultAgent,
+      claudeModel: input.claudeModel !== undefined ? input.claudeModel.trim() : current.claudeModel,
+      apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
+      model: input.model?.trim() || current.model || DEFAULT_MODEL,
+      effort:
+        input.effort !== undefined ? (normalizeReasoningEffort(input.effort) ?? '') : current.effort,
+      themeId: current.themeId || DEFAULT_THEME_ID,
+      voice: normalizeVoiceSettings({ ...current.voice, ...input.voice }),
+      mcpServers: current.mcpServers
+    } satisfies SettingsFile)
+  })
   return getPublicSettings()
 }
 
@@ -366,66 +390,71 @@ export async function createProject(name: string, path: string | null, color?: s
     throw new Error('Choose a project folder, not your home directory or a whole disk.')
   }
   await rememberProjectPath(path)
-  const projects = await loadProjects()
-  const timestamp = now()
-  // Adding a removed project's folder again brings it back with its chats.
-  const removed = path
-    ? projects.find(
-        (item) => item.removedAt && item.path && normalizeProjectPath(item.path) === normalizeProjectPath(path)
-      )
-    : undefined
-  if (removed) {
-    delete removed.removedAt
-    removed.updatedAt = timestamp
+  return withProjectsLock(async () => {
+    const projects = await loadProjects()
+    const timestamp = now()
+    // Adding a removed project's folder again brings it back with its chats.
+    const removed = path
+      ? projects.find(
+          (item) => item.removedAt && item.path && normalizeProjectPath(item.path) === normalizeProjectPath(path)
+        )
+      : undefined
+    if (removed) {
+      delete removed.removedAt
+      removed.updatedAt = timestamp
+      await saveProjects(projects)
+      queueIndex(removed.id, removed.path)
+      return removed
+    }
+    const project: Project = {
+      id: id(),
+      name: name.trim() || 'Untitled project',
+      path,
+      color: normalizeHexColor(color) ?? pickProjectColor(projects.map((item) => item.color)),
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }
+    projects.unshift(project)
     await saveProjects(projects)
-    queueIndex(removed.id, removed.path)
-    return removed
-  }
-  const project: Project = {
-    id: id(),
-    name: name.trim() || 'Untitled project',
-    path,
-    color: normalizeHexColor(color) ?? pickProjectColor(projects.map((item) => item.color)),
-    createdAt: timestamp,
-    updatedAt: timestamp
-  }
-  projects.unshift(project)
-  await saveProjects(projects)
-  queueIndex(project.id, project.path)
-  return project
+    queueIndex(project.id, project.path)
+    return project
+  })
 }
 
 export async function updateProject(input: UpdateProjectInput): Promise<Project> {
-  const projects = await loadProjects()
-  const index = projects.findIndex((project) => project.id === input.id)
-  if (index === -1) throw new Error('Project not found')
-  const current = projects[index]
-  const nextName = input.name !== undefined ? input.name.trim() || current.name : current.name
-  const nextPath = input.path !== undefined ? input.path : current.path
-  if (nextPath && isUnsafeProjectPath(nextPath)) {
-    throw new Error('Choose a project folder, not your home directory or a whole disk.')
-  }
-  const nextColor =
-    input.color !== undefined ? (normalizeHexColor(input.color) ?? current.color) : current.color
-  const renamed = nextName !== current.name
-  const moved = nextPath !== current.path
-  const next: Project = {
-    ...current,
-    name: nextName,
-    path: nextPath,
-    color: nextColor,
-    updatedAt: renamed || moved ? now() : current.updatedAt
-  }
-  projects[index] = next
-  if (moved) {
-    if (current.path) await dismissProjectPath(current.path)
-    if (next.path) await rememberProjectPath(next.path)
-  }
-  await saveProjects(projects)
-  if (next.path && next.path !== current.path) {
-    queueIndex(next.id, next.path)
-  }
-  return next
+  return withProjectsLock(async () => {
+    const projects = await loadProjects()
+    const index = projects.findIndex((project) => project.id === input.id)
+    if (index === -1) throw new Error('Project not found')
+    const current = projects[index]
+    const nextName = input.name !== undefined ? input.name.trim() || current.name : current.name
+    const nextPath = input.path !== undefined ? input.path : current.path
+    if (nextPath && isUnsafeProjectPath(nextPath)) {
+      throw new Error('Choose a project folder, not your home directory or a whole disk.')
+    }
+    const nextColor =
+      input.color !== undefined ? (normalizeHexColor(input.color) ?? current.color) : current.color
+    const renamed = nextName !== current.name
+    const moved = nextPath !== current.path
+    const next: Project = {
+      ...current,
+      name: nextName,
+      path: nextPath,
+      color: nextColor,
+      updatedAt: renamed || moved ? now() : current.updatedAt
+    }
+    projects[index] = next
+    // The dismissed-paths lock is only ever taken inside the projects lock, never the other way round.
+    if (moved) {
+      if (current.path) await dismissProjectPath(current.path)
+      if (next.path) await rememberProjectPath(next.path)
+    }
+    await saveProjects(projects)
+    if (next.path && next.path !== current.path) {
+      queueIndex(next.id, next.path)
+    }
+    return next
+  })
 }
 
 export async function purgeUnsafeProjects(): Promise<void> {
@@ -440,12 +469,14 @@ export async function purgeUnsafeProjects(): Promise<void> {
 
 /** Hides the project from the sidebar. Its chats stay on record for when its folder is added again. */
 export async function removeProject(projectId: string): Promise<void> {
-  const projects = await loadProjects()
-  const project = projects.find((item) => item.id === projectId)
-  if (!project) return
-  await dismissProjectPath(project.path)
-  project.removedAt = now()
-  await saveProjects(projects)
+  await withProjectsLock(async () => {
+    const projects = await loadProjects()
+    const project = projects.find((item) => item.id === projectId)
+    if (!project) return
+    await dismissProjectPath(project.path)
+    project.removedAt = now()
+    await saveProjects(projects)
+  })
 }
 
 async function readChat(chatId: string): Promise<Chat | null> {
@@ -509,7 +540,7 @@ export async function listChats(): Promise<ChatSummary[]> {
   const chats: ChatSummary[] = []
   for (const file of files) {
     if (!file.endsWith('.json')) continue
-    const chat = await readJson<Chat | null>(join(chatsDir(), file), null)
+    const chat = await readJson<Chat | null>(join(chatsDir(), file), null).catch(() => null)
     if (!chat) continue
     chats.push({
       id: chat.id,
@@ -541,7 +572,7 @@ export async function searchChats(query: string): Promise<string[]> {
   const ids: string[] = []
   for (const file of await readdir(chatsDir())) {
     if (!file.endsWith('.json')) continue
-    const stored = await readChat(file.slice(0, -'.json'.length))
+    const stored = await readChat(file.slice(0, -'.json'.length)).catch(() => null)
     if (!stored) continue
     let entry = searchText.get(stored.id)
     if (entry?.updatedAt !== stored.updatedAt) {
@@ -582,7 +613,9 @@ export async function createChat(
     updatedAt: timestamp,
     messages: input?.messages ?? []
   }
-  await writeJson(chatPath(chat.id), chat)
+  // An imported chat deleted here comes back from its session file with the same id.
+  deletedChats.delete(chatId)
+  await withLock(chatId, () => writeJson(chatPath(chat.id), chat))
   await touchProject(projectId)
   return chat
 }
@@ -604,7 +637,25 @@ async function retitleChat(chatId: string, title: string): Promise<void> {
   })
 }
 
-export async function syncGrokSessions(): Promise<void> {
+let grokSync: Promise<void> | null = null
+let claudeSync: Promise<void> | null = null
+
+/** Overlapping calls share one run, so two runs can't import the same new folder twice. */
+export function syncGrokSessions(): Promise<void> {
+  grokSync ??= importGrokSessions().finally(() => {
+    grokSync = null
+  })
+  return grokSync
+}
+
+export function syncClaudeSessions(): Promise<void> {
+  claudeSync ??= importClaudeSessions().finally(() => {
+    claudeSync = null
+  })
+  return claudeSync
+}
+
+async function importGrokSessions(): Promise<void> {
   const sessions = await listGrokSessions()
   if (sessions.length === 0) return
   const projects = await loadProjects()
@@ -627,7 +678,7 @@ export async function syncGrokSessions(): Promise<void> {
     if (isUnsafeProjectPath(cwd)) continue
     let project = projects.find((item) => item.path && normalizeProjectPath(item.path) === cwd)
     if (!project) {
-      if (dismissed.has(cwd)) continue
+      if (dismissed.has(cwd) || projectsRecovered) continue
       const name = session.cwd.split(/[/\\]/).filter(Boolean).at(-1) || 'Project'
       project = await createProject(name, session.cwd)
       projects.unshift(project)
@@ -646,7 +697,7 @@ export async function syncGrokSessions(): Promise<void> {
 }
 
 /** Claude Code sessions are imported into projects that already exist, never new ones. */
-export async function syncClaudeSessions(): Promise<void> {
+async function importClaudeSessions(): Promise<void> {
   const projects = (await loadProjects()).filter((project) => project.path)
   if (projects.length === 0) return
   const sessions = await listClaudeSessions(projects.map((project) => project.path as string))
@@ -668,44 +719,52 @@ export async function syncClaudeSessions(): Promise<void> {
 }
 
 export async function saveChat(chat: Chat): Promise<Chat> {
-  return withLock(chat.id, async () => {
+  const next = await withLock(chat.id, async () => {
+    if (deletedChats.has(chat.id)) throw new Error('Chat not found')
     const next = { ...chat, updatedAt: now() }
     await writeJson(chatPath(chat.id), next)
-    await touchProject(chat.projectId)
     return next
   })
+  await touchProject(next.projectId)
+  return next
 }
 
 export async function mutateChat(chatId: string, fn: (chat: Chat) => void): Promise<Chat> {
-  return withLock(chatId, async () => {
-    const chat = await readChat(chatId)
+  const next = await withLock(chatId, async () => {
+    const chat = deletedChats.has(chatId) ? null : await readChat(chatId)
     if (!chat) throw new Error('Chat not found')
     fn(chat)
     const next = { ...chat, updatedAt: now() }
     await writeJson(chatPath(chatId), next)
-    await touchProject(next.projectId)
     return next
   })
+  await touchProject(next.projectId)
+  return next
 }
 
 export async function deleteChat(chatId: string): Promise<void> {
+  deletedChats.add(chatId)
   await withLock(chatId, async () => {
     await rm(chatPath(chatId), { force: true })
   })
 }
 
+/** Changes only the title, so an imported chat keeps reading its history from its session file. */
 export async function renameChat(chatId: string, title: string): Promise<Chat> {
-  const chat = await getChat(chatId)
-  chat.title = title.trim() || chat.title
-  return saveChat(chat)
+  await mutateChat(chatId, (chat) => {
+    chat.title = title.trim() || chat.title
+  })
+  return getChat(chatId)
 }
 
 async function touchProject(projectId: string): Promise<void> {
-  const projects = await loadProjects()
-  const index = projects.findIndex((project) => project.id === projectId)
-  if (index === -1) return
-  projects[index] = { ...projects[index], updatedAt: now() }
-  await saveProjects(projects)
+  await withProjectsLock(async () => {
+    const projects = await loadProjects()
+    const index = projects.findIndex((project) => project.id === projectId)
+    if (index === -1) return
+    projects[index] = { ...projects[index], updatedAt: now() }
+    await saveProjects(projects)
+  })
 }
 
 export async function snapshot(): Promise<{ projects: Project[]; chats: ChatSummary[]; settings: PublicSettings }> {

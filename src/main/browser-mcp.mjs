@@ -343,21 +343,26 @@ async function callApi(method, path, body) {
   return text ? JSON.parse(text) : {}
 }
 
-async function delegate(args) {
+// Tool calls in flight, and those the client cancelled (`notifications/cancelled`).
+const running = new Set()
+const cancelled = new Set()
+
+async function delegate(args, requestId) {
   const started = await callApi('POST', '/chats/delegate', { ...args, from: CHAT_ID })
-  while (true) {
+  while (!cancelled.has(requestId)) {
     const result = await callApi('POST', '/chats/wait', { chatId: started.chatId, ms: 60_000 })
     if (result.done) return { ...result, chatId: started.chatId, title: started.title }
   }
+  throw new Error('Cancelled')
 }
 
-async function handleWorkbenchTool(name, args) {
+async function handleWorkbenchTool(name, args, requestId) {
   if (name === 'show_visual') {
     // The app picks the HTML up from the tool call itself and draws it in the chat.
     if (!String(args?.html ?? '').trim()) throw new Error('Pass the HTML to show.')
     return { shown: true }
   }
-  if (name === 'delegate') return delegate(args)
+  if (name === 'delegate') return delegate(args, requestId)
   if (name === 'list_chats') return callApi('POST', '/chats/list', { from: CHAT_ID })
   if (name === 'read_chat') return callApi('POST', '/chats/read', { ...args, from: CHAT_ID })
   if (name === 'start_chat') return callApi('POST', '/chats/start', { ...args, from: CHAT_ID })
@@ -369,8 +374,8 @@ async function handleWorkbenchTool(name, args) {
   throw new Error(`Unknown tool: ${name}`)
 }
 
-async function handleTool(name, args) {
-  if (WORKBENCH) return handleWorkbenchTool(name, args)
+async function handleTool(name, args, requestId) {
+  if (WORKBENCH) return handleWorkbenchTool(name, args, requestId)
   if (name === 'get_state') return callApi('GET', '/state')
   if (name === 'navigate') return callApi('POST', '/navigate', { url: String(args?.url ?? '') })
   if (name === 'back') return callApi('POST', '/back')
@@ -447,6 +452,10 @@ async function handle(message) {
     return
   }
   if (method === 'notifications/initialized' || method === 'initialized') return
+  if (method === 'notifications/cancelled') {
+    if (running.has(params?.requestId)) cancelled.add(params.requestId)
+    return
+  }
   if (method === 'ping') {
     reply(id, {})
     return
@@ -456,16 +465,21 @@ async function handle(message) {
     return
   }
   if (method === 'tools/call') {
+    running.add(id)
+    let result
     try {
-      const data = await handleTool(params?.name, params?.arguments ?? {})
-      reply(id, { content: toContent(params?.name, data) })
+      const data = await handleTool(params?.name, params?.arguments ?? {}, id)
+      result = { content: toContent(params?.name, data) }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      reply(id, {
+      result = {
         content: [{ type: 'text', text: message }],
         isError: true
-      })
+      }
     }
+    running.delete(id)
+    // A cancelled request gets no reply.
+    if (!cancelled.delete(id)) reply(id, result)
     return
   }
   if (id !== undefined) fail(id, `Unknown method: ${method}`)

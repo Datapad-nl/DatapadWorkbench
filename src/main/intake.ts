@@ -7,19 +7,30 @@ import type {
   ProjectIntake,
   ProjectIntakeAnswer,
   ProjectIntakeRound,
+  ProjectIntakeStatus,
   UserQuestion
 } from '../shared/types'
 import { id, now } from './ids'
-import { generateIntakeQuestions } from './intakeQuestions'
+import { generateIntakeQuestions, type GeneratedIntake } from './intakeQuestions'
 import { scanProject, type ProjectScan, type ScanField } from './projectScan'
-import { askUserQuestions, type QuestionOutcome } from './questions'
+import { askUserQuestions, cancelSessionQuestions, type QuestionOutcome } from './questions'
 import { getChat, listProjects } from './store'
+import { readJsonFile, withLock, writeFileAtomic } from './storeIo'
+
+/** An intake still being answered: its questions, and the answers to the rounds already submitted. */
+type IntakeDraft = GeneratedIntake & { asked: ProjectIntakeAnswer[] }
 
 type IntakeFile = {
   profiles: Record<string, ProjectIntake>
+  /** By project id. Kept until the intake is recorded, so a restart resumes it instead of losing it. */
+  drafts?: Record<string, IntakeDraft>
 }
 
 const inflight = new Set<string>()
+/** Chat ids of running intakes, true once cancelled. */
+const running = new Map<string, boolean>()
+/** A card nobody answers would hold its project's intake for good. Cancel it, and ask again later. */
+const ROUND_TIMEOUT_MS = 30 * 60_000
 
 const FIELD_LABEL: Record<ScanField, string> = {
   kind: 'Product kind',
@@ -43,26 +54,22 @@ function memoryPath(): string {
   return join(homedir(), '.grok', 'memory', 'MEMORY.md')
 }
 
-async function readJson<T>(path: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as T
-  } catch {
-    return fallback
-  }
-}
-
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await mkdir(join(path, '..'), { recursive: true })
-  await writeFile(path, JSON.stringify(value, null, 2), 'utf8')
+async function loadIntakeFile(): Promise<Required<IntakeFile>> {
+  const file = await readJsonFile<IntakeFile>(profilesPath(), { profiles: {} })
+  return { profiles: file.profiles ?? {}, drafts: file.drafts ?? {} }
 }
 
 async function loadIntakes(): Promise<Record<string, ProjectIntake>> {
-  const file = await readJson<IntakeFile>(profilesPath(), { profiles: {} })
-  return file.profiles ?? {}
+  return (await loadIntakeFile()).profiles
 }
 
-async function saveIntakes(profiles: Record<string, ProjectIntake>): Promise<void> {
-  await writeJson(profilesPath(), { profiles } satisfies IntakeFile)
+/** Reads, changes and writes the file under its lock, so a profile and a draft written together both land. */
+async function updateIntakes(change: (file: Required<IntakeFile>) => void): Promise<void> {
+  await withLock(profilesPath(), async () => {
+    const file = await loadIntakeFile()
+    change(file)
+    await writeFileAtomic(profilesPath(), JSON.stringify(file satisfies IntakeFile, null, 2))
+  })
 }
 
 export async function getProjectIntake(projectId: string): Promise<ProjectIntake | null> {
@@ -73,7 +80,12 @@ export async function getProjectIntake(projectId: string): Promise<ProjectIntake
 export async function needsProjectIntake(projectId: string): Promise<boolean> {
   const existing = await getProjectIntake(projectId)
   if (!existing) return true
-  return existing.status !== 'completed' && existing.status !== 'skipped'
+  return existing.status !== 'completed' && existing.status !== 'declined' && existing.status !== 'skipped'
+}
+
+/** A declined intake keeps what was gathered before the user stopped, the same as a completed one. */
+function hasAnswers(intake: ProjectIntake): boolean {
+  return intake.status === 'completed' || intake.status === 'declined'
 }
 
 function formatValues(values: string[]): string {
@@ -113,7 +125,7 @@ function briefLines(intake: ProjectIntake, project: Project): string[] {
 }
 
 export function formatProjectSessionRules(intake: ProjectIntake | null, project: Project): string | null {
-  if (!intake || intake.status !== 'completed' || intake.rounds.length === 0) return null
+  if (!intake || !hasAnswers(intake) || intake.rounds.length === 0) return null
   if (briefingPath(project)) {
     return [
       'This project already has a briefing in .grok/rules/briefing.md.',
@@ -180,11 +192,14 @@ async function writeGrokMemory(project: Project, intake: ProjectIntake): Promise
 }
 
 async function persistIntake(project: Project, intake: ProjectIntake): Promise<void> {
-  const profiles = await loadIntakes()
-  profiles[project.id] = intake
-  await saveIntakes(profiles)
-  if (intake.status !== 'completed') return
-  await writeGrokMemory(project, intake)
+  await updateIntakes((file) => {
+    file.profiles[project.id] = intake
+    delete file.drafts[project.id]
+  })
+  if (!hasAnswers(intake)) return
+  // The questions can wait a long time. Write the briefing for the project's current name and folder.
+  const current = (await listProjects()).find((item) => item.id === project.id)
+  if (current) await writeGrokMemory(current, intake)
 }
 
 async function askRound(
@@ -192,10 +207,16 @@ async function askRound(
   title: string,
   questions: UserQuestion[]
 ): Promise<QuestionOutcome> {
-  return askUserQuestions(id(), `intake:${chatId}`, questions, 'ext', {
-    chatId,
-    title
-  })
+  // Timing out is a cancel, not a decline: nothing is recorded, and a draft keeps the earlier rounds.
+  const timer = setTimeout(() => cancelProjectIntake(chatId), ROUND_TIMEOUT_MS)
+  try {
+    return await askUserQuestions(id(), `intake:${chatId}`, questions, 'ext', {
+      chatId,
+      title
+    })
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function derivedAnswers(scan: ProjectScan): ProjectIntakeAnswer[] {
@@ -235,7 +256,10 @@ function chunk<T>(items: T[], size: number): T[][] {
 async function runIntake(project: Project, chatId: string): Promise<void> {
   const scan = await scanProject(project.path)
   const derived = derivedAnswers(scan)
-  const generated = await generateIntakeQuestions(project, scan)
+  // Resume a draft with its own questions: new ones would not line up with its answers.
+  const draft = (await loadIntakeFile()).drafts[project.id]
+  const generated = draft ?? (await generateIntakeQuestions(project, scan))
+  if (running.get(chatId)) return
   const rounds: ProjectIntakeRound[] = []
   if (derived.length > 0) {
     rounds.push({ title: 'From the repo', answers: derived })
@@ -251,12 +275,15 @@ async function runIntake(project: Project, chatId: string): Promise<void> {
     return
   }
 
-  let asked: ProjectIntakeAnswer[] = []
-  const groups = chunk(generated.questions, 5)
+  let asked: ProjectIntakeAnswer[] = draft?.asked ?? []
+  let status: ProjectIntakeStatus = 'completed'
+  const groups = chunk(generated.questions.slice(asked.length), 5)
   for (let index = 0; index < groups.length; index += 1) {
     const questions = groups[index]
-    const title = index === 0 ? generated.title : 'A few more details'
+    const title = asked.length === 0 ? generated.title : 'A few more details'
     const outcome = await askRound(chatId, title, questions)
+    // Cancelled is not declined: record nothing, so the project is asked again.
+    if (running.get(chatId)) return
     if (outcome.type !== 'Accepted') {
       if (asked.length === 0 && derived.length === 0) {
         await persistIntake(project, {
@@ -267,18 +294,35 @@ async function runIntake(project: Project, chatId: string): Promise<void> {
         })
         return
       }
+      status = 'declined'
       break
     }
     asked = asked.concat(answersFromOutcome(questions, outcome))
+    // Each submitted round reaches disk, so quitting before the last one loses nothing.
+    await updateIntakes((file) => {
+      file.drafts[project.id] = { title: generated.title, questions: generated.questions, asked }
+    })
+    // A cancel while saving must not post the next card.
+    if (running.get(chatId)) return
   }
 
   if (asked.length > 0) rounds.push({ title: 'From you', answers: asked })
   await persistIntake(project, {
     projectId: project.id,
-    status: 'completed',
+    status,
     updatedAt: now(),
     rounds
   })
+}
+
+/**
+ * Ends the intake running in `chatId`, if any, without recording it as skipped.
+ * Call it when its chat is stopped or deleted.
+ */
+export function cancelProjectIntake(chatId: string): void {
+  if (!running.has(chatId)) return
+  running.set(chatId, true)
+  cancelSessionQuestions(`intake:${chatId}`)
 }
 
 export function scheduleProjectIntake(project: Project, chatId: string): void {
@@ -298,8 +342,10 @@ export async function maybeStartProjectIntake(projectId: string, chatId: string)
     const projects = await listProjects()
     const project = projects.find((item) => item.id === projectId)
     if (!project) return
+    running.set(chatId, false)
     await runIntake(project, chatId)
   } finally {
+    running.delete(chatId)
     inflight.delete(projectId)
   }
 }

@@ -35,6 +35,8 @@ type StatusJson = {
 type RunResult = { code: number; stdout: string; stderr: string }
 
 const jobs = new Map<string, Promise<void>>()
+/** The folder each project was last queued with. A job for any other folder is stale and stays quiet. */
+const queuedPath = new Map<string, string>()
 const cache = new Map<string, ProjectIndex>()
 const listeners = new Set<(index: ProjectIndex) => void>()
 const children = new Set<ChildProcess>()
@@ -66,7 +68,14 @@ export function isUnsafeProjectPath(path: string): boolean {
   return false
 }
 
+/** How long readIndex trusts a cached "CLI missing" before it looks for the CLI again. */
+const MISSING_CLI_TTL_MS = 60_000
+
 let resolvedBin: string | null | undefined
+/** When resolveCodegraphBin last found no CLI. */
+let missingCheckedAt = 0
+let installing: Promise<string> | null = null
+let stopping = false
 
 export function onIndexChange(listener: (index: ProjectIndex) => void): () => void {
   listeners.add(listener)
@@ -78,6 +87,17 @@ export function onIndexChange(listener: (index: ProjectIndex) => void): () => vo
 function emit(index: ProjectIndex): void {
   cache.set(index.projectId, index)
   for (const listener of listeners) listener(index)
+}
+
+/**
+ * Emits a job's result to every project still queued with `path`. Jobs are per folder, so two projects
+ * with the same folder share one. A project since moved to another folder stays quiet.
+ */
+function emitFor(path: string, index: ProjectIndex): void {
+  if (stopping) return
+  for (const [projectId, queued] of queuedPath) {
+    if (queued === path) emit({ ...index, projectId })
+  }
 }
 
 export function augmentPath(): void {
@@ -133,6 +153,7 @@ export async function resolveCodegraphBin(): Promise<string | null> {
     return found
   }
   resolvedBin = null
+  missingCheckedAt = Date.now()
   return null
 }
 
@@ -157,7 +178,9 @@ function run(
       stderr += chunk.toString()
     })
     let force: ReturnType<typeof setTimeout> | null = null
+    let timedOut = false
     const timer = setTimeout(() => {
+      timedOut = true
       child.kill('SIGTERM')
       force = setTimeout(() => {
         try {
@@ -166,13 +189,20 @@ function run(
           // gone
         }
       }, 2_000)
-      reject(new Error(`${command} timed out`))
     }, opts.timeoutMs)
     child.on('error', (error) => {
       clearTimeout(timer)
       if (force) clearTimeout(force)
       children.delete(child)
       reject(error)
+    })
+    // A timed-out child fails once it has exited, not when the timer fires. Until then its job stays
+    // registered, so a new job on the same folder can't start alongside it.
+    child.on('exit', () => {
+      if (!timedOut) return
+      if (force) clearTimeout(force)
+      children.delete(child)
+      reject(new Error(`${command} timed out`))
     })
     child.on('close', (code) => {
       clearTimeout(timer)
@@ -200,10 +230,18 @@ async function installCli(): Promise<string> {
   throw new Error(detail || 'Could not install Codegraph')
 }
 
-async function ensureBin(projectId: string): Promise<string | null> {
+/** One install at a time, shared by every project waiting for the CLI. */
+function installOnce(): Promise<string> {
+  installing ??= installCli().finally(() => {
+    installing = null
+  })
+  return installing
+}
+
+async function ensureBin(projectId: string, path: string): Promise<string | null> {
   const existing = await resolveCodegraphBin()
   if (existing) return existing
-  emit({
+  emitFor(path, {
     projectId,
     state: 'installing',
     error: null,
@@ -213,9 +251,9 @@ async function ensureBin(projectId: string): Promise<string | null> {
   })
   try {
     resolvedBin = undefined
-    return await installCli()
+    return await installOnce()
   } catch (error) {
-    emit({
+    emitFor(path, {
       projectId,
       state: 'missing-cli',
       error: error instanceof Error ? error.message : 'Codegraph is not installed',
@@ -267,6 +305,13 @@ function fromStatus(projectId: string, status: StatusJson | null, fallback: Inde
   }
 }
 
+/** A cached index is stale once the CLI may have been installed since, or its .codegraph folder is gone. */
+function isStale(path: string, index: ProjectIndex): boolean {
+  if (index.state === 'missing-cli') return Date.now() - missingCheckedAt > MISSING_CLI_TTL_MS
+  if (index.state === 'indexed') return !existsSync(join(path, '.codegraph'))
+  return false
+}
+
 export async function readIndex(project: Project): Promise<ProjectIndex> {
   if (!project.path) {
     const index: ProjectIndex = {
@@ -294,9 +339,11 @@ export async function readIndex(project: Project): Promise<ProjectIndex> {
       }
     )
   }
-  if (cached) return cached
+  if (cached && !isStale(project.path, cached)) return cached
   const bin = await resolveCodegraphBin()
   if (!bin) {
+    // Still missing. Keep the cached one, which may say why the install failed.
+    if (cached?.state === 'missing-cli') return cached
     const index: ProjectIndex = {
       projectId: project.id,
       state: 'missing-cli',
@@ -308,7 +355,20 @@ export async function readIndex(project: Project): Promise<ProjectIndex> {
     cache.set(project.id, index)
     return index
   }
-  const status = await readStatusJson(bin, project.path)
+  let status: StatusJson | null
+  try {
+    status = await readStatusJson(bin, project.path)
+  } catch (error) {
+    // Not cached, so the next read tries again.
+    return {
+      projectId: project.id,
+      state: 'error',
+      error: error instanceof Error ? error.message : 'Could not read the index',
+      fileCount: null,
+      nodeCount: null,
+      languages: []
+    }
+  }
   const index = fromStatus(project.id, status, 'not-indexed')
   cache.set(project.id, index)
   return index
@@ -320,14 +380,14 @@ export async function collectIndexes(projects: Project[]): Promise<Record<string
 }
 
 async function runIndex(projectId: string, path: string): Promise<void> {
-  const bin = await ensureBin(projectId)
+  const bin = await ensureBin(projectId, path)
   if (!bin) return
   const current = await readStatusJson(bin, path)
   if (current?.initialized) {
-    emit(fromStatus(projectId, current, 'indexed'))
+    emitFor(path, fromStatus(projectId, current, 'indexed'))
     return
   }
-  emit({
+  emitFor(path, {
     projectId,
     state: 'indexing',
     error: null,
@@ -337,7 +397,7 @@ async function runIndex(projectId: string, path: string): Promise<void> {
   })
   const result = await run(bin, ['init', '-i', path], { cwd: path, timeoutMs: 10 * 60_000 })
   if (result.code !== 0) {
-    emit({
+    emitFor(path, {
       projectId,
       state: 'error',
       error: (result.stderr || result.stdout || 'Indexing failed').trim().slice(0, 400),
@@ -348,10 +408,13 @@ async function runIndex(projectId: string, path: string): Promise<void> {
     return
   }
   const next = await readStatusJson(bin, path)
-  emit(fromStatus(projectId, next, 'indexed'))
+  emitFor(path, fromStatus(projectId, next, 'indexed'))
 }
 
+/** At quit. Killed children fail their jobs, which must not report errors on the way out. */
 export function stopCodegraphJobs(): void {
+  stopping = true
+  jobs.clear()
   for (const child of children) {
     try {
       child.kill('SIGKILL')
@@ -380,7 +443,8 @@ export function killOrphanCodegraphInits(): void {
 }
 
 export function queueIndex(projectId: string, path: string | null | undefined): void {
-  if (!path) return
+  if (!path || stopping) return
+  queuedPath.set(projectId, path)
   if (isUnsafeProjectPath(path)) {
     emit({
       projectId,
@@ -393,7 +457,6 @@ export function queueIndex(projectId: string, path: string | null | undefined): 
     return
   }
   const existing = jobs.get(path)
-  if (existing) return
   emit({
     projectId,
     state: 'indexing',
@@ -402,9 +465,11 @@ export function queueIndex(projectId: string, path: string | null | undefined): 
     nodeCount: null,
     languages: []
   })
+  // A job for this folder is running, maybe for another project. It reports to this one too.
+  if (existing) return
   const job = runIndex(projectId, path)
     .catch((error: unknown) => {
-      emit({
+      emitFor(path, {
         projectId,
         state: 'error',
         error: error instanceof Error ? error.message : 'Indexing failed',

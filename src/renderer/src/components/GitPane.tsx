@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   GitActionResult,
   GitChangeKind,
@@ -123,6 +123,12 @@ export function GitPane(): React.JSX.Element {
       ? snapshot
       : empty
   const otherPanes = showBrowser || showActivity || showKnowledge
+  const viewKey = `${activeProjectId}:${gitChatId}`
+  const viewRef = useRef(viewKey)
+
+  useEffect(() => {
+    viewRef.current = viewKey
+  }, [viewKey])
 
   useEffect(() => {
     if (!showGit) {
@@ -165,9 +171,15 @@ export function GitPane(): React.JSX.Element {
       setDiff(null)
       return
     }
+    let cancelled = false
     void window.workbench
       .getGitDiff(activeProjectId, selected.path, selected.staged, gitChatId)
-      .then(setDiff)
+      .then((next) => {
+        if (!cancelled) setDiff(next)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [activeProjectId, gitChatId, selected, snapshot.files])
 
   const stagedCount = useMemo(
@@ -175,17 +187,24 @@ export function GitPane(): React.JSX.Element {
     [snapshot.files]
   )
 
-  function apply(result: GitActionResult): void {
-    setSnapshot(result.snapshot)
-    setError(result.error)
-    setBusy(false)
-  }
-
   async function run(action: () => Promise<GitActionResult>): Promise<void> {
     if (!activeProjectId || busy) return
+    const key = viewKey
     setBusy(true)
     setError(null)
-    apply(await action())
+    try {
+      const result = await action()
+      // A result for a project or chat the pane has since left is dropped.
+      if (viewRef.current !== key) return
+      setSnapshot(result.snapshot)
+      setError(result.error)
+    } catch (error) {
+      if (viewRef.current !== key) return
+      const raw = error instanceof Error ? error.message : 'Git action failed'
+      setError(raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function checkout(ref: string, detach: boolean): Promise<void> {
@@ -216,8 +235,11 @@ export function GitPane(): React.JSX.Element {
               icon="retry"
               label="Refresh"
               onClick={() => {
-                if (activeProjectId)
-                  void window.workbench.getGitSnapshot(activeProjectId, gitChatId).then(setSnapshot)
+                if (!activeProjectId) return
+                const key = viewKey
+                void window.workbench.getGitSnapshot(activeProjectId, gitChatId).then((next) => {
+                  if (viewRef.current === key) setSnapshot(next)
+                })
               }}
             />
             <IconButton icon="close" label="Close Git" onClick={() => setShowGit(false)} />

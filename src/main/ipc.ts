@@ -56,17 +56,18 @@ import { projectIcon } from './projectIcon'
 import { killProcessesUnder } from './worktreeProcs'
 import { deleteAllCheckpoints } from './checkpoints'
 import {
-  appendUserMessage,
   chatCommands,
+  forgetChat,
   isStreaming,
+  liveState,
   loadChat,
   onChatLive,
   rewindChat,
+  sendUserTurn,
   setChatMode,
   settleChatPlan,
-  drainAsideSteers,
   startAside,
-  streamAssistant,
+  stopAndWait,
   stopStream
 } from './grok'
 import {
@@ -82,10 +83,10 @@ import {
   onPermissionSettled,
   resolvePermission
 } from './permissions'
-import { maybeStartProjectIntake, scheduleProjectIntake } from './intake'
+import { cancelProjectIntake, maybeStartProjectIntake, scheduleProjectIntake } from './intake'
 import { registerChatTools, stopSchedule } from './chatTools'
 import { unlinkPr } from './pullRequests'
-import { onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
+import { cancelChatQuestions, onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
 import {
   createChat,
   createProject,
@@ -98,6 +99,8 @@ import {
   renameChat,
   searchChats,
   getMcpServers,
+  getPublicSettings,
+  onCliInfoChange,
   setMcpServers,
   snapshot,
   updateProject,
@@ -107,9 +110,9 @@ import {
   ensureMicAccess,
   ensureVoiceModel,
   getMicAccess,
-  getVoiceModelStatus,
   onVoiceModelStatus,
-  openMicPrivacySettings
+  openMicPrivacySettings,
+  readVoiceModelStatus
 } from './voice'
 import { checkForUpdates, getUpdateState, installUpdate, onUpdateState } from './updater'
 import { replySteps } from '../shared/steps'
@@ -125,6 +128,7 @@ import {
   getGitSummaries,
   removeChatWorktree,
   setGitActiveProject,
+  setMergeGuard,
   stageGitPath,
   syncGitWatchers,
   unstageGitPath
@@ -142,26 +146,6 @@ function emit(event: ChatEvent): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send('chat:event', event)
   }
-}
-
-const pendingDeltas = new Map<string, string>()
-let deltaTimer: ReturnType<typeof setTimeout> | null = null
-
-function flushDeltas(): void {
-  if (deltaTimer) {
-    clearTimeout(deltaTimer)
-    deltaTimer = null
-  }
-  for (const [chatId, text] of pendingDeltas) {
-    if (text) emit({ type: 'delta', chatId, text })
-  }
-  pendingDeltas.clear()
-}
-
-function emitDelta(chatId: string, text: string): void {
-  pendingDeltas.set(chatId, (pendingDeltas.get(chatId) ?? '') + text)
-  if (deltaTimer) return
-  deltaTimer = setTimeout(flushDeltas, 50)
 }
 
 function openFromNotice(chatId: string): void {
@@ -187,38 +171,30 @@ async function sendTurn(
   attachments: Array<{ id: string; mimeType: string; data: string }> = [],
   mentions: FileMention[] = []
 ): Promise<{ chat: Chat; done: Promise<Chat | null> }> {
-  const chat = await appendUserMessage(chatId, content, attachments, mentions)
-  const project = (await listProjects()).find((item) => item.id === chat.projectId)
-
-  const done = streamAssistant(chat, project, (text) => {
-    emitDelta(chatId, text)
-  })
-    .then((done) => {
-      flushDeltas()
-      if (!done) return null
-      emit({ type: 'done', chatId, chat: done })
-      const reply = done.messages.at(-1)
+  // The turn sends its own done or error event; this only adds the system notification.
+  const { chat, done } = await sendUserTurn(chatId, content, attachments, mentions)
+  const notified = done.then(
+    (saved) => {
+      const reply = saved?.messages.at(-1)
       const answer = reply?.role === 'assistant' ? replySteps(reply.content).at(-1) : undefined
-      notifyChat(done, answer || 'Finished', openFromNotice)
-      drainAsideSteers(chatId, project)
-      return done
-    })
-    .catch((error: unknown) => {
-      flushDeltas()
-      if (!isStreaming(chatId)) {
-        const message = error instanceof Error ? error.message : 'Grok request failed'
-        emit({ type: 'error', chatId, error: message })
-        void noticeFor(chatId, `Stopped: ${message}`)
-      }
-      drainAsideSteers(chatId, project)
+      if (saved) notifyChat(saved, answer || 'Finished', openFromNotice)
+      return saved
+    },
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Grok request failed'
+      void noticeFor(chatId, `Stopped: ${message}`)
       throw error
-    })
-
-  return { chat, done }
+    }
+  )
+  return { chat, done: notified }
 }
 
 export function registerIpc(): void {
-  registerChatTools({ send: sendTurn, emit })
+  // A merge mid-turn would take files the agent is still writing.
+  setMergeGuard((_projectId, chatId) =>
+    isStreaming(chatId) ? 'This chat is still working. Merge once it finishes.' : null
+  )
+  registerChatTools({ send: sendTurn, emit, isStreaming })
   startActivityBridge()
   watchAttention()
   onIndexChange((index) => {
@@ -296,7 +272,9 @@ export function registerIpc(): void {
     // Removing a project only hides it. Its chats, intake and files on disk are kept.
     const chats = await listChats()
     for (const chat of chats.filter((item) => item.projectId === projectId)) {
-      stopStream(chat.id)
+      await stopAndWait(chat.id)
+      // Asked again if the project comes back, rather than recorded as declined.
+      cancelProjectIntake(chat.id)
       if (chat.worktreePath) await killProcessesUnder(chat.worktreePath)
     }
     await removeProject(projectId)
@@ -394,16 +372,25 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('chat:delete', async (_event, chatId: string) => {
-    stopStream(chatId)
+    // Let a running turn save before its files go, so it cannot write the chat back.
+    await stopAndWait(chatId)
+    // Cancelled, not declined: a declined intake is recorded and never asked again.
+    cancelProjectIntake(chatId)
+    cancelChatQuestions(chatId)
     const chat = await getChat(chatId).catch(() => null)
     const projects = await listProjects()
     const project = chat ? projects.find((item) => item.id === chat.projectId) : null
     const cwd = chat && project ? chatWorkingDir(chat, project.path) : project?.path ?? null
     await deleteAllCheckpoints(chatId, cwd)
     if (chat?.worktreePath && project?.path) {
-      await removeChatWorktree(project.path, chat.worktreePath)
+      const removed = await removeChatWorktree(project.path, chat.worktreePath)
+      // Deleting the chat now would leave its worktree with nothing pointing at it.
+      if (!removed) {
+        throw new Error(`Could not remove the worktree at ${chat.worktreePath}, so the chat was kept. Close anything using it and try again.`)
+      }
     }
     await deleteChat(chatId)
+    forgetChat(chatId)
     return snapshot()
   })
 
@@ -455,13 +442,12 @@ export function registerIpc(): void {
     return chat
   })
 
+  // The turn ends itself and sends done once its reply is saved. False when nothing was running.
   ipcMain.handle('chat:stop', async (_event, chatId: string) => {
-    stopStream(chatId)
-    flushDeltas()
-    const chat = await getChat(chatId).catch(() => null)
-    if (chat) emit({ type: 'done', chatId, chat })
-    return true
+    return stopStream(chatId)
   })
+
+  ipcMain.handle('chat:liveState', async () => liveState())
 
   ipcMain.handle('chat:setMode', async (_event, input: { chatId: string; mode: PermissionMode }) => {
     return setChatMode(input.chatId, normalizePermissionMode(input.mode))
@@ -537,9 +523,17 @@ export function registerIpc(): void {
       return settings
     }
   )
+  // Settings answer before the CLI probes finish; what they find arrives here.
+  onCliInfoChange(() => {
+    void getPublicSettings()
+      .then((settings) => {
+        for (const window of BrowserWindow.getAllWindows()) window.webContents.send('settings:changed', settings)
+      })
+      .catch(() => undefined)
+  })
 
   ipcMain.handle('claude:options', (_event, model: string) => getClaudeOptions(model ?? ''))
-  ipcMain.handle('voice:modelStatus', () => getVoiceModelStatus())
+  ipcMain.handle('voice:modelStatus', () => readVoiceModelStatus())
   ipcMain.handle('voice:ensureModel', async () => ensureVoiceModel())
   ipcMain.handle('voice:ensureMic', async () => ensureMicAccess())
   ipcMain.handle('voice:micAccess', () => getMicAccess())
@@ -567,20 +561,28 @@ export function registerIpc(): void {
     return getThemeState()
   })
 
+  // Every window hears about a change, the one that made it too, ahead of its reply.
+  function themeChanged<T>(state: T): T {
+    if (state) {
+      for (const window of BrowserWindow.getAllWindows()) window.webContents.send('theme:changed', state)
+    }
+    return state
+  }
+
   ipcMain.handle('theme:activate', async (_event, id: string) => {
-    return activateTheme(id)
+    return themeChanged(await activateTheme(id))
   })
 
   ipcMain.handle('theme:save', async (_event, theme: unknown) => {
-    return saveUserTheme(theme)
+    return themeChanged(await saveUserTheme(theme))
   })
 
   ipcMain.handle('theme:delete', async (_event, id: string) => {
-    return deleteUserTheme(id)
+    return themeChanged(await deleteUserTheme(id))
   })
 
   ipcMain.handle('theme:import', async () => {
-    return importThemeFile()
+    return themeChanged(await importThemeFile())
   })
 
   ipcMain.handle('theme:export', async (_event, id: string) => {

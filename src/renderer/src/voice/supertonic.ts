@@ -36,18 +36,28 @@ function loadModel(): Promise<Model> {
   model = (async () => {
     ort.env.wasm.wasmPaths = { mjs: ortMjs, wasm: ortWasm }
     const options: ort.InferenceSession.SessionOptions = { executionProviders: ['wasm'] }
-    const session = (name: string): Promise<ort.InferenceSession> =>
-      ort.InferenceSession.create(`${BASE}/onnx/${name}.onnx`, options)
-    // One at a time keeps the peak memory of loading the large estimator down.
-    const dp = await session('duration_predictor')
-    const encoder = await session('text_encoder')
-    const estimator = await session('vector_estimator')
-    const vocoder = await session('vocoder')
-    const [config, indexer] = await Promise.all([
-      fetchJson<Config>('onnx/tts.json'),
-      fetchJson<number[]>('onnx/unicode_indexer.json')
-    ])
-    return { config, indexer, dp, encoder, estimator, vocoder }
+    const opened: ort.InferenceSession[] = []
+    const session = async (name: string): Promise<ort.InferenceSession> => {
+      const created = await ort.InferenceSession.create(`${BASE}/onnx/${name}.onnx`, options)
+      opened.push(created)
+      return created
+    }
+    try {
+      // One at a time keeps the peak memory of loading the large estimator down.
+      const dp = await session('duration_predictor')
+      const encoder = await session('text_encoder')
+      const estimator = await session('vector_estimator')
+      const vocoder = await session('vocoder')
+      const [config, indexer] = await Promise.all([
+        fetchJson<Config>('onnx/tts.json'),
+        fetchJson<number[]>('onnx/unicode_indexer.json')
+      ])
+      return { config, indexer, dp, encoder, estimator, vocoder }
+    } catch (error) {
+      // A partial load would otherwise keep the sessions it already opened.
+      for (const item of opened) void item.release().catch(() => undefined)
+      throw error
+    }
   })()
   model.catch(() => {
     model = null

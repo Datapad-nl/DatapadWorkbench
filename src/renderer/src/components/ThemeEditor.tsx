@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   COLOR_GROUPS,
   COLOR_LABELS,
@@ -134,8 +134,20 @@ export function ThemeEditor(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+  /** The active theme the draft was last synced with. */
+  const synced = useRef(active)
 
   useEffect(() => {
+    const previous = synced.current
+    synced.current = active
+    const edited = JSON.stringify(draftRef.current)
+    if (edited !== JSON.stringify(previous) && edited !== JSON.stringify(active)) {
+      // The theme changed under unsaved edits: keep them. This editor's own actions set the draft themselves.
+      applyTheme(draftRef.current)
+      return
+    }
     setDraft(active)
     setSaveName('')
     setError(null)
@@ -147,9 +159,7 @@ export function ThemeEditor(): React.JSX.Element {
 
   useEffect(() => {
     return () => {
-      void window.workbench.getThemeState().then((state) => {
-        applyTheme(state.active)
-      })
+      applyTheme(synced.current)
     }
   }, [])
 
@@ -166,7 +176,7 @@ export function ThemeEditor(): React.JSX.Element {
     setBusy(true)
     setError(null)
     try {
-      await activateTheme(id)
+      setDraft((await activateTheme(id)).active)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not switch theme')
     } finally {
@@ -182,7 +192,7 @@ export function ThemeEditor(): React.JSX.Element {
     setBusy(true)
     setError(null)
     try {
-      await saveTheme(draft)
+      setDraft((await saveTheme(draft)).active)
       setNotice('Theme saved')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save theme')
@@ -198,7 +208,7 @@ export function ThemeEditor(): React.JSX.Element {
     setBusy(true)
     setError(null)
     try {
-      await saveTheme(next)
+      setDraft((await saveTheme(next)).active)
       setSaveName('')
       setNotice(`Saved as ${name}`)
     } catch (err) {
@@ -214,7 +224,7 @@ export function ThemeEditor(): React.JSX.Element {
     setBusy(true)
     setError(null)
     try {
-      await deleteTheme(draft.id)
+      setDraft((await deleteTheme(draft.id)).active)
       setNotice('Theme deleted')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not delete theme')
@@ -229,7 +239,10 @@ export function ThemeEditor(): React.JSX.Element {
     setError(null)
     try {
       const state = await importTheme()
-      if (state) setNotice(`Loaded ${state.active.name}`)
+      if (state) {
+        setDraft(state.active)
+        setNotice(`Loaded ${state.active.name}`)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load theme file')
     } finally {

@@ -217,7 +217,7 @@ async function handle(
 
 export function startBrowserAgentServer(): Promise<{ url: string; token: string }> {
   if (started) return started
-  started = new Promise((resolve, reject) => {
+  const starting = new Promise<{ url: string; token: string }>((resolve, reject) => {
     const token = randomBytes(24).toString('hex')
     const server = createServer((req, res) => {
       void handle(req, res, token).catch((error) => {
@@ -228,13 +228,19 @@ export function startBrowserAgentServer(): Promise<{ url: string; token: string 
     server.listen(0, '127.0.0.1', () => {
       const address = server.address()
       if (!address || typeof address === 'string') {
+        server.close()
         reject(new Error('Browser agent server failed to bind'))
         return
       }
       resolve({ url: `http://127.0.0.1:${address.port}`, token })
     })
   })
-  return started
+  started = starting
+  // A failed start is not kept, so the next caller tries again.
+  starting.catch(() => {
+    if (started === starting) started = null
+  })
+  return starting
 }
 
 /** The `browser` server, and the `workbench` chat tools (visuals, delegate, other chats) for `chatId`. */

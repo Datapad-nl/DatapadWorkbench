@@ -30,6 +30,7 @@ type Cache = {
 }
 
 const cache = new Map<string, Cache>()
+const walking = new Map<string, Promise<FileHit[]>>()
 
 function toHit(root: string, abs: string, kind: FileHit['kind']): FileHit {
   const path = relative(root, abs).split(sep).join('/')
@@ -68,9 +69,18 @@ async function filesFor(root: string): Promise<FileHit[]> {
   const now = Date.now()
   const hit = cache.get(root)
   if (hit && now - hit.at < CACHE_MS) return hit.files
-  const files = await walk(root)
-  cache.set(root, { at: now, files })
-  return files
+  // One walk per root at a time: keystrokes during a cold walk share it.
+  let pending = walking.get(root)
+  if (!pending) {
+    pending = walk(root)
+      .then((files) => {
+        cache.set(root, { at: now, files })
+        return files
+      })
+      .finally(() => walking.delete(root))
+    walking.set(root, pending)
+  }
+  return pending
 }
 
 function score(item: FileHit, query: string): number {

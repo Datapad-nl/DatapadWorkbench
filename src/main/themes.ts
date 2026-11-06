@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog } from 'electron'
+import { existsSync } from 'fs'
 import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import {
@@ -13,6 +14,7 @@ import {
   type ThemeSummary
 } from '../shared/theme'
 import { getThemeId, setThemeId } from './store'
+import { writeFileAtomic } from './storeIo'
 
 function themesDir(): string {
   return join(app.getPath('userData'), 'workbench', 'themes')
@@ -81,7 +83,8 @@ export async function getThemeState(): Promise<{
 }> {
   const activeId = await getThemeId()
   const active = await resolveTheme(activeId)
-  if (active.id !== activeId) {
+  // Only a theme that is gone resets the choice. One that fails to read this time is kept.
+  if (active.id !== activeId && !existsSync(themePath(activeId))) {
     await setThemeId(active.id)
   }
   return {
@@ -112,7 +115,7 @@ export async function saveUserTheme(raw: unknown): Promise<{
     ? { ...parsed, id: await uniqueUserId(parsed.name) }
     : parsed
   await ensureThemesDir()
-  await writeFile(themePath(theme.id), JSON.stringify(theme, null, 2), 'utf8')
+  await writeFileAtomic(themePath(theme.id), JSON.stringify(theme, null, 2))
   await setThemeId(theme.id)
   applyWindowChrome(theme)
   return getThemeState()
@@ -171,7 +174,7 @@ export async function importThemeFile(): Promise<{
     : parsed.id
   const theme: ThemeFile = { ...parsed, id }
   await ensureThemesDir()
-  await writeFile(themePath(theme.id), JSON.stringify(theme, null, 2), 'utf8')
+  await writeFileAtomic(themePath(theme.id), JSON.stringify(theme, null, 2))
   await setThemeId(theme.id)
   applyWindowChrome(theme)
   return getThemeState()

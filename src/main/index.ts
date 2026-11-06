@@ -1,14 +1,15 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
-import { startUpdater } from './updater'
+import { startUpdater, stopUpdater } from './updater'
+import { stopAgents } from './acp'
 import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
 import { attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
 import { augmentPath, killOrphanCodegraphInits, stopCodegraphJobs } from './codegraph'
 import { loadDotEnv } from './env'
 import { stopGitWatchers } from './git'
-import { stopKnowledgeWatchers } from './knowledge'
+import { stopKnowledgeJobs, stopKnowledgeWatchers } from './knowledge'
 import {
   startWorktreeReaper,
   stopWorktreeReaper,
@@ -16,6 +17,7 @@ import {
   sweepWorktreeProcessesSync
 } from './worktreeProcs'
 import { registerIpc } from './ipc'
+import { hasRunningTurns, stopAllTurnsAndWait } from './grok'
 import { startScheduler } from './chatTools'
 import { startPrWatcher } from './pullRequests'
 import { ensureStore, purgeUnsafeProjects, syncClaudeSessions, syncGrokSessions } from './store'
@@ -156,12 +158,26 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('before-quit', () => {
+let turnsSaved = false
+
+app.on('before-quit', (event) => {
+  // Running turns save what they streamed before the agents go. A stuck turn holds the quit 3s at most.
+  if (!turnsSaved && hasRunningTurns()) {
+    event.preventDefault()
+    turnsSaved = true
+    void stopAllTurnsAndWait(3_000).finally(() => app.quit())
+    return
+  }
+  turnsSaved = true
+  // Agent processes would otherwise outlive the app and keep running their turns.
+  stopAgents()
   stopWorktreeReaper()
   stopCodegraphJobs()
   killOrphanCodegraphInits()
   stopGitWatchers()
+  stopKnowledgeJobs()
   stopKnowledgeWatchers()
+  stopUpdater()
   sweepWorktreeProcessesSync()
 })
 

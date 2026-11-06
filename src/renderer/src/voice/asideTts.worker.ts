@@ -4,6 +4,7 @@ import { loadSupertonic, synthesize } from './supertonic'
 type InMessage =
   | { type: 'load' }
   | { type: 'synth'; id: number; text: string; lang: VoiceLanguage; voice: string; speed: number; urgent?: boolean }
+  | { type: 'cancel'; ids: number[] }
 
 type OutMessage =
   | { type: 'ready' }
@@ -20,7 +21,7 @@ function fail(id: number | undefined, error: unknown): void {
   scope.postMessage(id === undefined ? { type: 'error', message } : { type: 'error', id, message })
 }
 
-type Task = () => Promise<void>
+type Task = { id?: number; run: () => Promise<void> }
 
 // One model serves replies and status lines. A status line goes ahead of reply sentences still waiting.
 const urgentTasks: Task[] = []
@@ -37,7 +38,7 @@ async function pump(): Promise<void> {
   running = true
   try {
     for (let task = urgentTasks.shift() ?? tasks.shift(); task; task = urgentTasks.shift() ?? tasks.shift()) {
-      await task()
+      await task.run()
     }
   } finally {
     running = false
@@ -47,17 +48,30 @@ async function pump(): Promise<void> {
 scope.onmessage = (event) => {
   const message = event.data
   if (message.type === 'load') {
-    enqueue(async () => {
-      try {
-        await loadSupertonic()
-        scope.postMessage({ type: 'ready' })
-      } catch (error) {
-        fail(undefined, error)
+    enqueue({
+      run: async () => {
+        try {
+          await loadSupertonic()
+          scope.postMessage({ type: 'ready' })
+        } catch (error) {
+          fail(undefined, error)
+        }
       }
     })
     return
   }
-  enqueue(async () => {
+  if (message.type === 'cancel') {
+    // Jobs not started yet are dropped. One already running finishes, and the page ignores its result.
+    const drop = new Set(message.ids)
+    for (const queue of [urgentTasks, tasks]) {
+      for (let i = queue.length - 1; i >= 0; i--) {
+        const id = queue[i].id
+        if (id !== undefined && drop.has(id)) queue.splice(i, 1)
+      }
+    }
+    return
+  }
+  const run = async (): Promise<void> => {
     try {
       const { samples, sampleRate } = await synthesize(message.text, message.lang, message.voice, message.speed)
       if (samples.length === 0) {
@@ -68,5 +82,6 @@ scope.onmessage = (event) => {
     } catch (error) {
       fail(message.id, error)
     }
-  }, message.urgent)
+  }
+  enqueue({ id: message.id, run }, message.urgent)
 }

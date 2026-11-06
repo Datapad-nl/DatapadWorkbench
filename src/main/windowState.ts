@@ -86,12 +86,23 @@ export function trackWindowState(win: BrowserWindow): void {
     }
   }
 
+  // A resize or move drag fires many events. Save once it has been still for a moment.
   const schedule = (): void => {
     if (timer) clearTimeout(timer)
-    timer = setTimeout(persist, 250)
+    timer = setTimeout(() => {
+      timer = null
+      persist()
+    }, 250)
+  }
+
+  // Close saves the final bounds now, so a save still waiting must not run after it.
+  const flush = (): void => {
+    if (timer) clearTimeout(timer)
+    timer = null
+    persist()
   }
 
   win.on('resize', schedule)
   win.on('move', schedule)
-  win.on('close', persist)
+  win.on('close', flush)
 }

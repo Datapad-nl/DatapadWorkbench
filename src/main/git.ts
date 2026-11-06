@@ -16,6 +16,7 @@ import type {
   PermissionMode
 } from '../shared/types'
 import { relPath } from './checkpoints'
+import { withRepoLock } from './gitLock'
 import { getChat, listProjects } from './store'
 import { killProcessesUnder } from './worktreeProcs'
 
@@ -56,12 +57,15 @@ function noisyWatchPath(filename: string | Buffer | null | undefined): boolean {
 
 type RunResult = { code: number; stdout: string; stderr: string }
 
-const gitWatchers = new Map<string, FSWatcher>()
+const gitWatchers = new Map<string, { watcher: FSWatcher; cwd: string }>()
 const worktreeWatchers = new Map<string, FSWatcher>()
 const pending = new Map<string, ReturnType<typeof setTimeout>>()
 const runningBroadcast = new Set<string>()
 const rerunBroadcast = new Set<string>()
 let activeWatch: { projectId: string; chatId: string | null } | null = null
+let activeGen = 0
+let syncChain: Promise<void> = Promise.resolve()
+let resyncTimer: ReturnType<typeof setTimeout> | null = null
 
 function runGit(cwd: string, args: string[]): Promise<RunResult> {
   return new Promise((resolveResult) => {
@@ -80,6 +84,14 @@ function runGit(cwd: string, args: string[]): Promise<RunResult> {
       }
     )
   })
+}
+
+type MergeGuard = (projectId: string, chatId: string) => string | null | Promise<string | null>
+let mergeGuard: MergeGuard = () => null
+
+/** The chat layer imports this file, so it hands its check in. The guard says why a merge must wait, or null. */
+export function setMergeGuard(guard: MergeGuard): void {
+  mergeGuard = guard
 }
 
 export function chatWorkingDir(
@@ -108,21 +120,36 @@ export async function addChatWorktree(
     `${basename(projectPath)}-${shortChatId(chatId)}`
   )
   await mkdir(dirname(dest), { recursive: true })
-  const created = await runGit(projectPath, ['worktree', 'add', '-b', branch, dest])
-  if (created.code !== 0) {
-    const reused = await runGit(projectPath, ['worktree', 'add', dest, branch])
-    if (reused.code !== 0) {
-      throw new Error(reused.stderr.trim() || created.stderr.trim() || 'Could not create worktree')
+  await withRepoLock(projectPath, async () => {
+    const created = await runGit(projectPath, ['worktree', 'add', '-b', branch, dest])
+    if (created.code !== 0) {
+      const reused = await runGit(projectPath, ['worktree', 'add', dest, branch])
+      if (reused.code !== 0) {
+        throw new Error(reused.stderr.trim() || created.stderr.trim() || 'Could not create worktree')
+      }
     }
-  }
+  })
   return { path: dest, branch }
 }
 
-export async function removeChatWorktree(projectPath: string, worktreePath: string): Promise<void> {
+/** Resolves false when the worktree is still on disk, for example because it has uncommitted files. */
+export async function removeChatWorktree(projectPath: string, worktreePath: string): Promise<boolean> {
+  return withRepoLock(projectPath, () => removeWorktreeLocked(projectPath, worktreePath))
+}
+
+/** The caller holds the repository lock. */
+async function removeWorktreeLocked(projectPath: string, worktreePath: string): Promise<boolean> {
   await killProcessesUnder(worktreePath)
   // Without --force, git keeps a worktree that has uncommitted or untracked files.
   const removed = await runGit(projectPath, ['worktree', 'remove', worktreePath])
-  if (removed.code !== 0) await runGit(projectPath, ['worktree', 'prune'])
+  if (removed.code === 0) return true
+  await runGit(projectPath, ['worktree', 'prune'])
+  const left = await stat(worktreePath).then(
+    () => true,
+    () => false
+  )
+  if (left) console.error('worktree remove', worktreePath, removed.stderr.trim())
+  return !left
 }
 
 /** Remove a chat's worktree and branch when it has no uncommitted files and no commits of its own. */
@@ -131,13 +158,18 @@ export async function dropWorktreeIfUnchanged(
   worktreePath: string,
   branch: string
 ): Promise<boolean> {
-  const status = await runGit(worktreePath, ['status', '--porcelain'])
-  if (status.code !== 0 || status.stdout.trim()) return false
-  const ahead = await runGit(projectPath, ['rev-list', '--count', `HEAD..${branch}`])
-  if (ahead.code !== 0 || ahead.stdout.trim() !== '0') return false
-  await removeChatWorktree(projectPath, worktreePath)
-  await runGit(projectPath, ['branch', '-d', branch])
-  return true
+  // Locked from the checks on, so nothing commits to the branch between "unchanged" and the delete.
+  return withRepoLock(projectPath, async () => {
+    const status = await runGit(worktreePath, ['status', '--porcelain'])
+    if (status.code !== 0 || status.stdout.trim()) return false
+    const ahead = await runGit(projectPath, ['rev-list', '--count', `HEAD..${branch}`])
+    if (ahead.code !== 0 || ahead.stdout.trim() !== '0') return false
+    if (!(await removeWorktreeLocked(projectPath, worktreePath))) return false
+    // The worktree is gone either way, so the caller still clears the chat's worktree fields.
+    const deleted = await runGit(projectPath, ['branch', '-d', branch])
+    if (deleted.code !== 0) console.error('branch delete', branch, deleted.stderr.trim())
+    return true
+  })
 }
 
 const READ_RE =
@@ -516,7 +548,8 @@ export async function stageGitPath(
   const repo = await resolveRepo(projectId, chatId)
   if ('snapshot' in repo) return { ok: false, error: repo.snapshot.error, snapshot: repo.snapshot }
   const rel = guardedPath(repo.path, path)
-  return afterAction(projectId, await runGit(repo.path, ['add', '--', rel]), chatId)
+  const result = await withRepoLock(repo.path, () => runGit(repo.path, ['add', '--', rel]))
+  return afterAction(projectId, result, chatId)
 }
 
 export async function unstageGitPath(
@@ -527,7 +560,8 @@ export async function unstageGitPath(
   const repo = await resolveRepo(projectId, chatId)
   if ('snapshot' in repo) return { ok: false, error: repo.snapshot.error, snapshot: repo.snapshot }
   const rel = guardedPath(repo.path, path)
-  return afterAction(projectId, await runGit(repo.path, ['restore', '--staged', '--', rel]), chatId)
+  const result = await withRepoLock(repo.path, () => runGit(repo.path, ['restore', '--staged', '--', rel]))
+  return afterAction(projectId, result, chatId)
 }
 
 export async function discardGitPath(
@@ -538,19 +572,23 @@ export async function discardGitPath(
   const repo = await resolveRepo(projectId, chatId)
   if ('snapshot' in repo) return { ok: false, error: repo.snapshot.error, snapshot: repo.snapshot }
   const rel = guardedPath(repo.path, path)
-  const snapshot = await getGitSnapshot(projectId, chatId)
-  const file = snapshot.files.find((item) => item.path === rel)
-  if (file?.unstaged === 'untracked' && !file.staged) {
-    await rm(resolve(repo.path, rel), { recursive: true, force: true })
-    return afterAction(projectId, { code: 0, stdout: '', stderr: '' }, chatId)
-  }
-  const restore = await runGit(repo.path, ['restore', '--staged', '--worktree', '--', rel])
-  if (restore.code !== 0 && file?.staged === 'added') {
-    await runGit(repo.path, ['restore', '--staged', '--', rel])
-    await rm(resolve(repo.path, rel), { recursive: true, force: true })
-    return afterAction(projectId, { code: 0, stdout: '', stderr: '' }, chatId)
-  }
-  return afterAction(projectId, restore, chatId)
+  // Locked from the status read on, so the file is discarded in the state it was read in.
+  const result = await withRepoLock(repo.path, async (): Promise<RunResult> => {
+    const snapshot = await getGitSnapshot(projectId, chatId)
+    const file = snapshot.files.find((item) => item.path === rel)
+    if (file?.unstaged === 'untracked' && !file.staged) {
+      await rm(resolve(repo.path, rel), { recursive: true, force: true })
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const restore = await runGit(repo.path, ['restore', '--staged', '--worktree', '--', rel])
+    if (restore.code !== 0 && file?.staged === 'added') {
+      await runGit(repo.path, ['restore', '--staged', '--', rel])
+      await rm(resolve(repo.path, rel), { recursive: true, force: true })
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    return restore
+  })
+  return afterAction(projectId, result, chatId)
 }
 
 export async function commitGit(
@@ -565,7 +603,8 @@ export async function commitGit(
     const snapshot = await getGitSnapshot(projectId, chatId)
     return { ok: false, error: 'Commit message is empty', snapshot }
   }
-  return afterAction(projectId, await runGit(repo.path, ['commit', '-m', text]), chatId)
+  const result = await withRepoLock(repo.path, () => runGit(repo.path, ['commit', '-m', text]))
+  return afterAction(projectId, result, chatId)
 }
 
 export async function checkoutGit(
@@ -580,7 +619,8 @@ export async function checkoutGit(
     const snapshot = await getGitSnapshot(projectId, chatId)
     return { ok: false, error: 'Invalid ref', snapshot }
   }
-  return afterAction(projectId, await runGit(repo.path, ['checkout', target]), chatId)
+  const result = await withRepoLock(repo.path, () => runGit(repo.path, ['checkout', target]))
+  return afterAction(projectId, result, chatId)
 }
 
 export async function createGitBranch(
@@ -600,7 +640,8 @@ export async function createGitBranch(
     const snapshot = await getGitSnapshot(projectId, chatId)
     return { ok: false, error: 'Invalid branch name', snapshot }
   }
-  return afterAction(projectId, await runGit(repo.path, ['checkout', '-b', branch]), chatId)
+  const created = await withRepoLock(repo.path, () => runGit(repo.path, ['checkout', '-b', branch]))
+  return afterAction(projectId, created, chatId)
 }
 
 /**
@@ -615,26 +656,33 @@ export async function mergeChatBranch(projectId: string, chatId: string): Promis
     error,
     snapshot: await getGitSnapshot(projectId, chatId)
   })
-  const target = await readMergeTarget(repo.projectPath, repo.worktreeBranch)
-  if (!repo.projectPath || !repo.worktreeBranch || !target) {
-    return fail('The project folder is not on a branch this chat can merge into')
-  }
-  if (target.commits === 0) return fail(`Nothing to merge: ${target.into} already has these commits`)
-  const own = await runGit(repo.path, ['status', '--porcelain'])
-  if (own.stdout.trim()) return fail('Commit or discard the chat’s changes first')
-  const main = await runGit(repo.projectPath, ['status', '--porcelain', '--untracked-files=no'])
-  if (main.stdout.trim()) {
-    return fail(`The project folder has uncommitted changes on ${target.into}. Commit or stash them first.`)
-  }
-  const merged = await runGit(repo.projectPath, ['merge', '--no-edit', repo.worktreeBranch])
-  if (merged.code !== 0) {
-    await runGit(repo.projectPath, ['merge', '--abort'])
-    return fail(
-      `Merging into ${target.into} conflicts, so nothing changed. Ask the chat to merge ${target.into} into its branch and resolve the conflicts, then try again.`
-    )
-  }
-  void broadcastGit(projectId, null)
-  return afterAction(projectId, merged, chatId)
+  // Locked from the checks on, so no other git write from this app lands between them and the merge.
+  return withRepoLock(repo.path, async () => {
+    const target = await readMergeTarget(repo.projectPath, repo.worktreeBranch)
+    if (!repo.projectPath || !repo.worktreeBranch || !target) {
+      return fail('The project folder is not on a branch this chat can merge into')
+    }
+    if (target.commits === 0) return fail(`Nothing to merge: ${target.into} already has these commits`)
+    const own = await runGit(repo.path, ['status', '--porcelain'])
+    if (own.stdout.trim()) return fail('Commit or discard the chat’s changes first')
+    const main = await runGit(repo.projectPath, ['status', '--porcelain', '--untracked-files=no'])
+    if (main.stdout.trim()) {
+      return fail(`The project folder has uncommitted changes on ${target.into}. Commit or stash them first.`)
+    }
+    const blocked = await mergeGuard(projectId, chatId)
+    if (blocked) return fail(blocked)
+    const merged = await runGit(repo.projectPath, ['merge', '--no-edit', repo.worktreeBranch])
+    if (merged.code !== 0) {
+      const merging = await runGit(repo.projectPath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])
+      if (merging.code !== 0) return fail(merged.stderr.trim() || `Could not merge into ${target.into}`)
+      await runGit(repo.projectPath, ['merge', '--abort'])
+      return fail(
+        `Merging into ${target.into} conflicts, so nothing changed. Ask the chat to merge ${target.into} into its branch and resolve the conflicts, then try again.`
+      )
+    }
+    void broadcastGit(projectId, null)
+    return afterAction(projectId, merged, chatId)
+  })
 }
 
 async function readGitBlob(cwd: string, spec: string): Promise<string> {
@@ -711,6 +759,8 @@ async function broadcastGit(projectId: string, chatId?: string | null): Promise<
     ])
     emitGit('git:snapshot', snapshot)
     emitGit('git:summaries', summaries)
+  } catch (error) {
+    console.error('git broadcast', error)
   } finally {
     runningBroadcast.delete(key)
     if (rerunBroadcast.has(key)) {
@@ -720,13 +770,19 @@ async function broadcastGit(projectId: string, chatId?: string | null): Promise<
   }
 }
 
+/** A watcher that errored is dropped; a later sync installs a fresh one. */
+function resyncSoon(): void {
+  if (resyncTimer) return
+  resyncTimer = setTimeout(() => {
+    resyncTimer = null
+    void syncGitWatchers()
+  }, 5_000)
+}
+
 async function watchGitDir(projectId: string, cwd: string): Promise<void> {
-  const existing = gitWatchers.get(projectId)
-  if (existing) {
-    existing.close()
-    gitWatchers.delete(projectId)
-  }
   const dir = await runGit(cwd, ['rev-parse', '--absolute-git-dir'])
+  gitWatchers.get(projectId)?.watcher.close()
+  gitWatchers.delete(projectId)
   if (dir.code !== 0) return
   try {
     const watcher = watch(dir.stdout.trim(), { persistent: false }, (_event, filename) => {
@@ -735,9 +791,10 @@ async function watchGitDir(projectId: string, cwd: string): Promise<void> {
     })
     watcher.on('error', () => {
       watcher.close()
-      gitWatchers.delete(projectId)
+      if (gitWatchers.get(projectId)?.watcher === watcher) gitWatchers.delete(projectId)
+      resyncSoon()
     })
-    gitWatchers.set(projectId, watcher)
+    gitWatchers.set(projectId, { watcher, cwd })
   } catch {
     /* watch unavailable */
   }
@@ -756,7 +813,8 @@ function watchWorktree(projectId: string, cwd: string, chatId: string | null): v
     })
     watcher.on('error', () => {
       watcher.close()
-      worktreeWatchers.delete(projectId)
+      if (worktreeWatchers.get(projectId) === watcher) worktreeWatchers.delete(projectId)
+      resyncSoon()
     })
     worktreeWatchers.set(projectId, watcher)
   } catch {
@@ -764,50 +822,71 @@ function watchWorktree(projectId: string, cwd: string, chatId: string | null): v
   }
 }
 
-export async function syncGitWatchers(): Promise<void> {
-  const projects = await listProjects()
-  const wanted = new Set(projects.map((project) => project.id))
-  for (const [id, watcher] of gitWatchers) {
-    if (wanted.has(id)) continue
-    watcher.close()
-    gitWatchers.delete(id)
+/** Runs one sync at a time, so two callers never install watchers for the same project. */
+export function syncGitWatchers(): Promise<void> {
+  syncChain = syncChain.then(syncGitWatchersNow)
+  return syncChain
+}
+
+async function syncGitWatchersNow(): Promise<void> {
+  try {
+    const projects = await listProjects()
+    const wanted = new Set(projects.map((project) => project.id))
+    for (const [id, entry] of gitWatchers) {
+      if (wanted.has(id)) continue
+      entry.watcher.close()
+      gitWatchers.delete(id)
+    }
+    for (const [id, watcher] of worktreeWatchers) {
+      if (wanted.has(id)) continue
+      watcher.close()
+      worktreeWatchers.delete(id)
+    }
+    for (const project of projects) {
+      const current = gitWatchers.get(project.id)
+      if (project.path && current?.cwd === project.path) continue
+      // The project is new, or its folder changed: watch the .git dir of its current path.
+      current?.watcher.close()
+      gitWatchers.delete(project.id)
+      if (!project.path) continue
+      const inside = await runGit(project.path, ['rev-parse', '--is-inside-work-tree'])
+      if (inside.code !== 0 || inside.stdout.trim() !== 'true') continue
+      await watchGitDir(project.id, project.path)
+    }
+    const active = activeWatch
+    const gen = activeGen
+    if (active) {
+      const repo = await resolveRepo(active.projectId, active.chatId)
+      if (gen === activeGen && !('snapshot' in repo)) watchWorktree(repo.id, repo.path, active.chatId)
+    }
+    emitGit('git:summaries', await getGitSummaries())
+  } catch (error) {
+    console.error('git watchers', error)
   }
-  for (const [id, watcher] of worktreeWatchers) {
-    if (wanted.has(id)) continue
-    watcher.close()
-    worktreeWatchers.delete(id)
-  }
-  for (const project of projects) {
-    if (!project.path || gitWatchers.has(project.id)) continue
-    const inside = await runGit(project.path, ['rev-parse', '--is-inside-work-tree'])
-    if (inside.code !== 0 || inside.stdout.trim() !== 'true') continue
-    await watchGitDir(project.id, project.path)
-  }
-  if (activeWatch) {
-    const repo = await resolveRepo(activeWatch.projectId, activeWatch.chatId)
-    if (!('snapshot' in repo)) watchWorktree(repo.id, repo.path, activeWatch.chatId)
-  }
-  emitGit('git:summaries', await getGitSummaries())
 }
 
 export async function setGitActiveProject(
   projectId: string | null,
   chatId?: string | null
 ): Promise<void> {
+  const gen = ++activeGen
   for (const watcher of worktreeWatchers.values()) watcher.close()
   worktreeWatchers.clear()
   activeWatch = projectId ? { projectId, chatId: chatId ?? null } : null
   if (!projectId) return
   const repo = await resolveRepo(projectId, chatId)
-  if ('snapshot' in repo) return
+  // Another project or chat became active while this one resolved.
+  if (gen !== activeGen || 'snapshot' in repo) return
   watchWorktree(repo.id, repo.path, chatId ?? null)
 }
 
 export function stopGitWatchers(): void {
-  for (const watcher of gitWatchers.values()) watcher.close()
+  for (const entry of gitWatchers.values()) entry.watcher.close()
   for (const watcher of worktreeWatchers.values()) watcher.close()
   gitWatchers.clear()
   worktreeWatchers.clear()
   for (const timer of pending.values()) clearTimeout(timer)
   pending.clear()
+  if (resyncTimer) clearTimeout(resyncTimer)
+  resyncTimer = null
 }

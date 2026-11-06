@@ -9,6 +9,7 @@ const WATCH_UA =
 const VR_UA =
   'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip'
 const VR_VERSION = '1.65.10'
+const FETCH_MS = 20_000
 
 type CaptionTrack = {
   languageCode: string
@@ -144,7 +145,8 @@ async function fetchWatchPage(videoId: string): Promise<{ html: string; cfg: Rec
     headers: {
       'User-Agent': WATCH_UA,
       'Accept-Language': 'en-US,en;q=0.9'
-    }
+    },
+    signal: AbortSignal.timeout(FETCH_MS)
   })
   if (!res.ok) throw new Error(`YouTube watch page returned ${res.status}`)
   const html = await res.text()
@@ -194,7 +196,8 @@ async function fetchPlayer(
       playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
       contentCheckOk: true,
       racyCheckOk: true
-    })
+    }),
+    signal: AbortSignal.timeout(FETCH_MS)
   })
   if (!res.ok) throw new Error(`YouTube player returned ${res.status}`)
   const data = (await res.json()) as {
@@ -232,7 +235,7 @@ async function fetchPlayer(
 
 async function fetchCaptionBody(baseUrl: string): Promise<string> {
   for (const url of [`${baseUrl}&fmt=json3`, `${baseUrl}&fmt=srv3`, baseUrl]) {
-    const res = await fetch(url, { headers: { 'User-Agent': VR_UA } })
+    const res = await fetch(url, { headers: { 'User-Agent': VR_UA }, signal: AbortSignal.timeout(FETCH_MS) })
     const body = await res.text()
     if (res.ok && body.trim()) return body
   }

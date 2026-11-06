@@ -35,11 +35,11 @@ export function claudeBinary(): string {
 }
 
 /** The ACP adapter that runs Claude Code on the user's own `claude auth login`. */
-export function claudeAcpCommand(): {
+export async function claudeAcpCommand(): Promise<{
   command: string
   args: string[]
   env: NodeJS.ProcessEnv
-} {
+}> {
   const resolved = createRequire(__filename).resolve('@agentclientprotocol/claude-agent-acp/dist/index.js')
   // In a packaged app the adapter and the Claude Code binary it launches must
   // be real files, so they ship unpacked next to the asar archive.
@@ -51,8 +51,15 @@ export function claudeAcpCommand(): {
   for (const key of INHERITED_SESSION_ENV) delete env[key]
   // An API key in the environment wins over the claude.ai login and bills the
   // API account. With a subscription signed in, keep the run on the subscription.
-  if (claudeSignedInCached()) delete env.ANTHROPIC_API_KEY
+  // Ask rather than trust the cache: the first chat after launch starts before anything filled it.
+  const info = await getClaudeCliInfo().catch(() => null)
+  if (info?.signedIn) delete env.ANTHROPIC_API_KEY
   return { command: process.execPath, args: [entry], env }
+}
+
+/** What the last probe found, however old. Null until one has finished. */
+export function peekClaudeCliInfo(): ClaudeCliInfo | null {
+  return cached
 }
 
 export async function getClaudeCliInfo(): Promise<ClaudeCliInfo> {
@@ -68,10 +75,6 @@ export async function getClaudeCliInfo(): Promise<ClaudeCliInfo> {
       inflight = null
     })
   return inflight
-}
-
-export function claudeSignedInCached(): boolean {
-  return cached?.signedIn === true
 }
 
 function probe(): Promise<ClaudeCliInfo> {

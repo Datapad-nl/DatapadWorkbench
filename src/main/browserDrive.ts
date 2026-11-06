@@ -87,6 +87,17 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
+let queue: Promise<unknown> = Promise.resolve()
+
+/** Runs drive calls one at a time, so parallel tool calls cannot interleave focus and typing. */
+function serial<A extends unknown[], T>(op: (...args: A) => Promise<T>): (...args: A) => Promise<T> {
+  return (...args) => {
+    const next = queue.then(() => op(...args))
+    queue = next.catch(() => undefined)
+    return next
+  }
+}
+
 function requirePage(): void {
   const { url } = getBrowserState()
   if (!url) throw new Error('No page is open. Call navigate first.')
@@ -99,11 +110,13 @@ async function settle(): Promise<BrowserState> {
   return getBrowserState()
 }
 
-export async function screenshot(): Promise<{ png: string; width: number; height: number }> {
+export const screenshot = serial(async (): Promise<{ png: string; width: number; height: number }> => {
   requirePage()
   if (!getBrowserState().visible) {
     requestShowBrowser()
-    await pause(400)
+    // The view is on screen once the pane has opened and sent its bounds.
+    for (let i = 0; i < 10 && !getBrowserState().visible; i += 1) await pause(200)
+    await pause(200)
   }
   let image = await browserContents().capturePage()
   if (image.isEmpty()) throw new Error('The BrowserPane is hidden or has no size, so there is nothing to capture.')
@@ -113,9 +126,9 @@ export async function screenshot(): Promise<{ png: string; width: number; height
   if (scale < 1) image = image.resize({ width: Math.floor(width * scale), height: Math.floor(height * scale) })
   const size = image.getSize()
   return { png: image.toPNG().toString('base64'), width: size.width, height: size.height }
-}
+})
 
-export async function snapshot(maxChars = 6000): Promise<Snapshot> {
+export const snapshot = serial(async (maxChars: number = 6000): Promise<Snapshot> => {
   requirePage()
   return run<Snapshot>(
     `
@@ -145,9 +158,9 @@ return { url: location.href, title: document.title, text: text.length > arg ? te
 `,
     maxChars
   )
-}
+})
 
-export async function click(target: Target): Promise<BrowserState> {
+export const click = serial(async (target: Target): Promise<BrowserState> => {
   requirePage()
   const point = await run<{ x: number; y: number } | null>(
     `
@@ -173,19 +186,20 @@ return null;
     await run('find(arg).click(); return null;', target)
   }
   return settle()
-}
+})
 
-export async function type(
+export const type = serial(async (
   target: Target | null,
   text: string,
   clear: boolean
-): Promise<BrowserState & { value: string | null }> {
+): Promise<BrowserState & { value: string | null }> => {
   requirePage()
   const kind = await run<'select' | 'field' | 'editable' | 'other'>(
     `
 const el = arg.target ? find(arg.target) : document.activeElement;
 if (!el || el === document.body) throw new Error('No field is focused. Pass ref, selector or text.');
 el.scrollIntoView({ block: 'center' });
+document.querySelectorAll('[data-wb-typing]').forEach((node) => node.removeAttribute('data-wb-typing'));
 if (el.tagName === 'SELECT') {
   const want = arg.text.trim().toLowerCase();
   const option = [...el.options].find((o) => o.value.toLowerCase() === want || o.text.trim().toLowerCase() === want);
@@ -196,7 +210,6 @@ if (el.tagName === 'SELECT') {
   el.setAttribute('data-wb-typing', '');
   return 'select';
 }
-document.querySelectorAll('[data-wb-typing]').forEach((node) => node.removeAttribute('data-wb-typing'));
 el.setAttribute('data-wb-typing', '');
 el.focus();
 if (arg.clear) {
@@ -229,7 +242,7 @@ return el.type === 'password' ? '••••' : String(el.value).slice(0, 200);
     { target, text, clear }
   )
   return { ...(await settle()), value }
-}
+})
 
 const KEY_NAMES: Record<string, string> = {
   arrowup: 'Up',
@@ -245,7 +258,7 @@ const KEY_NAMES: Record<string, string> = {
 type Modifier = 'shift' | 'control' | 'alt' | 'meta'
 const MODIFIERS = new Set<Modifier>(['shift', 'control', 'alt', 'meta'])
 
-export async function press(key: string, modifiers: string[] = []): Promise<BrowserState> {
+export const press = serial(async (key: string, modifiers: string[] = []): Promise<BrowserState> => {
   requirePage()
   const raw = key.trim()
   if (!raw) throw new Error('Pass a key, for example Enter or Escape')
@@ -261,13 +274,13 @@ export async function press(key: string, modifiers: string[] = []): Promise<Brow
   }
   wc.sendInputEvent({ type: 'keyUp', keyCode, modifiers: mods })
   return settle()
-}
+})
 
-export async function waitFor(
+export const waitFor = serial(async (
   selector: string | undefined,
   text: string | undefined,
-  timeoutMs = 5000
-): Promise<BrowserState & { found: boolean; waitedMs: number }> {
+  timeoutMs: number = 5000
+): Promise<BrowserState & { found: boolean; waitedMs: number }> => {
   requirePage()
   if (!selector && !text) throw new Error('Pass selector or text')
   const limit = Math.min(Math.max(timeoutMs, 100), 30_000)
@@ -285,14 +298,14 @@ return true;
     if (found || waitedMs >= limit) return { ...getBrowserState(), found, waitedMs }
     await pause(200)
   }
-}
+})
 
-export async function evaluate(expression: string): Promise<unknown> {
+export const evaluate = serial(async (expression: string): Promise<unknown> => {
   requirePage()
   // Inlined rather than eval'd, so pages whose CSP forbids eval still work.
   const script = `(async () => { const value = await (\n${expression}\n); try { return JSON.parse(JSON.stringify(value ?? null)); } catch { return String(value); } })()`
   return withTimeout(browserContents().executeJavaScript(script, true) as Promise<unknown>, 15_000)
-}
+})
 
 export function consoleLog(level?: string, limit = 50): ConsoleEntry[] {
   const wanted = level === 'error' ? ['error'] : level === 'warning' ? ['warning', 'error'] : null

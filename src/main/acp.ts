@@ -4,6 +4,7 @@ import { toAcpMcpServers } from '../shared/mcp'
 import { BROWSER_SESSION_RULE, browserMcpServers } from './browserAgent'
 import { claudeAcpCommand } from './claudeCli'
 import { grokBinary } from './grokCli'
+import { snapshotBeforeTool } from './checkpoints'
 import {
   askPermission,
   cancelAllPermissions,
@@ -13,6 +14,7 @@ import {
   fallbackSessionId,
   isMutatingTool,
   isPlanGateTool,
+  isSessionStopped,
   modeForSession,
   noteDeniedPermission,
   outcomeFor,
@@ -22,7 +24,7 @@ import {
 } from './permissions'
 import {
   askUserQuestions,
-  cancelAllQuestions,
+  cancelAgentQuestions,
   cancelSessionQuestions,
   elicitationResult,
   isElicitationMethod,
@@ -82,6 +84,8 @@ type Pending = {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout | null
+  method?: string
+  sessionId?: string
 }
 
 export type SessionUpdate = {
@@ -131,13 +135,17 @@ const EXIT_PLAN_LISTENERS = new Set<(input: { chatId: string; sessionId: string;
 const acpSessionModes = new Map<string, { current: string; available: SessionMode[] }>()
 const acpSessionCommands = new Map<string, AgentCommand[]>()
 const pendingExits = new Map<string, PendingExit>()
-const queuedVerdicts = new Map<string, ExitPlanOutcome>()
+const queuedVerdicts = new Map<string, { outcome: ExitPlanOutcome; at: number }>()
+/** A verdict given before the agent asked. Kept only briefly, so it cannot answer a later plan. */
+const QUEUED_VERDICT_TTL_MS = 60_000
 const SESSION_UPDATE_METHODS = new Set(['session/update', 'x.ai/session/update', '_x.ai/session/update'])
 
 /** One ACP agent process. Grok Build and Claude Code each get their own. */
 type Conn = {
   agent: ChatAgent
   proc: ChildProcessWithoutNullStreams | null
+  /** Counts spawns, so a timer can tell the process it meant from a respawn. */
+  generation: number
   ready: Promise<void> | null
   nextId: number
   pending: Map<number, Pending>
@@ -150,6 +158,7 @@ function makeConn(agent: ChatAgent): Conn {
   return {
     agent,
     proc: null,
+    generation: 0,
     ready: null,
     nextId: 1,
     pending: new Map(),
@@ -179,9 +188,9 @@ function promptRequestId(conn: Conn, id: number | string): string {
   return conn.agent === 'grok' ? String(id) : `${conn.agent}:${id}`
 }
 
-function spawnAgent(agent: ChatAgent): ChildProcessWithoutNullStreams {
+async function spawnAgent(agent: ChatAgent): Promise<ChildProcessWithoutNullStreams> {
   if (agent === 'claude') {
-    const { command, args, env } = claudeAcpCommand()
+    const { command, args, env } = await claudeAcpCommand()
     return spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env })
   }
   return spawn(grokBinary(), ['agent', '--no-leader', 'stdio'], {
@@ -203,40 +212,54 @@ function claudeOptions(options: PermissionOption[]): PermissionOption[] {
 type TurnWait = {
   done: boolean
   waiters: Array<() => void>
+  /** A turn we stopped waiting for still owes its turn_completed. That late one must not end the next turn. */
+  owed: number
 }
 
 const turnWaits = new Map<string, TurnWait>()
 
+function turnWait(sessionId: string): TurnWait {
+  const state = turnWaits.get(sessionId) ?? { done: false, waiters: [], owed: 0 }
+  turnWaits.set(sessionId, state)
+  return state
+}
+
 function beginTurn(sessionId: string): void {
-  const existing = turnWaits.get(sessionId)
-  if (existing) {
-    existing.done = false
-    return
-  }
-  turnWaits.set(sessionId, { done: false, waiters: [] })
+  turnWait(sessionId).done = false
 }
 
 function markTurnDone(sessionId: string): void {
-  const state = turnWaits.get(sessionId) ?? { done: false, waiters: [] }
+  const state = turnWait(sessionId)
   state.done = true
-  turnWaits.set(sessionId, state)
   const waiters = state.waiters.splice(0)
   for (const waiter of waiters) waiter()
 }
 
+/** A turn_completed from the agent. One owed by an earlier turn is used up instead. */
+function noteTurnCompleted(sessionId: string): void {
+  const state = turnWait(sessionId)
+  if (state.owed > 0 && !state.done) {
+    state.owed -= 1
+    return
+  }
+  markTurnDone(sessionId)
+}
+
 function waitForTurnEnd(sessionId: string, timeoutMs = 500): Promise<void> {
-  const state = turnWaits.get(sessionId)
-  if (state?.done) return Promise.resolve()
+  const state = turnWait(sessionId)
+  if (state.done) return Promise.resolve()
   return new Promise((resolve) => {
-    const next = turnWaits.get(sessionId) ?? { done: false, waiters: [] }
     const finish = (): void => {
       clearTimeout(timer)
-      next.waiters = next.waiters.filter((waiter) => waiter !== finish)
+      state.waiters = state.waiters.filter((waiter) => waiter !== finish)
       resolve()
     }
-    const timer = setTimeout(finish, timeoutMs)
-    next.waiters.push(finish)
-    turnWaits.set(sessionId, next)
+    const timer = setTimeout(() => {
+      // At most one is owed: an agent that skips turn_completed must not swallow every later one.
+      if (!state.done) state.owed = 1
+      finish()
+    }, timeoutMs)
+    state.waiters.push(finish)
   })
 }
 
@@ -265,6 +288,15 @@ function send(conn: Conn, payload: object): void {
   conn.proc.stdin.write(`${JSON.stringify(payload)}\n`)
 }
 
+/** An answer to the agent. If the agent has gone there is nobody left to answer. */
+function trySend(conn: Conn, payload: object): void {
+  try {
+    send(conn, payload)
+  } catch {
+    // the process exited while the user was deciding
+  }
+}
+
 function request<T>(conn: Conn, method: string, params: unknown, timeoutMs: number): Promise<T> {
   const id = conn.nextId++
   return new Promise<T>((resolve, reject) => {
@@ -278,12 +310,21 @@ function request<T>(conn: Conn, method: string, params: unknown, timeoutMs: numb
             reject(new Error(`${method} timed out`))
           }, timeoutMs)
         : null
+    const record = params && typeof params === 'object' ? (params as { sessionId?: unknown }) : null
     conn.pending.set(id, {
       resolve: (value) => resolve(value as T),
       reject,
-      timer
+      timer,
+      method,
+      sessionId: typeof record?.sessionId === 'string' ? record.sessionId : undefined
     })
-    send(conn, { jsonrpc: '2.0', id, method, params })
+    try {
+      send(conn, { jsonrpc: '2.0', id, method, params })
+    } catch (error) {
+      if (timer) clearTimeout(timer)
+      conn.pending.delete(id)
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
   })
 }
 
@@ -298,6 +339,13 @@ async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
     params.options = claudeOptions(params.options ?? [])
   }
   const options = params.options ?? []
+  // A tool asked for after the user pressed Stop does not run.
+  if (sessionId && isSessionStopped(sessionId)) {
+    if (message.id !== undefined) {
+      trySend(conn, { jsonrpc: '2.0', id: message.id, result: { outcome: { outcome: 'cancelled' } } })
+    }
+    return
+  }
   const mode = modeForSession(sessionId)
   const decision = decidePermission(mode, params)
   const requestId = message.id === undefined ? null : promptRequestId(conn, message.id)
@@ -309,7 +357,19 @@ async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
       : outcomeFor(options, decision === 'deny' ? 'deny' : 'allow')
 
   if (message.id === undefined) return
-  send(conn, { jsonrpc: '2.0', id: message.id, result })
+  // Save the files a tool is about to change before it is let through, so a rewind restores them.
+  if ('optionId' in result.outcome && !isRejectOption(options, result.outcome.optionId)) {
+    const chatId = chatIdForSession(sessionId)
+    if (chatId && params.toolCall) {
+      await snapshotBeforeTool(chatId, { sessionUpdate: 'tool_call', ...params.toolCall }).catch(() => {})
+    }
+  }
+  trySend(conn, { jsonrpc: '2.0', id: message.id, result })
+}
+
+function isRejectOption(options: PermissionOption[], optionId: string): boolean {
+  const kind = (options.find((option) => option.optionId === optionId)?.kind ?? '').toLowerCase()
+  return kind.startsWith('reject') || kind.startsWith('deny')
 }
 
 /** Show Claude Code's plan in the Workbench plan card and answer with the user's verdict. */
@@ -329,8 +389,7 @@ async function settleClaudeExitPlan(
     outcome === 'approved'
       ? (options.find((item) => item.optionId === CLAUDE_EXIT_PLAN_APPROVE) ?? pickOption(options, 'allow'))
       : pickOption(options, 'deny')
-  if (!conn.proc) return
-  send(conn, {
+  trySend(conn, {
     jsonrpc: '2.0',
     id: message.id,
     result: option
@@ -399,13 +458,19 @@ export function hasPendingExitPlan(chatId: string): boolean {
 }
 
 export function queueExitPlanVerdict(chatId: string, outcome: ExitPlanOutcome): void {
-  queuedVerdicts.set(chatId, outcome)
+  queuedVerdicts.set(chatId, { outcome, at: Date.now() })
 }
 
 export function takeQueuedExitPlanVerdict(chatId: string): ExitPlanOutcome | null {
-  const outcome = queuedVerdicts.get(chatId) ?? null
-  if (outcome) queuedVerdicts.delete(chatId)
-  return outcome
+  const queued = queuedVerdicts.get(chatId)
+  if (!queued) return null
+  queuedVerdicts.delete(chatId)
+  return Date.now() - queued.at <= QUEUED_VERDICT_TTL_MS ? queued.outcome : null
+}
+
+/** The turn ended without asking: its early verdict answers nothing. */
+export function clearQueuedExitPlanVerdict(chatId: string): void {
+  queuedVerdicts.delete(chatId)
 }
 
 export function resolveExitPlan(chatId: string, outcome: ExitPlanOutcome): boolean {
@@ -436,15 +501,6 @@ export function bindExitPlanSession(
       listener({ chatId, sessionId, markdown: item.markdown })
     }
   }
-}
-
-export async function waitForExitPlan(chatId: string, timeoutMs = 4000): Promise<boolean> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    if (hasPendingExitPlan(chatId)) return true
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  return hasPendingExitPlan(chatId)
 }
 
 function exitPlanResult(outcome: ExitPlanOutcome): Record<string, unknown> {
@@ -485,6 +541,8 @@ function awaitExitPlanVerdict(
   sessionId: string,
   markdown: string
 ): Promise<ExitPlanOutcome> {
+  // Stop already ended the turn: the plan it asks about is gone.
+  if (isSessionStopped(sessionId)) return Promise.resolve('abandoned')
   const chatId = chatIdForSession(sessionId) || ''
   const queued = chatId ? takeQueuedExitPlanVerdict(chatId) : null
   if (queued) return Promise.resolve(queued)
@@ -513,25 +571,25 @@ async function settleExitPlan(conn: Conn, message: JsonRpc): Promise<void> {
 
   const markdown = planMarkdownFromParams(params, sessionId)
   const outcome = await awaitExitPlanVerdict(conn, message.id, sessionId, markdown)
-  send(conn, { jsonrpc: '2.0', id: message.id, result: exitPlanResult(outcome) })
+  trySend(conn, { jsonrpc: '2.0', id: message.id, result: exitPlanResult(outcome) })
 }
 
 async function settleUserQuestion(conn: Conn, message: JsonRpc, kind: 'ext' | 'elicitation'): Promise<void> {
   if (message.id === undefined) return
   const parsed = parseAsk(message.params)
-  if (!parsed) {
+  const sessionId = sessionIdFrom(message.params)
+  if (!parsed || isSessionStopped(sessionId)) {
     const skipped = skipOutcome()
-    send(conn, {
+    trySend(conn, {
       jsonrpc: '2.0',
       id: message.id,
-      result: kind === 'elicitation' ? elicitationResult(skipped, []) : skipped
+      result: kind === 'elicitation' ? elicitationResult(skipped, parsed?.fields ?? []) : skipped
     })
     return
   }
-  const sessionId = sessionIdFrom(message.params)
   const outcome = await askUserQuestions(promptRequestId(conn, message.id), sessionId, parsed.questions, kind)
   const result = kind === 'elicitation' ? elicitationResult(outcome, parsed.fields) : outcome
-  send(conn, { jsonrpc: '2.0', id: message.id, result })
+  trySend(conn, { jsonrpc: '2.0', id: message.id, result })
 }
 
 function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
@@ -539,7 +597,7 @@ function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
     const params = message.params as SessionUpdate | undefined
     if (params?.sessionId) {
       if (params.update?.sessionUpdate === 'turn_completed') {
-        markTurnDone(params.sessionId)
+        noteTurnCompleted(params.sessionId)
       }
       const modeId = params.update?.currentModeId || params.update?.modeId
       if (params.update?.sessionUpdate === 'current_mode_update' && modeId) {
@@ -555,17 +613,17 @@ function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
   }
 
   if (message.method === 'session/request_permission') {
-    void settlePermission(conn, message)
+    void settlePermission(conn, message).catch(() => {})
     return true
   }
 
   if (isExitPlanMethod(message.method)) {
-    void settleExitPlan(conn, message)
+    void settleExitPlan(conn, message).catch(() => {})
     return true
   }
 
   if (isElicitationMethod(message.method)) {
-    void settleUserQuestion(conn, message, 'elicitation')
+    void settleUserQuestion(conn, message, 'elicitation').catch(() => {})
     return true
   }
 
@@ -573,7 +631,7 @@ function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
     isUserQuestionMethod(message.method) ||
     (Boolean(message.method) && message.id !== undefined && looksLikeUserQuestion(message.params))
   ) {
-    void settleUserQuestion(conn, message, 'ext')
+    void settleUserQuestion(conn, message, 'ext').catch(() => {})
     return true
   }
 
@@ -585,7 +643,7 @@ function handleMessage(conn: Conn, message: JsonRpc): void {
 
   if (message.id === undefined || typeof message.id !== 'number') {
     if (message.method && message.id !== undefined) {
-      send(conn, {
+      trySend(conn, {
         jsonrpc: '2.0',
         id: message.id,
         error: { code: -32601, message: `Method not found: ${message.method}` }
@@ -596,7 +654,7 @@ function handleMessage(conn: Conn, message: JsonRpc): void {
   const waiter = conn.pending.get(message.id)
   if (!waiter) {
     if (message.method) {
-      send(conn, {
+      trySend(conn, {
         jsonrpc: '2.0',
         id: message.id,
         error: { code: -32601, message: `Method not found: ${message.method}` }
@@ -684,19 +742,29 @@ function releaseAgentState(conn: Conn, reason: string): void {
   const other = conns[conn.agent === 'grok' ? 'claude' : 'grok']
   if (!other.proc) {
     cancelAllPermissions()
-    cancelAllQuestions()
-    return
+    // Project intake asks its questions without an agent. They outlive a crash.
+    cancelAgentQuestions()
+  } else {
+    for (const sessionId of sessions) {
+      cancelSessionPermissions(sessionId)
+      cancelSessionQuestions(sessionId)
+    }
   }
+  // These sessions are gone with the process. A new process starts its own.
   for (const sessionId of sessions) {
-    cancelSessionPermissions(sessionId)
-    cancelSessionQuestions(sessionId)
+    acpSessionModes.delete(sessionId)
+    acpSessionCommands.delete(sessionId)
+    if (sessionAgents.get(sessionId) === conn.agent) sessionAgents.delete(sessionId)
   }
 }
 
 function attachProcess(conn: Conn, child: ChildProcessWithoutNullStreams): void {
   conn.proc = child
+  conn.generation += 1
   const rl = readline.createInterface({ input: child.stdout })
   rl.on('line', (line) => {
+    // Lines still buffered from a process we already replaced belong to nobody.
+    if (conn.proc !== child) return
     const trimmed = line.trim()
     if (!trimmed.startsWith('{')) return
     try {
@@ -708,12 +776,17 @@ function attachProcess(conn: Conn, child: ChildProcessWithoutNullStreams): void 
   child.stderr.on('data', () => {
     // keep stderr from filling the pipe
   })
-  child.on('exit', () => {
+  const gone = (reason: string): void => {
     // An aborted process already released its state, and a new one may be running.
     if (conn.proc !== child) return
     conn.proc = null
     conn.ready = null
-    releaseAgentState(conn, conn.agent === 'claude' ? 'Claude Code exited' : 'Grok Build exited')
+    releaseAgentState(conn, reason)
+  }
+  child.on('exit', () => gone(conn.agent === 'claude' ? 'Claude Code exited' : 'Grok Build exited'))
+  // A binary that cannot start emits only 'error'. Without this the app would crash and nothing would release.
+  child.on('error', (error) => {
+    gone(`${conn.agent === 'claude' ? 'Claude Code' : 'Grok Build'} failed to start: ${error.message}`)
   })
 }
 
@@ -743,21 +816,28 @@ export function onSessionUpdate(listener: (update: SessionUpdate) => void): () =
 export async function ensureAgent(agent: ChatAgent = 'grok'): Promise<void> {
   const conn = conns[agent]
   if (conn.ready) return conn.ready
-  conn.ready = (async () => {
-    attachProcess(conn, spawnAgent(agent))
+  let child: ChildProcessWithoutNullStreams | null = null
+  const ready = (async () => {
+    child = await spawnAgent(agent)
+    attachProcess(conn, child)
     await handshake(
       agent,
       (method, params, timeoutMs) => request(conn, method, params, timeoutMs),
       'Datapad Workbench'
     )
   })()
+  conn.ready = ready
   try {
-    await conn.ready
+    await ready
   } catch (error) {
-    conn.ready = null
-    const child = conn.proc
-    conn.proc = null
-    child?.kill()
+    // Only clean up our own attempt. A later start may already own the connection.
+    const mine = child as ChildProcessWithoutNullStreams | null
+    if (conn.ready === ready) conn.ready = null
+    if (mine && conn.proc === mine) {
+      conn.proc = null
+      releaseAgentState(conn, error instanceof Error ? error.message : String(error))
+    }
+    mine?.kill()
     throw error
   }
 }
@@ -867,12 +947,12 @@ export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
   const next = claudeProbeQueue.then(async () => {
     const hit = claudeOptionsCache.get(key)
     if (hit) return hit
+    let sessionId: string
     try {
       await ensureAgent('claude')
-      const conn = conns.claude
       if (!claudeProbe) {
         claudeProbe = request<{ sessionId: string; configOptions?: unknown }>(
-          conn,
+          conns.claude,
           'session/new',
           { cwd: tmpdir(), mcpServers: [] },
           30_000
@@ -883,22 +963,26 @@ export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
           return result.sessionId
         })
       }
-      const sessionId = await claudeProbe
-      if (!claudeOptionsCache.has(key)) {
-        const result = await request<{ configOptions?: unknown }>(
-          conn,
-          'session/set_config_option',
-          { sessionId, configId: 'model', value: key },
-          8_000
-        )
-        const options = readClaudeOptions(result.configOptions)
-        if (options) claudeOptionsCache.set(key, options)
-      }
-      return claudeOptionsCache.get(key) ?? null
+      sessionId = await claudeProbe
     } catch {
-      resetClaudeOptions()
-      return null
+      // Only a failed probe is retried next time. The models already read stay known.
+      claudeProbe = null
+      return claudeOptionsCache.get(key) ?? null
     }
+    if (claudeOptionsCache.has(key)) return claudeOptionsCache.get(key) ?? null
+    try {
+      const result = await request<{ configOptions?: unknown }>(
+        conns.claude,
+        'session/set_config_option',
+        { sessionId, configId: 'model', value: key },
+        8_000
+      )
+      const options = readClaudeOptions(result.configOptions)
+      if (options) claudeOptionsCache.set(key, options)
+    } catch {
+      // One model Claude Code will not switch to says nothing about the others.
+    }
+    return claudeOptionsCache.get(key) ?? null
   })
   claudeProbeQueue = next
   return next
@@ -1026,10 +1110,11 @@ export async function fetchUsage(): Promise<UsageSnapshot> {
 
 export async function setAcpSessionMode(sessionId: string, modeId: string): Promise<boolean> {
   if (!sessionId || !modeId) return false
+  const conn = connForSession(sessionId)
+  // A fresh process does not know this session. The mode is applied when the chat next loads it.
+  if (!conn.proc || !conn.liveSessions.has(sessionId)) return false
   try {
-    const agent = agentForSession(sessionId)
-    await ensureAgent(agent)
-    await request(conns[agent], 'session/set_mode', { sessionId, modeId }, 15_000)
+    await request(conn, 'session/set_mode', { sessionId, modeId }, 15_000)
     const current = acpSessionModes.get(sessionId)
     if (current) acpSessionModes.set(sessionId, { ...current, current: modeId })
     return true
@@ -1073,14 +1158,35 @@ export async function promptSession(
 export function cancelSession(sessionId: string): void {
   const conn = connForSession(sessionId)
   if (!conn.proc) return
-  send(conn, { jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
+  trySend(conn, { jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } })
+}
+
+/** Which process an agent is on. A kill aimed at one process must not hit its replacement. */
+export function agentGeneration(agent: ChatAgent): number {
+  return conns[agent].generation
+}
+
+/** Whether another session on the same process is still waiting for its prompt to finish. */
+export function hasOtherActivePrompts(sessionId: string): boolean {
+  const conn = connForSession(sessionId)
+  for (const waiter of conn.pending.values()) {
+    if (waiter.method === 'session/prompt' && waiter.sessionId && waiter.sessionId !== sessionId) return true
+  }
+  return false
+}
+
+/** Kill both agents, for quitting. */
+export function stopAgents(): void {
+  abortAgent('grok')
+  abortAgent('claude')
 }
 
 /** Kill one agent's process. Chats on the other agent keep running. */
-export function abortAgent(agent: ChatAgent = 'grok'): void {
+export function abortAgent(agent: ChatAgent = 'grok', generation?: number): void {
   const conn = conns[agent]
   const child = conn.proc
   if (!child) return
+  if (generation !== undefined && generation !== conn.generation) return
   conn.proc = null
   conn.ready = null
   try {
@@ -1089,10 +1195,6 @@ export function abortAgent(agent: ChatAgent = 'grok'): void {
     // already gone
   }
   releaseAgentState(conn, 'cancelled')
-}
-
-export function isAgentRunning(): boolean {
-  return Object.values(conns).some((conn) => conn.proc !== null)
 }
 
 export async function promptIsolated(
@@ -1105,7 +1207,11 @@ export async function promptIsolated(
 ): Promise<string> {
   if (signal?.aborted) throw new Error('cancelled')
   const agent = options?.agent ?? 'grok'
-  const child = spawnAgent(agent)
+  const child = await spawnAgent(agent)
+  if (signal?.aborted) {
+    child.kill()
+    throw new Error('cancelled')
+  }
   let next = 1
   const waiters = new Map<number, Pending>()
   let assembled = ''
@@ -1113,6 +1219,14 @@ export async function promptIsolated(
   const write = (payload: object): void => {
     if (!child.stdin.writable) throw new Error('Aside agent is not running')
     child.stdin.write(`${JSON.stringify(payload)}\n`)
+  }
+  // Answers from the line handler: a throw there would be uncaught.
+  const answer = (payload: object): void => {
+    try {
+      write(payload)
+    } catch {
+      // the aside already stopped
+    }
   }
 
   const call = <T,>(method: string, params: unknown, timeoutMs: number): Promise<T> => {
@@ -1163,7 +1277,7 @@ export async function promptIsolated(
         isPlanGateTool(params) ||
         isMutatingTool(tool?.kind, tool?.title, tool?.name)
       if (message.id !== undefined) {
-        write({
+        answer({
           jsonrpc: '2.0',
           id: message.id,
           result: outcomeFor(agent === 'claude' ? claudeOptions(options) : options, deny ? 'deny' : 'allow')
@@ -1173,7 +1287,7 @@ export async function promptIsolated(
     }
     if (isExitPlanMethod(message.method)) {
       if (message.id !== undefined) {
-        write({ jsonrpc: '2.0', id: message.id, result: exitPlanResult('abandoned') })
+        answer({ jsonrpc: '2.0', id: message.id, result: exitPlanResult('abandoned') })
       }
       return
     }
@@ -1184,7 +1298,7 @@ export async function promptIsolated(
     ) {
       if (message.id !== undefined) {
         const skipped = skipOutcome()
-        write({
+        answer({
           jsonrpc: '2.0',
           id: message.id,
           result: isElicitationMethod(message.method)
@@ -1209,6 +1323,16 @@ export async function promptIsolated(
   const rl = readline.createInterface({ input: child.stdout })
   rl.on('line', onLine)
   child.stderr.on('data', () => undefined)
+  // A process that dies or never starts answers nothing. Without this the prompt waits forever.
+  const fail = (reason: string): void => {
+    for (const waiter of waiters.values()) {
+      if (waiter.timer) clearTimeout(waiter.timer)
+      waiter.reject(new Error(reason))
+    }
+    waiters.clear()
+  }
+  child.on('exit', () => fail('Aside agent exited'))
+  child.on('error', (error) => fail(`Aside agent failed to start: ${error.message}`))
 
   const stop = (): void => {
     for (const waiter of waiters.values()) {

@@ -80,7 +80,8 @@ export type UserQuestionRequest = {
   title?: string | null
 }
 
-export type ProjectIntakeStatus = 'completed' | 'skipped'
+/** `declined`: the user stopped answering after something was gathered. `skipped`: nothing was. */
+export type ProjectIntakeStatus = 'completed' | 'declined' | 'skipped'
 
 export type ProjectIntakeAnswer = {
   question: string
@@ -135,6 +136,8 @@ export type Chat = {
   updatedAt: string
   messages: Message[]
   mode?: PermissionMode
+  /** The mode before the chat went into plan mode. Settling the plan returns to it. */
+  prePlanMode?: PermissionMode | null
   plan?: ChatPlan | null
   checkpoints?: Checkpoint[]
   worktreePath?: string | null
@@ -221,12 +224,12 @@ export type UpdateState =
   | { status: 'error'; message: string }
 
 export type VoiceModelStatus = {
-  ready: boolean
-  downloading: boolean
+  state: 'idle' | 'downloading' | 'ready' | 'error'
   error: string | null
   file: string | null
-  loadedBytes: number
-  totalBytes: number
+  /** Files fetched so far, out of filesTotal. */
+  filesDone: number
+  filesTotal: number
 }
 
 export type GrokChannel = 'stable' | 'alpha' | 'unknown'
@@ -292,6 +295,8 @@ export type PublicSettings = {
   grokBuildSignedIn: boolean
   voice: VoiceSettings
   grokCli: GrokCliInfo
+  /** The first CLI probe is still running, so `grokCli` and `claude` are placeholders. */
+  cliChecking: boolean
 }
 
 export function formatGrokCli(cli: GrokCliInfo): string {
@@ -386,10 +391,15 @@ export type WorkspaceSnapshot = {
   indexes: Record<string, ProjectIndex>
 }
 
+/**
+ * Every turn has an id. `turn-start` comes first; `delta`, `done` and `error`
+ * carry the id, so events from a turn that already ended can be told apart.
+ */
 export type ChatEvent =
-  | { type: 'delta'; chatId: string; text: string }
-  | { type: 'done'; chatId: string; chat: Chat }
-  | { type: 'error'; chatId: string; error: string }
+  | { type: 'turn-start'; chatId: string; turnId: number }
+  | { type: 'delta'; chatId: string; turnId: number; text: string }
+  | { type: 'done'; chatId: string; turnId: number; chat: Chat }
+  | { type: 'error'; chatId: string; turnId: number; error: string }
   | { type: 'plan'; chatId: string; plan: ChatPlan }
   | { type: 'permission'; chatId: string; request: PermissionRequest }
   | { type: 'permission-clear'; chatId: string; requestId: string }
@@ -404,6 +414,13 @@ export type ChatEvent =
   | { type: 'commands'; chatId: string; commands: AgentCommand[] }
 
 export type AgentCommand = { name: string; description: string; hint?: string }
+
+/** What is running right now, for a window that loads or reloads mid-turn. */
+export type ChatLiveState = {
+  turns: Array<{ chatId: string; turnId: number; draft: string }>
+  permissions: PermissionRequest[]
+  questions: UserQuestionRequest[]
+}
 
 export function normalizePermissionMode(value: unknown): PermissionMode {
   if (value === 'ask' || value === 'accept' || value === 'plan') return value

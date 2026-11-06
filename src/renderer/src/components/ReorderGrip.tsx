@@ -15,14 +15,22 @@ function startReorder(event: React.PointerEvent<HTMLButtonElement>, onSwap: () =
     }
   }
 
-  function onUp(up: PointerEvent): void {
+  function stop(): void {
     target.removeEventListener('pointermove', onMove)
     target.removeEventListener('pointerup', onUp)
+    target.removeEventListener('pointercancel', stop)
+    target.removeEventListener('lostpointercapture', stop)
+  }
+
+  function onUp(up: PointerEvent): void {
+    stop()
     if (!swapped && Math.abs(up.clientX - startX) < 6 && Math.abs(up.clientY - startY) < 6) onSwap()
   }
 
   target.addEventListener('pointermove', onMove)
   target.addEventListener('pointerup', onUp)
+  target.addEventListener('pointercancel', stop)
+  target.addEventListener('lostpointercapture', stop)
 }
 
 export function ReorderGrip({

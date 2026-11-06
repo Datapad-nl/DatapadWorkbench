@@ -3,9 +3,10 @@ import { app } from 'electron'
 import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import type { Chat, Checkpoint } from '../shared/types'
+import { withRepoLock } from './gitLock'
 import { id, now, titleFromPrompt } from './ids'
 import { isMutatingTool } from './permissions'
-import { getChat, saveChat } from './store'
+import { getChat, mutateChat } from './store'
 import type { SessionUpdate } from './acp'
 
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
@@ -15,7 +16,8 @@ type Active = {
   checkpoint: Checkpoint
   root: string | null
   snapDir: string
-  seen: Set<string>
+  /** Each path's copy, so a second tool on the same file waits for the first copy. */
+  seen: Map<string, Promise<void>>
 }
 
 const active = new Map<string, Active>()
@@ -182,7 +184,9 @@ export async function startCheckpoint(input: {
   let gitSha: string | null = null
   if (input.cwd) {
     try {
-      gitSha = await createGitCheckpoint(input.cwd, input.chat.id, checkpointId)
+      const cwd = input.cwd
+      // Under the repo lock, so a commit or checkout from the Git pane can't change files mid-snapshot.
+      gitSha = await withRepoLock(cwd, () => createGitCheckpoint(cwd, input.chat.id, checkpointId))
     } catch {
       gitSha = null
     }
@@ -199,43 +203,66 @@ export async function startCheckpoint(input: {
     files: []
   }
 
-  active.set(input.chat.id, {
+  const entry = {
     checkpoint,
     root: input.cwd,
     snapDir,
-    seen: new Set()
-  })
+    seen: new Map()
+  }
+  active.set(input.chat.id, entry)
 
-  const chat = await getChat(input.chat.id)
-  chat.checkpoints = [...(chat.checkpoints ?? []), checkpoint]
-  await saveChat(chat)
+  try {
+    await mutateChat(input.chat.id, (chat) => {
+      chat.checkpoints = [...(chat.checkpoints ?? []), checkpoint]
+    })
+  } catch (error) {
+    // Nothing points at this checkpoint, so the files it would snapshot have nowhere to go.
+    if (active.get(input.chat.id) === entry) active.delete(input.chat.id)
+    throw error
+  }
   return checkpoint
 }
 
-export async function snapshotTouched(chatId: string, update: SessionUpdate['update']): Promise<void> {
-  const current = active.get(chatId)
-  if (!current?.root) return
-  if (!isMutatingTool(update.kind, update.title, update.name)) return
-
-  const paths = pathsFromUpdate(update, current.root)
-  for (const rel of paths) {
-    if (current.seen.has(rel)) continue
-    current.seen.add(rel)
-    current.checkpoint.files.push(rel)
-    await snapshotFile(current.root, rel, current.snapDir)
+function snapshotPaths(current: Active, update: SessionUpdate['update']): Promise<void> {
+  if (!current.root || !isMutatingTool(update.kind, update.title, update.name)) return Promise.resolve()
+  const root = current.root
+  const copies: Array<Promise<void>> = []
+  for (const rel of pathsFromUpdate(update, root)) {
+    let copy = current.seen.get(rel)
+    if (!copy) {
+      current.checkpoint.files.push(rel)
+      copy = snapshotFile(root, rel, current.snapDir).catch(() => {})
+      current.seen.set(rel, copy)
+    }
+    copies.push(copy)
   }
+  return Promise.all(copies).then(() => undefined)
 }
 
-export async function finishCheckpoint(chatId: string): Promise<Checkpoint | null> {
+/** Note the files a tool update names. The tool may already be running, so this is best effort. */
+export async function snapshotTouched(chatId: string, update: SessionUpdate['update']): Promise<void> {
   const current = active.get(chatId)
-  active.delete(chatId)
-  if (!current) return null
+  if (!current) return
+  await snapshotPaths(current, update)
+}
+
+/** Copy the files a tool will change before it is allowed to run. */
+export async function snapshotBeforeTool(chatId: string, update: SessionUpdate['update']): Promise<void> {
+  await snapshotTouched(chatId, update)
+}
+
+/** Save the turn's checkpoint once its copies are on disk. Only the turn that opened it may close it. */
+export async function finishCheckpoint(chatId: string, checkpointId: string): Promise<Checkpoint | null> {
+  const current = active.get(chatId)
+  if (!current || current.checkpoint.id !== checkpointId) return null
+  await Promise.all(current.seen.values())
+  if (active.get(chatId) === current) active.delete(chatId)
   try {
-    const chat = await getChat(chatId)
-    chat.checkpoints = (chat.checkpoints ?? []).map((item) =>
-      item.id === current.checkpoint.id ? current.checkpoint : item
-    )
-    await saveChat(chat)
+    await mutateChat(chatId, (chat) => {
+      chat.checkpoints = (chat.checkpoints ?? []).map((item) =>
+        item.id === current.checkpoint.id ? current.checkpoint : item
+      )
+    })
   } catch {
     // chat may have been deleted
   }
@@ -295,31 +322,37 @@ export async function deleteAllCheckpoints(chatId: string, cwd: string | null): 
 }
 
 export async function rewindTo(chatId: string, checkpointId: string, cwd: string | null): Promise<Chat> {
-  const chat = await getChat(chatId)
-  const checkpoints = chat.checkpoints ?? []
+  const loaded = await getChat(chatId)
+  const checkpoints = loaded.checkpoints ?? []
   const index = checkpoints.findIndex((item) => item.id === checkpointId)
   if (index === -1) throw new Error('Checkpoint not found')
   const target = checkpoints[index]
 
   if (cwd && target.gitSha) {
-    await restoreGit(cwd, target.gitSha)
+    const sha = target.gitSha
+    await withRepoLock(cwd, () => restoreGit(cwd, sha))
   }
   if (cwd) {
     await restoreSnapshots(cwd, snapDirFor(chatId, target.id), target.files)
   }
 
-  const keepUntil = chat.messages.findIndex((message) => message.id === target.messageId)
-  chat.messages = keepUntil === -1 ? chat.messages : chat.messages.slice(0, keepUntil)
-  chat.grokSessionId = null
-  chat.plan = null
-
-  const removed = checkpoints.slice(index)
-  chat.checkpoints = checkpoints.slice(0, index)
-  await saveChat(chat)
+  let removed: Checkpoint[] = []
+  const saved = await mutateChat(chatId, (chat) => {
+    // A chat imported from a session keeps its history outside the file until first written.
+    if (chat.messages.length === 0) chat.messages = loaded.messages
+    const keepUntil = chat.messages.findIndex((message) => message.id === target.messageId)
+    chat.messages = keepUntil === -1 ? chat.messages : chat.messages.slice(0, keepUntil)
+    chat.grokSessionId = null
+    chat.plan = null
+    const current = chat.checkpoints ?? []
+    const at = current.findIndex((item) => item.id === checkpointId)
+    removed = at === -1 ? [] : current.slice(at)
+    chat.checkpoints = at === -1 ? current : current.slice(0, at)
+  })
 
   for (const item of removed) {
     await deleteCheckpointArtifacts(item, cwd)
   }
   active.delete(chatId)
-  return chat
+  return saved
 }

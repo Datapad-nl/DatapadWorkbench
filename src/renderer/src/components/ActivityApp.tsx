@@ -391,11 +391,23 @@ export function ActivityApp(): React.JSX.Element {
   const [toggled, setToggled] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
+    let cancelled = false
+    let reset = false
     void window.workbench.getActivity().then((snapshot: ActivitySnapshot) => {
-      setEvents(snapshot.events)
+      if (cancelled || reset) return
+      // Upserts that arrived first are at least as new as the snapshot, so they win.
+      setEvents((current) => {
+        const live = new Map(current.map((event) => [event.id, event]))
+        const known = new Set(snapshot.events.map((event) => event.id))
+        return [
+          ...snapshot.events.map((event) => live.get(event.id) ?? event),
+          ...current.filter((event) => !known.has(event.id))
+        ]
+      })
     })
-    return window.workbench.onActivityEvent((feed) => {
+    const off = window.workbench.onActivityEvent((feed) => {
       if (feed.type === 'reset') {
+        reset = true
         setEvents(feed.events)
         setToggled({})
         return
@@ -410,6 +422,10 @@ export function ActivityApp(): React.JSX.Element {
         return [...current, feed.event]
       })
     })
+    return () => {
+      cancelled = true
+      off()
+    }
   }, [])
 
   const groups = useMemo(() => groupTurns(events), [events])

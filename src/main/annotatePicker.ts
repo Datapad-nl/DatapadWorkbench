@@ -147,8 +147,10 @@ export const ANNOTATE_PICKER = `(() => {
 
     window.__grokAnnotate = {
       _box: box,
-      cancel: function () { finish(null) },
-      cleanup: function () { cleanup() }
+      // Cancel always disarms, even a picker that already has a hit.
+      cancel: function () { finish(null); cleanup() },
+      // Cleanup is for a finished pick, so a late one cannot disarm a newer picker.
+      cleanup: function () { if (done) cleanup() }
     }
   })
 })()`

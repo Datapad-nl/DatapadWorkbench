@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'fs'
 import { readFile, readdir } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -128,27 +128,27 @@ export function readGrokPlan(sessionId: string): DiskPlan | null {
   }
 }
 
-export function clearGrokPlanApproval(sessionId: string): void {
+/**
+ * Mark Grok's plan as answered on disk. Revising keeps plan mode on: only the
+ * waiting flag goes, so the plan card does not come back on the next load.
+ */
+export function clearGrokPlanApproval(sessionId: string, options: { keepPlanMode?: boolean } = {}): void {
   const dir = findGrokSessionDir(sessionId)
   if (!dir) return
   const modePath = join(dir, 'plan_mode.json')
   if (!existsSync(modePath)) return
   try {
     const mode = JSON.parse(readFileSync(modePath, 'utf8')) as Record<string, unknown>
-    writeFileSync(
-      modePath,
-      JSON.stringify(
-        {
-          ...mode,
-          state: 'Inactive',
-          awaiting_plan_approval: false,
-          pending_exit_reminder: false
-        },
-        null,
-        2
-      ),
-      'utf8'
-    )
+    const next = {
+      ...mode,
+      ...(options.keepPlanMode ? {} : { state: 'Inactive' }),
+      awaiting_plan_approval: false,
+      pending_exit_reminder: false
+    }
+    // Grok reads this file too. Write a whole new file so it never sees half of one.
+    const temp = `${modePath}.${process.pid}.tmp`
+    writeFileSync(temp, JSON.stringify(next, null, 2), 'utf8')
+    renameSync(temp, modePath)
   } catch {
     // leave the file if it cannot be rewritten
   }

@@ -8,7 +8,7 @@ let transformersReady: Promise<typeof import('@huggingface/transformers')> | nul
 
 async function transformersEnv(): Promise<typeof import('@huggingface/transformers')> {
   if (transformersReady) return transformersReady
-  transformersReady = (async () => {
+  const ready = (async () => {
     const [tf, { ortMjs, ortWasm }] = await Promise.all([
       import('@huggingface/transformers'),
       import('./ortAssets')
@@ -23,7 +23,11 @@ async function transformersEnv(): Promise<typeof import('@huggingface/transforme
     }
     return tf
   })()
-  return transformersReady
+  transformersReady = ready
+  ready.catch(() => {
+    if (transformersReady === ready) transformersReady = null
+  })
+  return ready
 }
 
 export async function getAsr(): Promise<AsrPipeline> {

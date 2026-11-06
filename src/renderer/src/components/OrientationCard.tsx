@@ -31,6 +31,19 @@ function indexAction(state: IndexState | undefined): string {
   return 'Create index'
 }
 
+/** Starts indexing, ignoring clicks until main has taken the job. */
+function useIndexAction(projectId: string): { busy: boolean; start: () => void } {
+  const { indexProject } = useWorkspace()
+  const [busyFor, setBusyFor] = useState<string | null>(null)
+  const busy = busyFor === projectId
+  function start(): void {
+    if (busy) return
+    setBusyFor(projectId)
+    void indexProject(projectId).finally(() => setBusyFor(null))
+  }
+  return { busy, start }
+}
+
 export function IndexStatus({
   projectId,
   compact
@@ -38,7 +51,8 @@ export function IndexStatus({
   projectId: string
   compact?: boolean
 }): React.JSX.Element | null {
-  const { indexes, indexProject, projects } = useWorkspace()
+  const { indexes, projects } = useWorkspace()
+  const indexing = useIndexAction(projectId)
   const project = projects.find((item) => item.id === projectId)
   const index = indexes[projectId]
   const state = index?.state ?? (project?.path ? 'not-indexed' : 'no-folder')
@@ -68,7 +82,8 @@ export function IndexStatus({
           <button
             data-testid="create-index"
             className="shrink-0 rounded px-1 font-sans text-[11px] text-muted hover:bg-hover hover:text-ink"
-            onClick={() => void indexProject(projectId)}
+            disabled={indexing.busy}
+            onClick={indexing.start}
           >
             {indexAction(state)}
           </button>
@@ -98,7 +113,8 @@ export function IndexStatus({
         <button
           data-testid="create-index"
           className="rounded px-1.5 py-0.5 text-[9px] text-muted hover:bg-canvas hover:text-ink"
-          onClick={() => void indexProject(projectId)}
+          disabled={indexing.busy}
+          onClick={indexing.start}
         >
           {indexAction(state)}
         </button>
@@ -114,7 +130,8 @@ export function ProjectOrientation({
   projectId: string
   index?: ProjectIndex
 }): React.JSX.Element {
-  const { getOrientation, indexProject } = useWorkspace()
+  const { getOrientation } = useWorkspace()
+  const indexing = useIndexAction(projectId)
   const [card, setCard] = useState<OrientationCardData | null>(null)
 
   useEffect(() => {
@@ -171,7 +188,8 @@ export function ProjectOrientation({
         <button
           data-testid="create-index-card"
           className="mt-3 flex h-8 items-center rounded-[10px] bg-accent px-3.5 text-[12.5px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
-          onClick={() => void indexProject(projectId)}
+          disabled={indexing.busy}
+          onClick={indexing.start}
         >
           {indexAction(state)}
         </button>

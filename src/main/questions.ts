@@ -273,10 +273,21 @@ export function cancelSessionQuestions(sessionId: string): void {
   cancelMatching((item) => item.sessionId === sessionId)
 }
 
-export function cancelChatQuestions(chatId: string): void {
-  cancelMatching((item) => item.request.chatId === chatId)
+/** Intake asks under `intake:<chatId>` and has no agent turn. Stopping a turn leaves it alone. */
+function isIntake(item: PendingAsk): boolean {
+  return item.sessionId.startsWith('intake:')
 }
 
-export function cancelAllQuestions(): void {
-  cancelMatching(() => true)
+export function cancelChatQuestions(chatId: string, options: { keepIntake?: boolean } = {}): void {
+  cancelMatching((item) => item.request.chatId === chatId && !(options.keepIntake && isIntake(item)))
+}
+
+/** Every question an agent asked. Intake's own questions stay. */
+export function cancelAgentQuestions(): void {
+  cancelMatching((item) => !isIntake(item))
+}
+
+/** The questions still waiting for an answer, so a reloaded window can show them again. */
+export function pendingQuestionRequests(): UserQuestionRequest[] {
+  return [...pending.values()].map((item) => item.request)
 }

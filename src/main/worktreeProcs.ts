@@ -9,6 +9,7 @@ const CPU_HITS = 2
 const CPU_LIMIT = 80
 
 let timer: ReturnType<typeof setInterval> | null = null
+let reaping = false
 const cpuHits = new Map<number, number>()
 
 function isWorktreeCwd(cwd: string): boolean {
@@ -66,6 +67,15 @@ function terminate(pids: number[]): void {
   }
 }
 
+/** SIGTERM, then SIGKILL the pids that still run from a matching folder a moment later. */
+async function stopProcesses(pids: number[], matches: (cwd: string) => boolean): Promise<void> {
+  terminate(pids)
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
+  // A pid freed by SIGTERM can be reused, so look again rather than trust the old list.
+  const left = new Set((await nodeCwds()).filter((item) => matches(item.cwd)).map((item) => item.pid))
+  killForce(pids.filter((pid) => left.has(pid)))
+}
+
 function killForce(pids: number[]): void {
   for (const pid of pids) {
     try {
@@ -79,17 +89,16 @@ function killForce(pids: number[]): void {
 
 export async function killProcessesUnder(root: string): Promise<number> {
   const prefix = root.endsWith('/') ? root : `${root}/`
+  const under = (cwd: string): boolean => cwd === root || cwd.startsWith(prefix)
   const pids = [
     ...new Set(
       (await nodeCwds())
-        .filter((item) => item.cwd === root || item.cwd.startsWith(prefix))
+        .filter((item) => under(item.cwd))
         .map((item) => item.pid)
     )
   ]
   if (pids.length === 0) return 0
-  terminate(pids)
-  await new Promise((resolve) => setTimeout(resolve, 1_200))
-  killForce(pids)
+  await stopProcesses(pids, under)
   for (const pid of pids) cpuHits.delete(pid)
   return pids.length
 }
@@ -97,9 +106,7 @@ export async function killProcessesUnder(root: string): Promise<number> {
 export async function sweepWorktreeProcesses(): Promise<number> {
   const pids = [...new Set((await nodeCwds()).filter((item) => isWorktreeCwd(item.cwd)).map((item) => item.pid))]
   if (pids.length === 0) return 0
-  terminate(pids)
-  await new Promise((resolve) => setTimeout(resolve, 1_200))
-  killForce(pids)
+  await stopProcesses(pids, isWorktreeCwd)
   cpuHits.clear()
   return pids.length
 }
@@ -159,7 +166,12 @@ export function sweepWorktreeProcessesSync(): number {
 export function startWorktreeReaper(): void {
   if (timer) return
   timer = setInterval(() => {
-    void reapRunaways()
+    // A slow sweep (lsof, ps, kills) must not overlap the next one.
+    if (reaping) return
+    reaping = true
+    void reapRunaways().finally(() => {
+      reaping = false
+    })
   }, REAP_MS)
   timer.unref()
 }

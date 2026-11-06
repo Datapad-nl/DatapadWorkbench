@@ -108,10 +108,14 @@ function Shell(): React.JSX.Element {
       setDragging(null)
       target.removeEventListener('pointermove', onMove)
       target.removeEventListener('pointerup', onUp)
+      target.removeEventListener('pointercancel', onUp)
+      target.removeEventListener('lostpointercapture', onUp)
     }
 
     target.addEventListener('pointermove', onMove)
     target.addEventListener('pointerup', onUp)
+    target.addEventListener('pointercancel', onUp)
+    target.addEventListener('lostpointercapture', onUp)
   }
 
   const panes: Record<RightPaneId, React.JSX.Element> = {

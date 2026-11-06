@@ -11,6 +11,8 @@ import { id, now } from './ids'
 import { latestTaskLine } from './taskProgress'
 
 const MAX_EVENTS = 400
+/** Late updates still need their chat after the turn ends, so keep the most recently bound sessions. */
+const MAX_SESSIONS = 200
 
 type BoundChat = {
   id: string
@@ -151,7 +153,13 @@ function noteSignal(chatId: string | null, coalesceKey?: string): void {
 }
 
 export function bindSession(sessionId: string, chat: BoundChat): void {
+  // Rebinding moves the session to the back, so the least recently used one goes first.
+  sessions.delete(sessionId)
   sessions.set(sessionId, chat)
+  for (const oldest of sessions.keys()) {
+    if (sessions.size <= MAX_SESSIONS) break
+    sessions.delete(oldest)
+  }
 }
 
 export function lookupSession(sessionId: string): BoundChat | null {
@@ -168,7 +176,7 @@ export function onActivityFeed(listener: (feed: ActivityFeed) => void): () => vo
 function broadcast(feed: ActivityFeed): void {
   for (const listener of listeners) listener(feed)
   for (const window of BrowserWindow.getAllWindows()) {
-    window.webContents.send('activity:event', feed)
+    if (!window.isDestroyed()) window.webContents.send('activity:event', feed)
   }
 }
 
@@ -225,6 +233,11 @@ function emitActivity(
     const index = events.findIndex((event) => event.coalesceKey === incoming.coalesceKey)
     if (index >= 0) {
       const previous = events[index]
+      // A finished row stays finished: late chunks can't revive it. A goal row is reused across turns.
+      const revived =
+        (previous.status === 'done' || previous.status === 'error') &&
+        incoming.status === 'running' &&
+        !incoming.coalesceKey.startsWith('goal:')
       const merged: ActivityEvent = {
         ...previous,
         ...incoming,
@@ -235,7 +248,7 @@ function emitActivity(
             : previous.at,
         title: preferTitle(incoming.title, previous.title),
         toolKind: incoming.toolKind || previous.toolKind,
-        status: incoming.status ?? previous.status,
+        status: revived ? previous.status : (incoming.status ?? previous.status),
         detail: mergeDetail(previous, incoming),
         diffs:
           incoming.diffs && incoming.diffs.length > 0 ? incoming.diffs : previous.diffs,
@@ -252,10 +265,15 @@ function emitActivity(
   }
 
   events.push(incoming)
-  if (events.length > MAX_EVENTS) events.shift()
+  if (events.length > MAX_EVENTS) events.splice(events.findIndex((event) => !isLiveTurn(event)), 1)
   publish(incoming)
   noteSignal(incoming.chatId, incoming.coalesceKey)
   return incoming
+}
+
+/** The heartbeat and task feed hang off a running turn's row, so eviction and clearing keep it. */
+function isLiveTurn(event: ActivityEvent): boolean {
+  return event.kind === 'turn' && event.status === 'running'
 }
 
 function boundFields(sessionId: string | null): Pick<ActivityEvent, 'chatId' | 'chatTitle'> {
@@ -308,6 +326,8 @@ export function startTurn(input: {
 }): void {
   bindSession(input.sessionId, { id: input.chatId, title: input.chatTitle })
   turnStartedAt.set(input.chatId, Date.now())
+  // A turn that was superseded never finished: close its rows before they lose their keys.
+  settleRunning(input.chatId, 'done')
   // Each turn gets its own events: stop the last turn's rows from absorbing this one.
   for (const event of events) {
     if (event.chatId === input.chatId && event.coalesceKey && !event.coalesceKey.startsWith('goal:')) {
@@ -363,13 +383,20 @@ export function finishTurn(chatId: string, status: Exclude<ActivityStatus, 'runn
     status,
     coalesceKey: `turn:${chatId}`
   })
+  settleRunning(chatId, status)
+}
 
-  for (const event of events) {
-    if (event.chatId !== chatId || event.status !== 'running' || event.kind === 'turn') continue
-    emitActivity({
+/** Finishes the chat's running rows in place, including rows that no longer have a coalesce key. */
+function settleRunning(chatId: string, status: Exclude<ActivityStatus, 'running'>): void {
+  for (const [index, event] of events.entries()) {
+    if (event.chatId !== chatId || event.status !== 'running') continue
+    const settled: ActivityEvent = {
       ...event,
-      status: status === 'error' && event.kind !== 'thought' ? 'error' : 'done'
-    })
+      status: status === 'error' && event.kind !== 'thought' ? 'error' : 'done',
+      endedAt: now()
+    }
+    events[index] = settled
+    publish(settled)
   }
 }
 
@@ -377,13 +404,12 @@ export function getActivitySnapshot(): ActivitySnapshot {
   return { events: [...events] }
 }
 
+/** Clears everything but running turns, whose timers keep going until finishTurn stops them. */
 export function clearActivity(): ActivitySnapshot {
   flushBroadcasts()
-  for (const chatId of quietTimers.keys()) clearQuiet(chatId)
-  for (const chatId of [...taskPolls.keys()]) stopTaskPoll(chatId)
-  turnStartedAt.clear()
-  events.length = 0
-  broadcast({ type: 'reset', events: [] })
+  const live = events.filter(isLiveTurn)
+  events.splice(0, events.length, ...live)
+  broadcast({ type: 'reset', events: [...live] })
   return getActivitySnapshot()
 }
 

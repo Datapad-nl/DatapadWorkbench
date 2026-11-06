@@ -18,6 +18,7 @@ import {
   isSpeaking,
   openLiveMicStream,
   primeTtsOutput,
+  releaseAudio,
   resetSpokenLog,
   resetVoiceMotion,
   speakableText,
@@ -27,18 +28,18 @@ import {
   stopAside,
   warmAsideVoice,
   textLanguage,
-  startNativeSpeech,
   startRecorder,
   stopSpeaking,
   takeSpeakableDelta,
   transcribePcm,
   isJunkTranscript,
-  type NativeSpeech,
   type PcmClip,
   type Recorder
 } from './engine'
 
 export type VoiceUiStatus = 'idle' | 'loading' | 'listening' | 'transcribing' | 'waiting' | 'speaking' | 'error'
+
+type ListenOptions = { preserveSpeech?: boolean; context?: AudioContext; stream?: MediaStream }
 
 type VoiceContextValue = {
   enabled: boolean
@@ -64,21 +65,20 @@ type VoiceContextValue = {
 const VoiceContext = createContext<VoiceContextValue | null>(null)
 
 const emptyModel: VoiceModelStatus = {
-  ready: false,
-  downloading: false,
+  state: 'idle',
   error: null,
   file: null,
-  loadedBytes: 0,
-  totalBytes: 0
+  filesDone: 0,
+  filesTotal: 0
 }
 
 export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.Element {
-  const { settings, activeChatId, chatsById, sendMessage, saveSettings } = useWorkspace()
+  const { settings, activeChatId, chatsById, sendMessage } = useWorkspace()
   const streams = useStreams()
   const activeStreaming = Boolean(activeChatId && streams[activeChatId]?.status === 'streaming')
   const progress = useChatProgress(activeChatId, activeStreaming)
   const voice: VoiceSettings = settings?.voice ?? DEFAULT_VOICE
-  const [status, setStatus] = useState<VoiceUiStatus>('idle')
+  const [status, setStatusState] = useState<VoiceUiStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [model, setModel] = useState<VoiceModelStatus>(emptyModel)
   const [pendingTranscript, setPendingTranscript] = useState<string | null>(null)
@@ -93,13 +93,12 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   const levelFrame = useRef(0)
   const pendingLevel = useRef({ rms: 0, heard: false, silentFor: 0 })
   const primedChats = useRef(new Set<string>())
-  const clipBusy = useRef(false)
-  const listenLock = useRef(false)
-  const enablingRef = useRef(false)
+  const clipBusy = useRef<object | null>(null)
+  const listenLock = useRef<object | null>(null)
+  /** Bumped by stopAll. Work that started under an older session drops its result. */
+  const micSession = useRef(0)
+  const startListenRef = useRef<(opts?: ListenOptions) => Promise<void>>(async () => undefined)
   const awaitingReply = useRef(false)
-  const committedRef = useRef('')
-  const speechRef = useRef<NativeSpeech | null>(null)
-  const speechIgnoreEnd = useRef(false)
   const speakEpoch = useRef(0)
   const statusRef = useRef<VoiceUiStatus>('idle')
   const voiceRef = useRef(voice)
@@ -114,7 +113,6 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   const speakableLen = useRef(0)
   const turnChat = useRef<string | null>(null)
 
-  statusRef.current = status
   voiceRef.current = voice
   activeChatIdRef.current = activeChatId
   streamsRef.current = streams
@@ -122,9 +120,23 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   progressRef.current = progress
   userTalkingRef.current = userTalking
 
+  // The ref changes with the state, so code that reads it before the next render sees the new status.
+  const setStatus = useCallback((next: VoiceUiStatus) => {
+    statusRef.current = next
+    setStatusState(next)
+  }, [])
+
+  // Main pushes every status change, so pushes are the one writer. The first read only fills in until one arrives.
   useEffect(() => {
-    void window.workbench.getVoiceModelStatus().then(setModel)
-    return window.workbench.onVoiceModelStatus(setModel)
+    let pushed = false
+    const off = window.workbench.onVoiceModelStatus((next) => {
+      pushed = true
+      setModel(next)
+    })
+    void window.workbench.getVoiceModelStatus().then((next) => {
+      if (!pushed) setModel(next)
+    })
+    return off
   }, [])
 
   useEffect(() => {
@@ -142,10 +154,15 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     stopAside()
     stopSpeaking()
     if (statusRef.current === 'speaking') {
-      const stillWorking = streamsRef.current[chatId]?.status === 'streaming' || liveRef.current
-      setStatus(stillWorking ? 'waiting' : 'idle')
+      // Muting a finished reply ends the turn; its own settle is cancelled with the speech.
+      if (streamsRef.current[chatId]?.status === 'streaming') {
+        setStatus('waiting')
+      } else {
+        awaitingReply.current = false
+        setStatus(recorder.current ? 'listening' : 'idle')
+      }
     }
-  }, [])
+  }, [setStatus])
 
   useEffect(() => {
     if (!activeChatId) return
@@ -155,10 +172,24 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     if (last?.role === 'assistant') speechState(activeChatId).ids.add(last.id)
   }, [activeChatId, chatsById])
 
+  // A deleted chat leaves chatsById, and its speech state goes with it.
+  useEffect(() => {
+    for (const chatId of speechByChat.keys()) {
+      if (!chatsById[chatId]) speechByChat.delete(chatId)
+    }
+    for (const chatId of primedChats.current) {
+      if (!chatsById[chatId]) primedChats.current.delete(chatId)
+    }
+  }, [chatsById])
+
   const stopAll = useCallback(() => {
+    micSession.current += 1
     liveRef.current = false
     awaitingReply.current = false
-    committedRef.current = ''
+    clipBusy.current = null
+    listenLock.current = null
+    cancelAnimationFrame(levelFrame.current)
+    levelFrame.current = 0
     setCaption('')
     setLive(false)
     setUserTalking(false)
@@ -168,41 +199,53 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     speakEpoch.current += 1
     stopAside()
     stopSpeaking()
-    speechIgnoreEnd.current = true
-    speechRef.current?.stop()
-    speechRef.current = null
+    releaseAudio()
+    // Spoken replies would pick the stream up again at its next words. The next turn speaks as usual.
+    const chatId = activeChatIdRef.current
+    if (
+      chatId &&
+      streamsRef.current[chatId]?.status === 'streaming' &&
+      voiceRef.current.enabled &&
+      voiceRef.current.speakReplies
+    ) {
+      speechState(chatId).silenced = true
+      setReplyMuted(true)
+    }
     const current = recorder.current
     recorder.current = null
     if (current) void current.stop()
     setStatus('idle')
-  }, [])
+  }, [setStatus])
 
-  const handleClip = useCallback(async (clip: PcmClip) => {
-    if (clipBusy.current) return
-    clipBusy.current = true
-    recorder.current = null
+  const handleClip = useCallback(async (clip: PcmClip, session: number, source?: Recorder) => {
+    if (source && recorder.current === source) recorder.current = null
+    if (session !== micSession.current || clipBusy.current) return
+    const busy = {}
+    clipBusy.current = busy
+    const stale = (): boolean => session !== micSession.current
+    cancelAnimationFrame(levelFrame.current)
+    levelFrame.current = 0
     setUserTalking(false)
     setLevel(0)
     setBands([0, 0, 0, 0, 0, 0, 0])
     const looping = liveRef.current
     const talking = isSpeaking() || statusRef.current === 'speaking' || awaitingReply.current
-    if (clip.samples.length < SAMPLE_FLOOR) {
-      clipBusy.current = false
-      if (looping) {
-        if (!talking) setStatus('idle')
+    try {
+      if (clip.samples.length < SAMPLE_FLOOR) {
+        if (looping) {
+          if (!talking) setStatus('idle')
+          return
+        }
+        setError("Didn't catch that")
+        setStatus('idle')
         return
       }
-      setError("Didn't catch that")
-      setStatus('idle')
-      return
-    }
-    if (!talking) setStatus('transcribing')
-    try {
+      if (!talking) setStatus('transcribing')
       const text = await transcribePcm(clip.samples, clip.sampleRate, clip.heardSpeech)
+      if (stale()) return
       const spoken = activeChatIdRef.current ? heardText(activeChatIdRef.current) : progressSpokenText
       const bargeIn = looping && talking
-      const leftover = leftoverSpeak(text, committedRef.current)
-      committedRef.current = ''
+      const leftover = text.replace(/\s+/g, ' ').trim()
       setCaption('')
       if (!leftover && !text) {
         if (!looping) setError("Didn't catch that")
@@ -227,83 +270,34 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
           stopSpeaking()
           speakEpoch.current += 1
         }
-        await sendMessage(chatId, leftover)
-        setStatus(looping ? 'waiting' : 'idle')
+        const sent = await sendMessage(chatId, leftover)
+        if (stale()) return
+        if (!looping) {
+          setStatus('idle')
+        } else if (!sent) {
+          // The chat shows the error. The turn is over, so the loop listens again.
+          awaitingReply.current = false
+          setStatus('idle')
+        } else if (awaitingReply.current && statusRef.current !== 'speaking') {
+          // A quick reply can already be speaking or done by the time the send resolves.
+          setStatus('waiting')
+        }
         return
       }
       setPendingTranscript(leftover)
       setStatus('idle')
     } catch (err) {
+      if (stale()) return
       const message = err instanceof Error ? err.message : 'Could not transcribe'
       setError(/bad_alloc|session/i.test(message) ? 'Speech engine ran out of memory. Pause, then try again.' : message)
       setStatus('error')
     } finally {
-      clipBusy.current = false
-      if (liveRef.current) void startListen({ preserveSpeech: true })
+      if (clipBusy.current === busy) clipBusy.current = null
+      if (liveRef.current && !stale()) void startListenRef.current({ preserveSpeech: true })
     }
-  }, [sendMessage])
+  }, [sendMessage, setStatus])
 
-  const handleSpeechFinal = useCallback(
-    async (text: string) => {
-      const chatId = activeChatIdRef.current
-      if (!chatId || !text.trim() || isJunkTranscript(text)) return
-      const spoken = heardText(chatId)
-      if (isSpeaking() && isLikelyEcho(text, spoken)) return
-      setCaption('')
-      setError(null)
-      if (liveRef.current) {
-        awaitingReply.current = true
-        stopAside()
-        stopSpeaking()
-        speakEpoch.current += 1
-        await sendMessage(chatId, text.trim())
-        setStatus('waiting')
-        return
-      }
-      if (voiceRef.current.autoSend) {
-        await sendMessage(chatId, text.trim())
-        setStatus('idle')
-        return
-      }
-      setPendingTranscript(text.trim())
-      setStatus('idle')
-    },
-    [sendMessage]
-  )
-
-  const beginSpeech = useCallback(() => {
-    if (speechRef.current) return
-    speechIgnoreEnd.current = false
-    try {
-      speechRef.current = startNativeSpeech({
-        onCaption: (text) => {
-          if (liveRef.current) setCaption(text)
-        },
-        onFinal: (text) => {
-          void handleSpeechFinal(text)
-        },
-        onError: (message) => {
-          if (message === 'network') {
-            setError('Speech recognition needs a network connection')
-            return
-          }
-          setError(message)
-        },
-        onEnd: () => {
-          speechRef.current = null
-          if (liveRef.current && !speechIgnoreEnd.current) beginSpeech()
-        }
-      })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not start speech recognition')
-    }
-  }, [handleSpeechFinal])
-
-  const startListen = useCallback(async (opts?: {
-    preserveSpeech?: boolean
-    context?: AudioContext
-    stream?: MediaStream
-  }) => {
+  const startListen = useCallback(async (opts?: ListenOptions) => {
     if (opts?.stream) {
       if (recorder.current) {
         const previous = recorder.current
@@ -320,11 +314,14 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       stopAside()
       stopSpeaking()
     }
-    listenLock.current = true
+    const session = micSession.current
+    const lock = {}
+    listenLock.current = lock
     setError(null)
-    setStatus('loading')
+    // A mic that reopens during a reply keeps the reply's status.
+    if (statusRef.current !== 'speaking' && statusRef.current !== 'waiting') setStatus('loading')
     try {
-      const rec = await startRecorder({
+      const rec: Recorder = await startRecorder({
         context: opts?.context,
         stream: opts?.stream,
         deviceId: voiceRef.current.micDeviceId || undefined,
@@ -344,21 +341,32 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         },
         idleStop: true,
         onAutoStop: (clip) => {
-          void handleClip(clip)
+          void handleClip(clip, session, rec)
         }
       })
+      if (session !== micSession.current) {
+        void rec.stop()
+        return
+      }
+      // Another start can finish while this one awaited, and its recorder must not stay open.
+      // The cast undoes narrowing from before the await.
+      const previous = recorder.current as Recorder | null
       recorder.current = rec
+      if (previous) void previous.stop()
       if (statusRef.current !== 'speaking' && statusRef.current !== 'waiting') setStatus('listening')
-      void window.workbench.ensureVoiceModel().then(setModel).catch(() => undefined)
+      // The status push updates the model state; this only starts the download.
+      void window.workbench.ensureVoiceModel().catch(() => undefined)
     } catch (err) {
+      if (session !== micSession.current) return
       liveRef.current = false
       setLive(false)
       setError(err instanceof Error ? err.message : 'Could not start the microphone')
       setStatus('error')
     } finally {
-      listenLock.current = false
+      if (listenLock.current === lock) listenLock.current = null
     }
-  }, [handleClip])
+  }, [handleClip, setStatus])
+  startListenRef.current = startListen
 
   const toggleListen = useCallback(() => {
     if (voiceRef.current.conversation) {
@@ -375,7 +383,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       const current = recorder.current
       recorder.current = null
       if (current) {
-        void current.stop().then((clip) => handleClip(clip))
+        const session = micSession.current
+        void current.stop().then((clip) => handleClip(clip, session))
         return
       }
       setStatus('idle')
@@ -383,54 +392,59 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     }
     if (statusRef.current === 'transcribing') return
     void startListen()
-  }, [handleClip, startListen, stopAll])
+  }, [handleClip, setStatus, startListen, stopAll])
 
   const toggleConversation = useCallback(() => {
     if (liveRef.current) {
-      enablingRef.current = false
-      const current = recorder.current
-      recorder.current = null
-      liveRef.current = false
-      setLive(false)
-      setStatus('idle')
-      if (current) void current.stop().then((clip) => handleClip(clip))
-      else stopAll()
+      // Ending the conversation drops the clip in progress and any reply still playing.
+      stopAll()
       return
     }
     liveRef.current = true
-    enablingRef.current = true
-    committedRef.current = ''
     setCaption('')
     setLive(true)
     setError(null)
     setStatus('loading')
     primeTtsOutput()
     const current = voiceRef.current
-    void saveSettings({
-      voice: { enabled: true, conversation: true, speakReplies: true, autoSend: true }
-    }).finally(() => {
-      enablingRef.current = false
-    })
+    const session = micSession.current
+    // Live mode speaks and sends on its own, so saved settings stay as the user left them and a reload
+    // does not keep speaking or sending after the conversation ended.
     void (async () => {
       try {
         if (!navigator.mediaDevices?.getUserMedia) {
           throw new Error('This window cannot access the microphone')
         }
         const stream = await openLiveMicStream(current.micDeviceId || undefined)
-        if (!liveRef.current) {
+        if (!liveRef.current || session !== micSession.current) {
           stream.getTracks().forEach((track) => track.stop())
           return
         }
         await startListen({ preserveSpeech: true, stream })
       } catch (err) {
         console.error('conversation mic', err)
+        if (session !== micSession.current) return
         liveRef.current = false
         setLive(false)
         setError(err instanceof Error ? err.message : 'Could not start the microphone')
         setStatus('error')
       }
     })()
-  }, [handleClip, saveSettings, startListen, stopAll])
+  }, [setStatus, startListen, stopAll])
+
+  // Only the open chat is read aloud, so switching chats ends the old chat's speech and turn.
+  const spokenChat = useRef(activeChatId)
+  useEffect(() => {
+    if (spokenChat.current === activeChatId) return
+    spokenChat.current = activeChatId
+    speakEpoch.current += 1
+    stopAside()
+    stopSpeaking()
+    awaitingReply.current = false
+    if (statusRef.current === 'speaking' || statusRef.current === 'waiting') {
+      setStatus(recorder.current ? 'listening' : 'idle')
+    }
+  }, [activeChatId, setStatus])
 
   useEffect(() => {
     const shouldSpeak = liveRef.current || (voice.enabled && voice.speakReplies)
@@ -441,6 +455,10 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     if (stream?.status === 'streaming') {
       if (!spoken.hearing) {
         spoken.hearing = true
+        // A new turn. The last reply's text no longer prefixes the draft, and its chunks may be said again.
+        spoken.plain = ''
+        spoken.draftLen = 0
+        resetSpokenLog()
         if (spoken.silenced) {
           spoken.silenced = false
           setReplyMuted(false)
@@ -477,7 +495,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       spoken.plain = consumed
       setStatus('speaking')
       void speakText(speak, voice, { append: true, lang: speechLanguage(raw, voice) }).catch((err) => {
-        if (streams[activeChatId]?.status !== 'streaming') return
+        if (streamsRef.current[activeChatId]?.status !== 'streaming') return
         setError(err instanceof Error ? err.message : 'Could not speak')
         setStatus('error')
       })
@@ -491,12 +509,23 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       const epoch = ++speakEpoch.current
       void speakText('', voice, { append: true }).finally(() => {
         if (epoch !== speakEpoch.current) return
-        if (statusRef.current === 'speaking') setStatus('idle')
+        // The turn failed, so it is over: stop waiting for a reply and keep the loop listening.
+        awaitingReply.current = false
+        if (statusRef.current === 'speaking' || statusRef.current === 'waiting') {
+          setStatus(recorder.current ? 'listening' : 'idle')
+        }
+        if (liveRef.current && !recorder.current) void startListen({ preserveSpeech: true })
       })
       return
     }
-    if (!last || last.role !== 'assistant') return
-    if (spoken.ids.has(last.id)) return
+    if (!last || last.role !== 'assistant' || spoken.ids.has(last.id)) {
+      // A turn that ended with no new reply, such as a stopped chat, also ends the wait.
+      if (awaitingReply.current && statusRef.current === 'waiting') {
+        awaitingReply.current = false
+        setStatus(recorder.current ? 'listening' : 'idle')
+      }
+      return
+    }
     spoken.ids.add(last.id)
     const userText = latestUserText(chat?.messages)
     const raw = dropSpokenUserEcho(speakableText(last.content), userText, true)
@@ -519,7 +548,9 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       .finally(() => {
         if (epoch !== speakEpoch.current) return
         awaitingReply.current = false
-        if (statusRef.current === 'speaking' || statusRef.current === 'waiting') setStatus('idle')
+        if (statusRef.current === 'speaking' || statusRef.current === 'waiting') {
+          setStatus(recorder.current ? 'listening' : 'idle')
+        }
         if (liveRef.current) {
           if (!recorder.current) void startListen({ preserveSpeech: true })
           return
@@ -528,7 +559,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
           void startListen()
         }
       })
-  }, [activeChatId, chatsById, startListen, streams, voice])
+  }, [activeChatId, chatsById, setStatus, startListen, streams, voice])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -541,14 +572,15 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         turnChat.current = null
         return
       }
-      if (turnChat.current !== chatId) {
+      const speakable = speakableText(stream.draft)
+      // A shorter draft means a new turn began between two ticks.
+      if (turnChat.current !== chatId || speakable.length < speakableLen.current) {
         turnChat.current = chatId
         replyAt.current = Date.now()
         announcedAt.current = 0
         announcedKey.current = ''
         speakableLen.current = 0
       }
-      const speakable = speakableText(stream.draft)
       if (speakable.length > speakableLen.current) {
         speakableLen.current = speakable.length
         replyAt.current = Date.now()
@@ -559,6 +591,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       const echoesUser = echoesUserRequest(cue.speech, userText) || echoesUserRequest(cue.label, userText)
       const userBusy =
         userTalkingRef.current ||
+        clipBusy.current !== null ||
         statusRef.current === 'listening' ||
         statusRef.current === 'transcribing'
       if (
@@ -595,17 +628,17 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [])
+  }, [setStatus])
 
   const wasEnabled = useRef(voice.enabled)
   useEffect(() => {
-    if (wasEnabled.current && !voice.enabled && !enablingRef.current) stopAll()
+    if (wasEnabled.current && !voice.enabled) stopAll()
     wasEnabled.current = voice.enabled
   }, [stopAll, voice.enabled])
 
   const wasConversation = useRef(voice.conversation)
   useEffect(() => {
-    if (wasConversation.current && !voice.conversation && liveRef.current && !enablingRef.current) {
+    if (wasConversation.current && !voice.conversation && liveRef.current) {
       stopAll()
     }
     wasConversation.current = voice.conversation
@@ -616,13 +649,17 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     const current = recorder.current
     recorder.current = null
     void current.stop()
+    // startListen skips a 'listening' status, which here belongs to the mic just closed.
+    if (statusRef.current === 'listening') setStatus('loading')
     void startListen({ preserveSpeech: true })
-  }, [startListen, voice.micDeviceId])
+  }, [setStatus, startListen, voice.micDeviceId])
+
+  useEffect(() => () => stopAll(), [stopAll])
 
   useEffect(() => {
     if (!voice.enabled) return
     void window.workbench.ensureVoiceModel().then((next) => {
-      if (next.ready) warmAsideVoice()
+      if (next.state === 'ready') warmAsideVoice()
     })
   }, [voice.enabled])
 

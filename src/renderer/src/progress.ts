@@ -133,20 +133,29 @@ export function useChatProgress(chatId: string | null, streaming: boolean): Prog
   useEffect(() => {
     if (!chatId || !streaming) return
     let cancel = false
-    let live = false
+    let reset = false
+    // The snapshot and the live feed fill one list, so both pick the cue the same way.
+    let events: ActivityEvent[] = []
+    const show = (): void => setNow(progressNow(latestRunning(events, chatId)))
     void window.workbench.getActivity().then((snapshot) => {
-      if (cancel || live) return
-      setNow(progressNow(latestRunning(snapshot.events, chatId)))
+      if (cancel || reset) return
+      // Upserts that arrived first are at least as new as the snapshot, so they stay.
+      const seen = new Set(events.map((event) => event.id))
+      events = [...snapshot.events.filter((event) => !seen.has(event.id)), ...events]
+      show()
     })
     const off = window.workbench.onActivityEvent((feed) => {
       if (feed.type === 'reset') {
-        live = true
-        setNow(progressNow(latestRunning(feed.events, chatId)))
+        reset = true
+        events = feed.events
+        show()
         return
       }
-      if (feed.event.chatId !== chatId || feed.event.kind === 'turn') return
-      live = true
-      setNow(progressNow(feed.event))
+      const event = feed.event
+      if (event.chatId !== chatId || event.kind === 'turn') return
+      const index = events.findIndex((item) => item.id === event.id)
+      events = index >= 0 ? events.map((item, i) => (i === index ? event : item)) : [...events, event]
+      show()
     })
     return () => {
       cancel = true

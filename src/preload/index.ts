@@ -10,6 +10,7 @@ import type {
   BrowserBounds,
   BrowserState,
   Chat,
+  ChatLiveState,
   ChatAgent,
   ChatEvent,
   CreateProjectInput,
@@ -24,6 +25,7 @@ import type {
   KnowledgeSnapshot,
   PermissionMode,
   PlanVerdict,
+  PublicSettings,
   UpdateProjectInput,
   UpdateState,
   UsageSnapshot,
@@ -68,7 +70,10 @@ const api = {
   ) => ipcRenderer.invoke('chat:send', { chatId, content, attachments, mentions }),
   searchFiles: (projectId: string, query: string, chatId?: string) =>
     ipcRenderer.invoke('project:searchFiles', { projectId, query, chatId }) as Promise<FileHit[]>,
-  stopChat: (chatId: string) => ipcRenderer.invoke('chat:stop', chatId),
+  /** False when nothing was running. Otherwise the turn sends done once its reply is saved. */
+  stopChat: (chatId: string) => ipcRenderer.invoke('chat:stop', chatId) as Promise<boolean>,
+  /** Running turns and open requests, so a window that loads mid-turn can catch up. */
+  getLiveState: () => ipcRenderer.invoke('chat:liveState') as Promise<ChatLiveState>,
   setChatMode: (chatId: string, mode: PermissionMode) =>
     ipcRenderer.invoke('chat:setMode', { chatId, mode }),
   resolvePermission: (requestId: string, decision: 'allow' | 'deny') =>
@@ -106,6 +111,13 @@ const api = {
       ipcRenderer.removeListener('voice:modelStatus', wrapped)
     }
   },
+  onSettingsChanged: (listener: (settings: PublicSettings) => void) => {
+    const wrapped = (_event: unknown, payload: PublicSettings): void => listener(payload)
+    ipcRenderer.on('settings:changed', wrapped)
+    return () => {
+      ipcRenderer.removeListener('settings:changed', wrapped)
+    }
+  },
   getUpdateState: () => ipcRenderer.invoke('update:state') as Promise<UpdateState>,
   checkForUpdates: () => ipcRenderer.invoke('update:check') as Promise<UpdateState>,
   installUpdate: () => ipcRenderer.invoke('update:install') as Promise<void>,
@@ -127,6 +139,18 @@ const api = {
   importTheme: (): Promise<{ active: ThemeFile; themes: ThemeSummary[]; activeId: string } | null> =>
     ipcRenderer.invoke('theme:import'),
   exportTheme: (id: string): Promise<boolean> => ipcRenderer.invoke('theme:export', id),
+  onThemeChanged: (
+    listener: (state: { active: ThemeFile; themes: ThemeSummary[]; activeId: string }) => void
+  ) => {
+    const wrapped = (
+      _event: unknown,
+      payload: { active: ThemeFile; themes: ThemeSummary[]; activeId: string }
+    ): void => listener(payload)
+    ipcRenderer.on('theme:changed', wrapped)
+    return () => {
+      ipcRenderer.removeListener('theme:changed', wrapped)
+    }
+  },
   onChatEvent: (listener: (event: ChatEvent) => void) => {
     const wrapped = (_event: unknown, payload: ChatEvent): void => listener(payload)
     ipcRenderer.on('chat:event', wrapped)

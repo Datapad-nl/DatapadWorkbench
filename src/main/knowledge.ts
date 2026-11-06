@@ -1,9 +1,9 @@
 import { execFile } from 'child_process'
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { existsSync, watch, type FSWatcher } from 'fs'
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'fs/promises'
 import { homedir } from 'os'
-import { join, relative, resolve, sep } from 'path'
+import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { BrowserWindow, shell } from 'electron'
 import type {
   KnowledgeEdge,
@@ -16,6 +16,7 @@ import type {
 } from '../shared/types'
 import { buildOrientation } from './codegraph'
 import { listProjects } from './store'
+import { writeFileAtomic } from './storeIo'
 
 export const VAULT_FOLDER = 'knowledge'
 
@@ -51,8 +52,18 @@ const MAX_NOTES = 200
 const MAX_AREAS = 16
 const MAX_CHILDREN = 8
 
-const writing = new Set<string>()
-const jobs = new Map<string, Promise<void>>()
+/** How many runs are writing each project's vault. While one is, its watchers skip the runs' own writes. */
+const writing = new Map<string, number>()
+/**
+ * What runs are leaving on disk, by absolute path: a content hash, DIR for a folder, or null for a file
+ * they removed. A watcher event during a run whose path doesn't match is an outside edit.
+ */
+const ownWrites = new Map<string, string | null>()
+const DIR = 'dir'
+let stopping = false
+const jobs = new Map<string, Promise<KnowledgeSnapshot>>()
+/** One more run per project, asked for while a run was going. It uses the latest project it was given. */
+const queued = new Map<string, { project: Project; job: Promise<KnowledgeSnapshot> }>()
 const projectWatchers = new Map<string, FSWatcher>()
 const projectWatchPaths = new Map<string, string>()
 const vaultWatchers = new Map<string, FSWatcher>()
@@ -246,15 +257,71 @@ async function readSnapshot(project: Project): Promise<KnowledgeSnapshot> {
   }
 }
 
+function digest(data: string | Buffer): string {
+  return createHash('sha1').update(data).digest('hex')
+}
+
+/** Notes what a run is about to leave at `path`. A run stops here at quit, between writes. */
+function claim(path: string, print: string | null): void {
+  if (stopping) throw new Error('The app is quitting')
+  ownWrites.set(path, print)
+}
+
+async function makeDir(path: string): Promise<void> {
+  claim(path, DIR)
+  await mkdir(path, { recursive: true })
+}
+
+async function writeOwn(path: string, contents: string): Promise<void> {
+  claim(dirname(path), DIR)
+  claim(path, digest(contents))
+  await writeFileAtomic(path, contents)
+}
+
+/** What `path` holds now, in the form ownWrites records it. */
+async function onDisk(path: string): Promise<string | null> {
+  try {
+    if ((await stat(path)).isDirectory()) return DIR
+    return digest(await readFile(path))
+  } catch {
+    return null
+  }
+}
+
+/** Whether a watcher event is a run's own write: the path still holds what the run left there. */
+async function isOwnEvent(dir: string, filename: string | null): Promise<boolean> {
+  // Without a file name the change can't be matched, so it may be an outside one.
+  if (filename == null) return false
+  const path = join(dir, filename)
+  // macOS also reports a change inside the watched folder under the folder's own name.
+  // Any outside edit there comes with an event of its own.
+  if (filename === basename(dir) && !existsSync(path)) return true
+  // writeFileAtomic writes a temp file next to its target first.
+  const target = path.replace(/\.\d+\.\d+\.tmp$/, '')
+  if (target !== path) return ownWrites.has(target)
+  if (!ownWrites.has(path)) return false
+  return (await onDisk(path)) === ownWrites.get(path)
+}
+
+/** Runs `react` for a watcher event, unless it is the project's running job writing. */
+function unlessOwn(projectId: string, dir: string, filename: string | null, react: () => void): void {
+  if (!writing.has(projectId)) {
+    react()
+    return
+  }
+  void isOwnEvent(dir, filename).then((own) => {
+    if (!own) react()
+  })
+}
+
 async function writeIfMissing(path: string, contents: string): Promise<void> {
   if (existsSync(path)) return
-  await mkdir(join(path, '..'), { recursive: true })
-  await writeFile(path, contents, 'utf8')
+  await writeOwn(path, contents)
 }
 
 async function ensureObsidian(vault: string): Promise<void> {
   const dir = join(vault, '.obsidian')
-  await mkdir(dir, { recursive: true })
+  await makeDir(dir)
   await writeIfMissing(
     join(dir, 'app.json'),
     `${JSON.stringify(
@@ -469,7 +536,7 @@ async function patchHome(vault: string, projectName: string, block: string): Pro
   }
   const section = `${MARK_START}\n\n${block.trim()}\n\n${MARK_END}\n`
   if (!current) {
-    await writeFile(path, `${header}\n${section}`, 'utf8')
+    await writeOwn(path, `${header}\n${section}`)
     return
   }
   const bounds = findHomeSection(current)
@@ -478,10 +545,10 @@ async function patchHome(vault: string, projectName: string, block: string): Pro
       `${current.slice(0, bounds.start)}${section}${current.slice(bounds.end + bounds.endLen).replace(/^\n/, '')}`,
       projectName
     )
-    await writeFile(path, next, 'utf8')
+    if (next !== current) await writeOwn(path, next)
     return
   }
-  await writeFile(path, `${syncHomeBranding(current.trimEnd(), projectName)}\n\n${section}`, 'utf8')
+  await writeOwn(path, `${syncHomeBranding(current.trimEnd(), projectName)}\n\n${section}`)
 }
 
 function findHomeSection(markdown: string): { start: number; end: number; endLen: number } | null {
@@ -503,9 +570,10 @@ function syncHomeBranding(markdown: string, projectName: string): string {
 }
 
 async function writeGenerated(vault: string, fileName: string, contents: string): Promise<void> {
-  const dir = join(vault, 'generated')
-  await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, fileName), contents, 'utf8')
+  const path = join(vault, 'generated', fileName)
+  // An unchanged note keeps its mtime, so Obsidian and other watchers see no churn.
+  if ((await readFile(path, 'utf8').catch(() => null)) === contents) return
+  await writeOwn(path, contents)
 }
 
 async function pruneGenerated(vault: string, keep: Set<string>): Promise<void> {
@@ -518,14 +586,15 @@ async function pruneGenerated(vault: string, keep: Set<string>): Promise<void> {
   }
   for (const name of entries) {
     if (!name.toLowerCase().endsWith('.md') || keep.has(name)) continue
+    claim(join(dir, name), null)
     await rm(join(dir, name), { force: true })
   }
 }
 
 async function ensureStarterNote(vault: string): Promise<void> {
   const dir = join(vault, 'notes')
-  await mkdir(dir, { recursive: true })
-  await mkdir(join(vault, 'attachments'), { recursive: true })
+  await makeDir(dir)
+  await makeDir(join(vault, 'attachments'))
   await writeIfMissing(
     join(dir, 'How to use this vault.md'),
     [
@@ -552,24 +621,38 @@ async function ensureStarterNote(vault: string): Promise<void> {
 
 export async function maintainVault(project: Project): Promise<KnowledgeSnapshot> {
   if (!project.path) return emptySnapshot(project.id, null, 'no-folder', null)
-  const existing = jobs.get(project.id)
-  if (existing) {
-    await existing
-    return readSnapshot(project)
+  // A run already going read its inputs before this request. Queue one more instead of dropping it.
+  const next = queued.get(project.id)
+  if (next) {
+    next.project = project
+    return next.job
   }
+  const running = jobs.get(project.id)
+  if (!running) return startMaintain(project)
+  const rerun = (): Promise<KnowledgeSnapshot> => {
+    const latest = queued.get(project.id)?.project ?? project
+    queued.delete(project.id)
+    return startMaintain(latest)
+  }
+  const job = running.then(rerun, rerun)
+  queued.set(project.id, { project, job })
+  return job
+}
+
+function startMaintain(project: Project): Promise<KnowledgeSnapshot> {
   const job = maintainVaultNow(project).finally(() => {
     jobs.delete(project.id)
   })
-  jobs.set(project.id, job.then(() => undefined))
+  jobs.set(project.id, job)
   return job
 }
 
 async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
   if (!project.path) return emptySnapshot(project.id, null, 'no-folder', null)
   const vault = vaultPath(project.path)
-  writing.add(project.id)
+  writing.set(project.id, (writing.get(project.id) ?? 0) + 1)
   try {
-    await mkdir(vault, { recursive: true })
+    await makeDir(vault)
     await ensureObsidian(vault)
     await ensureStarterNote(vault)
     const [orientation, listing, userNotes] = await Promise.all([
@@ -743,7 +826,17 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
     if (activeProjectId === project.id) emit(snapshot)
     return snapshot
   } finally {
-    setTimeout(() => writing.delete(project.id), 500)
+    setTimeout(() => {
+      const count = (writing.get(project.id) ?? 1) - 1
+      if (count > 0) {
+        writing.set(project.id, count)
+        return
+      }
+      writing.delete(project.id)
+      for (const path of ownWrites.keys()) {
+        if (path === vault || path.startsWith(vault + sep)) ownWrites.delete(path)
+      }
+    }, 500)
   }
 }
 
@@ -877,15 +970,19 @@ function watchProjectRoot(project: Project): void {
     existing.close()
     projectWatchers.delete(project.id)
   }
+  const root = project.path
   try {
-    const watcher = watch(project.path, { persistent: false }, () => {
-      if (writing.has(project.id)) return
-      schedule(project.id, () => {
-        void maintainVault(project)
-      })
+    const watcher = watch(root, { persistent: false }, (_event, filename) => {
+      unlessOwn(project.id, root, filename, () =>
+        schedule(project.id, () => {
+          // By id, so a rename since this watcher started is picked up.
+          void maintainVaultForProjectId(project.id)
+        })
+      )
     })
     watcher.on('error', () => {
       watcher.close()
+      if (projectWatchers.get(project.id) !== watcher) return
       projectWatchers.delete(project.id)
       projectWatchPaths.delete(project.id)
     })
@@ -906,17 +1003,18 @@ function watchVault(project: Project): void {
   const vault = vaultPath(project.path)
   if (!existsSync(vault)) return
   try {
-    const watcher = watch(vault, { persistent: false, recursive: true }, () => {
-      if (writing.has(project.id)) return
-      schedule(`vault:${project.id}`, () => {
-        void readSnapshot(project).then((snapshot) => {
-          if (activeProjectId === project.id) emit(snapshot)
+    const watcher = watch(vault, { persistent: false, recursive: true }, (_event, filename) => {
+      unlessOwn(project.id, vault, filename, () =>
+        schedule(`vault:${project.id}`, () => {
+          void readSnapshot(project).then((snapshot) => {
+            if (activeProjectId === project.id) emit(snapshot)
+          })
         })
-      })
+      )
     })
     watcher.on('error', () => {
       watcher.close()
-      vaultWatchers.delete(project.id)
+      if (vaultWatchers.get(project.id) === watcher) vaultWatchers.delete(project.id)
     })
     vaultWatchers.set(project.id, watcher)
   } catch {
@@ -938,10 +1036,18 @@ export async function syncKnowledgeWatchers(): Promise<void> {
     watcher.close()
     vaultWatchers.delete(id)
   }
+  for (const [key, timer] of pending) {
+    if (wanted.has(key.replace(/^vault:/, ''))) continue
+    clearTimeout(timer)
+    pending.delete(key)
+  }
   for (const project of projects) {
     if (!project.path) continue
     watchProjectRoot(project)
-    void maintainVault(project)
+    void maintainVault(project).then(() => {
+      // The active vault moves with its project's folder.
+      if (activeProjectId === project.id) watchVault(project)
+    })
   }
 }
 
@@ -954,8 +1060,11 @@ export async function setKnowledgeActiveProject(projectId: string | null): Promi
   const project = projects.find((item) => item.id === projectId)
   if (!project?.path) return
   if (!existsSync(vaultPath(project.path))) await maintainVault(project)
+  // Another project became active while this one was loading.
+  if (activeProjectId !== projectId) return
   watchVault(project)
-  emit(await readSnapshot(project))
+  const snapshot = await readSnapshot(project)
+  if (activeProjectId === projectId) emit(snapshot)
 }
 
 export function stopKnowledgeWatchers(): void {
@@ -967,4 +1076,9 @@ export function stopKnowledgeWatchers(): void {
   for (const timer of pending.values()) clearTimeout(timer)
   pending.clear()
   activeProjectId = null
+}
+
+/** At quit. A running job stops before its next write, and a queued or new one fails at its first. */
+export function stopKnowledgeJobs(): void {
+  stopping = true
 }

@@ -3,14 +3,12 @@ import { nextCronRun } from "../shared/cron";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
-import { isStreaming } from "./grok";
 import {
   createChat,
   getChat,
   listChats,
   listProjects,
   mutateChat,
-  saveChat,
 } from "./store";
 
 /**
@@ -26,23 +24,42 @@ type SendTurn = (
 
 let sendTurn: SendTurn | null = null;
 let emit: ((event: ChatEvent) => void) | null = null;
+let streaming: (chatId: string) => boolean = () => false;
 
+// The streaming check is handed over too: importing grok.ts here would close an import cycle
+// through acp.ts and browserAgent.ts, and grok.ts would then run before acp.ts is ready.
 export function registerChatTools(input: {
   send: SendTurn;
   emit: (event: ChatEvent) => void;
+  isStreaming: (chatId: string) => boolean;
 }): void {
   sendTurn = input.send;
   emit = input.emit;
+  streaming = input.isStreaming;
+}
+
+/** Whether a chat's turn is running. */
+export function chatRunning(chatId: string): boolean {
+  return streaming(chatId);
 }
 
 type Run = {
   done: Promise<void>;
   answer: string;
   error: string | null;
-  finished: boolean;
+  finishedAt: number | null;
 };
 
 const runs = new Map<string, Run>();
+/** How long a finished run waits for its caller to collect the answer. */
+const RUN_KEEP_MS = 30 * 60_000;
+
+function pruneRuns(): void {
+  const cutoff = Date.now() - RUN_KEEP_MS;
+  for (const [chatId, run] of runs) {
+    if (run.finishedAt !== null && run.finishedAt < cutoff) runs.delete(chatId);
+  }
+}
 
 export async function callerChat(from: unknown): Promise<Chat> {
   if (typeof from !== "string" || !from)
@@ -104,7 +121,7 @@ export async function listProjectChats(from: unknown): Promise<unknown> {
       title: chat.title,
       agent: chatAgentLabel(normalizeChatAgent(chat.agent)),
       messages: chat.messageCount,
-      running: isStreaming(chat.id),
+      running: chatRunning(chat.id),
       updatedAt: chat.updatedAt,
       worktreeBranch: chat.worktreeBranch ?? undefined,
       schedule: chat.schedule
@@ -149,7 +166,7 @@ export async function readProjectChat(input: {
       ? Math.min(Math.floor(input.last), 200)
       : 20;
   const messages = chat.messages.slice(-last);
-  const head = `${chat.title} (${chat.id}) · ${chatAgentLabel(normalizeChatAgent(chat.agent))} · ${chat.messages.length} messages${isStreaming(chat.id) ? " · running" : ""}`;
+  const head = `${chat.title} (${chat.id}) · ${chatAgentLabel(normalizeChatAgent(chat.agent))} · ${chat.messages.length} messages${chatRunning(chat.id) ? " · running" : ""}`;
   const body = messages
     .map((message) => `## ${message.role}\n\n${clip(plainReply(message.content), 8000)}`)
     .join("\n\n");
@@ -197,10 +214,9 @@ export async function delegateTask(input: {
   );
   if (input.worktree === true && project?.path) {
     const worktree = await addChatWorktree(project.path, chat.id);
-    chat = await saveChat({
-      ...chat,
-      worktreePath: worktree.path,
-      worktreeBranch: worktree.branch,
+    chat = await mutateChat(chat.id, (latest) => {
+      latest.worktreePath = worktree.path;
+      latest.worktreeBranch = worktree.branch;
     });
     emit?.({ type: "chat", chatId: chat.id, chat });
   }
@@ -209,14 +225,14 @@ export async function delegateTask(input: {
     done: Promise.resolve(),
     answer: "",
     error: null,
-    finished: false,
+    finishedAt: null,
   };
   const { done: finished } = await send(chat.id, brief);
   run.done = finished
     .then((done) => {
       const reply = done?.messages.at(-1);
       run.answer = reply?.role === "assistant" ? plainReply(reply.content) : "";
-      if (!done) run.error = "The chat was stopped.";
+      if (!done) run.error = "The chat was deleted.";
     })
     .catch((error: unknown) => {
       run.error = error instanceof Error ? error.message : String(error);
@@ -243,8 +259,9 @@ export async function delegateTask(input: {
       // the answer still comes back if the worktree cleanup fails
     })
     .finally(() => {
-      run.finished = true;
+      run.finishedAt = Date.now();
     });
+  pruneRuns();
   runs.set(chat.id, run);
   return { chatId: chat.id, title: chat.title };
 }
@@ -267,7 +284,7 @@ export async function waitForDelegate(input: {
     new Promise((resolve) => (timer = setTimeout(resolve, ms))),
   ]);
   if (timer) clearTimeout(timer);
-  if (!run.finished) return { done: false };
+  if (run.finishedAt === null) return { done: false };
   runs.delete(chatId);
   const chat = await getChat(chatId).catch(() => null);
   return {
@@ -315,9 +332,9 @@ export async function scheduleTask(input: {
     input,
     `Scheduled: ${clip(prompt.split("\n")[0], 50)}`,
   );
-  const saved = await saveChat({
-    ...chat,
-    schedule: { prompt, cron, nextRunAt: next.toISOString() },
+  const nextRunAt = next.toISOString();
+  const saved = await mutateChat(chat.id, (latest) => {
+    latest.schedule = { prompt, cron, nextRunAt };
   });
   emit?.({ type: "chat", chatId: saved.id, chat: saved });
   return {
@@ -363,7 +380,7 @@ async function runDueSchedules(): Promise<void> {
       )
         continue;
       // Busy with the last run or the user: try again on the next check.
-      if (isStreaming(summary.id)) continue;
+      if (chatRunning(summary.id)) continue;
       let next: string | null = null;
       try {
         next = schedule.cron
@@ -372,17 +389,21 @@ async function runDueSchedules(): Promise<void> {
       } catch {
         next = null;
       }
-      const chat = await mutateChat(summary.id, (latest) => {
-        latest.schedule = next
-          ? { ...schedule, nextRunAt: next, lastRunAt: now.toISOString() }
-          : null;
-      });
-      emit?.({ type: "chat", chatId: chat.id, chat });
       try {
-        (await send(chat.id, schedule.prompt)).done.catch(() => {});
+        // The turn reports its own failure in the chat and as a notification.
+        (await send(summary.id, schedule.prompt)).done.catch(() => {});
       } catch {
-        // a chat that cannot start now still keeps its schedule for the next run
+        // Not started, so the run is still due: the next check tries again.
+        continue;
       }
+      const chat = await mutateChat(summary.id, (latest) => {
+        // Changed or cancelled while the run started: leave the user's schedule alone.
+        if (latest.schedule?.nextRunAt !== schedule.nextRunAt) return;
+        latest.schedule = next
+          ? { ...latest.schedule, nextRunAt: next, lastRunAt: now.toISOString() }
+          : null;
+      }).catch(() => null);
+      if (chat) emit?.({ type: "chat", chatId: chat.id, chat });
     }
   } finally {
     checking = false;

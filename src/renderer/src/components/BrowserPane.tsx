@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { Attachment, BrowserAnnotationHit, BrowserState } from '../../../shared/types'
 import { parseYoutubeVideoId } from '../../../shared/youtube'
 import type { YoutubeTranscriptResult } from '../../../shared/youtube'
@@ -17,6 +17,23 @@ type QueuedNote = {
 type TranscriptView =
   | { status: 'loading'; videoId: string }
   | { status: 'done'; videoId: string; result: YoutubeTranscriptResult }
+
+// Notes waiting to send live outside the pane, so a remount neither drops them nor sends one twice.
+let noteQueue: QueuedNote[] = []
+let noteFlushing = false
+const noteListeners = new Set<() => void>()
+
+function setNoteQueue(update: (current: QueuedNote[]) => QueuedNote[]): void {
+  noteQueue = update(noteQueue)
+  for (const listener of noteListeners) listener()
+}
+
+function subscribeNotes(listener: () => void): () => void {
+  noteListeners.add(listener)
+  return () => {
+    noteListeners.delete(listener)
+  }
+}
 
 const empty: BrowserState = {
   url: '',
@@ -48,7 +65,9 @@ export function BrowserPane(): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
   const noteRef = useRef<HTMLTextAreaElement>(null)
   const pickGen = useRef(0)
-  const flushLock = useRef(false)
+  const navGen = useRef(0)
+  const sendingNote = useRef(false)
+  const transcriptGen = useRef(0)
   const [state, setState] = useState<BrowserState>(empty)
   const [draft, setDraft] = useState('')
   const [editing, setEditing] = useState(false)
@@ -57,7 +76,7 @@ export function BrowserPane(): React.JSX.Element {
   const [hit, setHit] = useState<BrowserAnnotationHit | null>(null)
   const [note, setNote] = useState('')
   const [annotateError, setAnnotateError] = useState<string | null>(null)
-  const [queue, setQueue] = useState<QueuedNote[]>([])
+  const queue = useSyncExternalStore(subscribeNotes, () => noteQueue)
   const [cardPos, setCardPos] = useState<{ left: number; top: number } | null>(null)
   const [pasted, setPasted] = useState<Attachment[]>([])
   const overlay = showBrowser && !showNewProject && !showSettings && !showUsage
@@ -67,18 +86,27 @@ export function BrowserPane(): React.JSX.Element {
 
   useEffect(() => {
     if (!transcript) return
-    if (videoId !== transcript.videoId) setTranscript(null)
+    if (videoId !== transcript.videoId) {
+      transcriptGen.current += 1
+      setTranscript(null)
+    }
   }, [videoId, transcript])
 
   useEffect(() => {
+    let cancelled = false
     void window.workbench.getBrowserState().then((next) => {
+      if (cancelled) return
       setState(next)
       if (!editing) setDraft(next.url)
     })
-    return window.workbench.onBrowserState((next) => {
+    const off = window.workbench.onBrowserState((next) => {
       setState(next)
       if (!editing) setDraft(next.url)
     })
+    return () => {
+      cancelled = true
+      off()
+    }
   }, [editing])
 
   useEffect(() => {
@@ -135,22 +163,23 @@ export function BrowserPane(): React.JSX.Element {
   }, [mode])
 
   useEffect(() => {
-    if (flushLock.current || queue.length === 0) return
+    if (noteFlushing || queue.length === 0) return
     const next = queue[0]
     if (!next) return
     if (streams[next.chatId]?.status === 'streaming') return
-    flushLock.current = true
+    noteFlushing = true
     void sendMessage(next.chatId, next.content, next.attachments)
-      .then(() => {
-        setQueue((current) => current.slice(1))
+      .then((sent) => {
+        if (!sent) setAnnotateError('Could not send annotation')
       })
       .catch((error) => {
         const raw = error instanceof Error ? error.message : 'Could not send annotation'
         setAnnotateError(raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
-        setQueue((current) => current.slice(1))
       })
       .finally(() => {
-        flushLock.current = false
+        // The lock clears before the queue changes, so the render that follows can send the next note.
+        noteFlushing = false
+        setNoteQueue((current) => current.slice(1))
       })
   }, [queue, streams, sendMessage])
 
@@ -190,16 +219,27 @@ export function BrowserPane(): React.JSX.Element {
   }
 
   async function sendAnnotation(): Promise<void> {
-    if (!hit) return
+    if (!hit || sendingNote.current) return
+    const gen = pickGen.current
     let chatId = activeChatId
     if (!chatId) {
       if (!activeProjectId) {
         setAnnotateError('Open a project chat first')
         return
       }
-      const chat = await window.workbench.createChat(activeProjectId)
-      await openChat(chat.id)
-      chatId = chat.id
+      sendingNote.current = true
+      try {
+        const chat = await window.workbench.createChat(activeProjectId)
+        await openChat(chat.id)
+        chatId = chat.id
+      } catch (error) {
+        if (gen !== pickGen.current) return
+        const raw = error instanceof Error ? error.message : 'Could not create a chat'
+        setAnnotateError(raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
+        return
+      } finally {
+        sendingNote.current = false
+      }
     }
     if (!chatId) return
     const attachments: Attachment[] = [
@@ -208,10 +248,12 @@ export function BrowserPane(): React.JSX.Element {
         : []),
       ...pasted
     ]
-    setQueue((current) => [
+    setNoteQueue((current) => [
       ...current,
       { chatId, content: annotationMessage(hit, note, pasted.length), attachments }
     ])
+    // Annotate was stopped or restarted while the chat was created: the note still goes out.
+    if (gen !== pickGen.current) return
     setHit(null)
     setNote('')
     setPasted([])
@@ -220,20 +262,35 @@ export function BrowserPane(): React.JSX.Element {
   }
 
   async function go(input: string): Promise<void> {
+    const gen = ++navGen.current
     setEditing(false)
     const next = await window.workbench.navigateBrowser(input)
+    // A newer navigation started while this one loaded. Its result is the one to show.
+    if (gen !== navGen.current) return
     setState(next)
     setDraft(next.url)
   }
 
   async function transcribeCurrent(): Promise<void> {
     if (!videoId) return
+    const gen = ++transcriptGen.current
     if (transcript) {
       setTranscript(null)
       return
     }
     setTranscript({ status: 'loading', videoId })
-    const result = await window.workbench.transcribeYoutube(state.url)
+    let result: YoutubeTranscriptResult
+    try {
+      result = await window.workbench.transcribeYoutube(state.url)
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : 'Could not fetch captions'
+      result = {
+        ok: false,
+        videoId,
+        error: raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
+      }
+    }
+    if (gen !== transcriptGen.current) return
     setTranscript({ status: 'done', videoId, result })
   }
 
@@ -322,8 +379,9 @@ export function BrowserPane(): React.JSX.Element {
           {videoId && (
             <button
               type="button"
-              className="h-7 shrink-0 rounded-[7px] px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink"
+              className="h-7 shrink-0 rounded-[7px] px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink disabled:opacity-40 disabled:hover:bg-transparent"
               title="Fetch YouTube captions"
+              disabled={mode !== 'off'}
               onClick={() => void transcribeCurrent()}
             >
               {transcript ? 'Video' : 'Transcript'}
@@ -473,13 +531,16 @@ function AnnotationLayer({
     onCardPos(placeCard(hit.rect, host.clientWidth, host.clientHeight))
   }, [cardPos, hit.rect, hostRef, onCardPos])
 
-  async function addImages(incoming: Attachment[]): Promise<void> {
-    if (incoming.length === 0) return
-    onPasted((current) => {
-      const room = MAX_PASTE_IMAGES - current.length
-      return room > 0 ? [...current, ...incoming.slice(0, room)] : current
-    })
-  }
+  const addImages = useCallback(
+    (incoming: Attachment[]): void => {
+      if (incoming.length === 0) return
+      onPasted((current) => {
+        const room = MAX_PASTE_IMAGES - current.length
+        return room > 0 ? [...current, ...incoming.slice(0, room)] : current
+      })
+    },
+    [onPasted]
+  )
 
   useEffect(() => {
     function onPaste(event: ClipboardEvent): void {
@@ -490,11 +551,11 @@ function AnnotationLayer({
       )
       if (!hasImage) return
       event.preventDefault()
-      void imagesFromClipboard(event).then((incoming) => void addImages(incoming))
+      void imagesFromClipboard(event).then(addImages)
     }
     window.addEventListener('paste', onPaste)
     return () => window.removeEventListener('paste', onPaste)
-  }, [])
+  }, [addImages])
 
   const pos = cardPos ?? { left: 16, top: 16 }
 
@@ -535,7 +596,7 @@ function AnnotationLayer({
         }}
         onDrop={(event) => {
           event.preventDefault()
-          void imagesFromDrop(event).then((incoming) => void addImages(incoming))
+          void imagesFromDrop(event).then(addImages)
         }}
       >
         <div

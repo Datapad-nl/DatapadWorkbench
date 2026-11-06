@@ -29,6 +29,11 @@ function readCollapsed(): Record<string, boolean> {
   }
 }
 
+function errorText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : fallback
+  return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
+}
+
 const projectIcons = new Map<string, Promise<string | null>>()
 
 /** The favicon or app icon found in the project's folder, or null. */
@@ -41,7 +46,19 @@ function useProjectIcon(project: Project): string | null {
     let cancelled = false
     let pending = projectIcons.get(key)
     if (!pending) {
-      pending = window.workbench.getProjectIcon(project.id).catch(() => null)
+      const request: Promise<string | null> = window.workbench.getProjectIcon(project.id).then(
+        (url) => {
+          // No icon yet: the next mount asks again (main caches the miss briefly).
+          if (url === null && projectIcons.get(key) === request) projectIcons.delete(key)
+          return url
+        },
+        () => {
+          // Let the next mount try again.
+          if (projectIcons.get(key) === request) projectIcons.delete(key)
+          return null
+        }
+      )
+      pending = request
       projectIcons.set(key, pending)
     }
     void pending.then((url) => {
@@ -60,6 +77,7 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const colorTimer = useRef<number | undefined>(undefined)
   const color = resolveProjectColor(project)
   const icon = useProjectIcon(project)
   const [pos, setPos] = useState({ top: 0, left: 0 })
@@ -148,6 +166,7 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
                     style={{ background: swatch }}
                     title={swatch}
                     onClick={() => {
+                      window.clearTimeout(colorTimer.current)
                       void setColor(swatch)
                       setOpen(false)
                     }}
@@ -159,9 +178,14 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
               Custom
               <input
                 type="color"
-                value={color}
+                defaultValue={color}
                 className="h-6 w-10 cursor-pointer rounded border border-line bg-transparent p-0"
-                onChange={(event) => void setColor(event.target.value)}
+                onChange={(event) => {
+                  // The picker fires on every drag step; save once it settles.
+                  const next = event.target.value
+                  window.clearTimeout(colorTimer.current)
+                  colorTimer.current = window.setTimeout(() => void setColor(next), 200)
+                }}
               />
             </label>
           </div>,
@@ -187,6 +211,7 @@ function ProjectRenameInput({
 }): React.JSX.Element {
   const { updateProject } = useWorkspace()
   const [draft, setDraft] = useState(project.name)
+  const [error, setError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const finished = useRef(false)
 
@@ -204,13 +229,17 @@ function ProjectRenameInput({
     if (finished.current) return
     finished.current = true
     const name = draft.trim()
-    try {
-      if (name && name !== project.name) {
+    if (name && name !== project.name) {
+      try {
         await updateProject({ id: project.id, name })
+      } catch (caught) {
+        // Keep the editor open so the name isn't lost.
+        finished.current = false
+        setError(errorText(caught, 'Could not rename the project'))
+        return
       }
-    } finally {
-      onDone()
     }
+    onDone()
   }
 
   return (
@@ -220,8 +249,15 @@ function ProjectRenameInput({
       data-testid="rename-project"
       value={draft}
       aria-label={`Rename ${project.name}`}
-      className="min-w-0 flex-1 rounded-sm bg-canvas px-1 text-[12px] font-medium text-ink outline-none ring-1 ring-accent/60"
-      onChange={(event) => setDraft(event.target.value)}
+      aria-invalid={error ? true : undefined}
+      title={error ?? undefined}
+      className={`min-w-0 flex-1 rounded-sm bg-canvas px-1 text-[12px] font-medium text-ink outline-none ring-1 ${
+        error ? 'ring-danger' : 'ring-accent/60'
+      }`}
+      onChange={(event) => {
+        setDraft(event.target.value)
+        setError(null)
+      }}
       onBlur={() => void commit()}
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => {
@@ -604,10 +640,14 @@ export function Sidebar(): React.JSX.Element | null {
       setResizing(false)
       target.removeEventListener('pointermove', onMove)
       target.removeEventListener('pointerup', onUp)
+      target.removeEventListener('pointercancel', onUp)
+      target.removeEventListener('lostpointercapture', onUp)
     }
 
     target.addEventListener('pointermove', onMove)
     target.addEventListener('pointerup', onUp)
+    target.addEventListener('pointercancel', onUp)
+    target.addEventListener('lostpointercapture', onUp)
   }
 
   // A worktree folds into its parent project: its chats list there, and the Git window shows the worktree.

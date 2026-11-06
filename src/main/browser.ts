@@ -16,7 +16,10 @@ let persistReady: Promise<void> | null = null
 let lastEmitted = ''
 let emitTimer: ReturnType<typeof setTimeout> | null = null
 let loadedPersisted = false
+let persistWrite: Promise<void> = Promise.resolve()
 let picking = false
+let pickSession = 0
+let endPick: (() => void) | null = null
 
 export type ConsoleEntry = { level: string; message: string; source: string; at: string }
 const CONSOLE_LIMIT = 200
@@ -54,7 +57,9 @@ function contents(): Electron.WebContents | null {
 
 /** The BrowserPane page, created on demand, for tools that read or drive it. */
 export function browserContents(): Electron.WebContents {
-  return ensureView().webContents
+  const wc = ensureView().webContents
+  loadPersistedIfNeeded()
+  return wc
 }
 
 /** The page's console since the last navigation, oldest first. */
@@ -107,14 +112,25 @@ async function loadPersisted(): Promise<void> {
 async function savePersisted(url: string): Promise<void> {
   const clean = sanitizeUrl(url) ?? ''
   lastUrl = clean
-  await mkdir(join(app.getPath('userData'), 'workbench'), { recursive: true })
-  await writeFile(persistPath(), JSON.stringify({ url: clean }), 'utf8')
+  // One write at a time, so an older URL never lands after a newer one.
+  const write = async (): Promise<void> => {
+    await mkdir(join(app.getPath('userData'), 'workbench'), { recursive: true })
+    await writeFile(persistPath(), JSON.stringify({ url: clean }), 'utf8')
+  }
+  const next = persistWrite.then(write)
+  persistWrite = next.catch(() => undefined)
+  await next
+}
+
+/** Whether the view is actually on screen: wanted, and laid out at a usable size. */
+function onScreen(): boolean {
+  return visible && lastBounds.width >= 2 && lastBounds.height >= 2
 }
 
 function applyBounds(): void {
   if (!view) return
   const { x, y, width, height } = lastBounds
-  const show = visible && width >= 2 && height >= 2
+  const show = onScreen()
   view.setVisible(show)
   if (show) view.setBounds({ x, y, width, height })
 }
@@ -170,8 +186,14 @@ function wireContents(wc: Electron.WebContents): void {
   wc.on('page-title-updated', () => emit())
   wc.on('did-start-loading', () => {
     lastError = null
-    if (picking) void cancelBrowserAnnotate()
     emit()
+  })
+  // Only a new main document ends a pick; subframe loads and in-page navigations do not.
+  wc.on('did-start-navigation', (details) => {
+    if (picking && details.isMainFrame && !details.isSameDocument) void cancelBrowserAnnotate()
+  })
+  wc.on('render-process-gone', () => {
+    if (picking) void cancelBrowserAnnotate()
   })
   wc.on('did-stop-loading', onChange)
   wc.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
@@ -222,13 +244,14 @@ function layoutHost(window: BrowserWindow): void {
 
 export function attachBrowser(window: BrowserWindow): void {
   host = window
-  if (visible) {
-    const current = ensureView()
-    if (!window.contentView.children.includes(current)) {
-      window.contentView.addChildView(current)
-    }
-    loadPersistedIfNeeded()
+  // The new window has not had a state push yet.
+  lastEmitted = ''
+  if (visible) ensureView()
+  // A view the agent created while no window was open is attached here too.
+  if (view && !view.webContents.isDestroyed() && !window.contentView.children.includes(view)) {
+    window.contentView.addChildView(view)
   }
+  if (visible) loadPersistedIfNeeded()
   layoutHost(window)
 
   const relayout = (): void => layoutHost(window)
@@ -240,16 +263,22 @@ export function attachBrowser(window: BrowserWindow): void {
 
   window.on('closed', () => {
     if (host !== window) return
+    if (picking) void cancelBrowserAnnotate()
     if (view && !view.webContents.isDestroyed()) {
       try {
         window.contentView.removeChildView(view)
       } catch {
         // window already tearing down
       }
+      view.webContents.close()
     }
     view = null
     host = null
     visible = false
+    // The next window gets a fresh view, which loads the saved page again.
+    loadedPersisted = false
+    lastBounds = { x: 0, y: 0, width: 0, height: 0 }
+    consoleEntries.length = 0
   })
 }
 
@@ -262,7 +291,7 @@ export function getBrowserState(): BrowserState {
     canGoBack: wc?.navigationHistory.canGoBack() ?? false,
     canGoForward: wc?.navigationHistory.canGoForward() ?? false,
     loading: wc?.isLoading() ?? false,
-    visible,
+    visible: onScreen(),
     error: lastError
   }
 }
@@ -272,6 +301,9 @@ export function setBrowserVisible(next: boolean): BrowserState {
   if (next) {
     ensureView()
     loadPersistedIfNeeded()
+  } else {
+    // Bounds from before a hide are stale; wait for the pane to send fresh ones.
+    lastBounds = { x: 0, y: 0, width: 0, height: 0 }
   }
   applyBounds()
   emit(true)
@@ -383,6 +415,11 @@ function parseAnnotationHit(
 }
 
 export async function cancelBrowserAnnotate(): Promise<void> {
+  // End the pending start now; the page may never answer (crashed, or replaced mid-pick).
+  pickSession += 1
+  picking = false
+  endPick?.()
+  endPick = null
   const wc = contents()
   if (wc && !wc.isDestroyed()) {
     try {
@@ -391,7 +428,6 @@ export async function cancelBrowserAnnotate(): Promise<void> {
       /* page gone */
     }
   }
-  picking = false
 }
 
 export async function startBrowserAnnotate(): Promise<BrowserAnnotationHit | null> {
@@ -401,16 +437,22 @@ export async function startBrowserAnnotate(): Promise<BrowserAnnotationHit | nul
   const url = sanitizeUrl(wc.getURL())
   if (!url) throw new Error('Open a page first')
 
+  const session = ++pickSession
   picking = true
   let raw: unknown = null
   try {
-    raw = await wc.executeJavaScript(ANNOTATE_PICKER, true)
-  } catch (error) {
-    picking = false
-    throw error
+    raw = await new Promise<unknown>((resolve, reject) => {
+      endPick = () => resolve(null)
+      wc.executeJavaScript(ANNOTATE_PICKER, true).then(resolve, reject)
+    })
+  } finally {
+    if (session === pickSession) {
+      picking = false
+      endPick = null
+    }
   }
-  if (!picking) return null
-  picking = false
+  // Cancelled, or a newer pick started; the cancel already disarmed this picker.
+  if (session !== pickSession) return null
 
   const parsed = parseAnnotationHit(raw)
   if (!parsed) {
