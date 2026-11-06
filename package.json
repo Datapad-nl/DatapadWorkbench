@@ -1,6 +1,6 @@
 {
   "name": "datapad-workbench",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "description": "Unofficial desktop workbench for Grok Build",
   "main": "./out/main/index.js",
