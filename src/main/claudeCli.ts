@@ -67,6 +67,8 @@ export async function getClaudeCliInfo(): Promise<ClaudeCliInfo> {
   if (inflight) return inflight
   inflight = probe()
     .then((info) => {
+      // A probe that timed out or printed nothing is not a sign-out. Keep the last answer and ask again next time.
+      if (!info) return cached ?? SIGNED_OUT
       cached = info
       cachedAt = Date.now()
       return info
@@ -77,7 +79,8 @@ export async function getClaudeCliInfo(): Promise<ClaudeCliInfo> {
   return inflight
 }
 
-function probe(): Promise<ClaudeCliInfo> {
+/** The CLI's answer, or null when it gave none. */
+function probe(): Promise<ClaudeCliInfo | null> {
   return new Promise((resolve) => {
     execFile(
       claudeBinary(),
@@ -85,7 +88,7 @@ function probe(): Promise<ClaudeCliInfo> {
       { timeout: 8_000, encoding: 'utf8', maxBuffer: 64_000, env: process.env },
       (_error, stdout) => {
         try {
-          const raw = JSON.parse(stdout || '{}') as {
+          const raw = JSON.parse(stdout) as {
             loggedIn?: unknown
             authMethod?: unknown
             subscriptionType?: unknown
@@ -106,7 +109,7 @@ function probe(): Promise<ClaudeCliInfo> {
             email: typeof raw.email === 'string' ? raw.email : null
           })
         } catch {
-          resolve(SIGNED_OUT)
+          resolve(null)
         }
       }
     )

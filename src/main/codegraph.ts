@@ -314,6 +314,20 @@ function isStale(path: string, index: ProjectIndex): boolean {
   return false
 }
 
+/** Caches what a read found, unless a job reported on the project while it ran. That report is newer and wins. */
+function settleRead(projectId: string, before: ProjectIndex | undefined, index: ProjectIndex): ProjectIndex {
+  const latest = cache.get(projectId)
+  if (latest !== before) return latest ?? index
+  cache.set(projectId, index)
+  return index
+}
+
+/** A removed project. A job still running for its folder no longer reports to it. */
+export function forgetProjectIndex(projectId: string): void {
+  queuedPath.delete(projectId)
+  cache.delete(projectId)
+}
+
 export async function readIndex(project: Project): Promise<ProjectIndex> {
   if (!project.path) {
     const index: ProjectIndex = {
@@ -346,16 +360,14 @@ export async function readIndex(project: Project): Promise<ProjectIndex> {
   if (!bin) {
     // Still missing. Keep the cached one, which may say why the install failed.
     if (cached?.state === 'missing-cli') return cached
-    const index: ProjectIndex = {
+    return settleRead(project.id, cached, {
       projectId: project.id,
       state: 'missing-cli',
       error: null,
       fileCount: null,
       nodeCount: null,
       languages: []
-    }
-    cache.set(project.id, index)
-    return index
+    })
   }
   let status: StatusJson | null
   try {
@@ -371,9 +383,7 @@ export async function readIndex(project: Project): Promise<ProjectIndex> {
       languages: []
     }
   }
-  const index = fromStatus(project.id, status, 'not-indexed')
-  cache.set(project.id, index)
-  return index
+  return settleRead(project.id, cached, fromStatus(project.id, status, 'not-indexed'))
 }
 
 export async function collectIndexes(projects: Project[]): Promise<Record<string, ProjectIndex>> {

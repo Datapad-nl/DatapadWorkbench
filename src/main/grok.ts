@@ -24,6 +24,7 @@ import {
   contentText,
   ensureAgent,
   hasOtherActivePrompts,
+  previousTurnEnded,
   hasPendingExitPlan,
   hasLiveSession,
   loadSession,
@@ -150,6 +151,8 @@ const turns = new Map<string, Turn>()
 const sessionTurns = new Map<string, Turn>()
 /** Prompts of stopped turns that the agent did not cancel, by session, until they end. */
 const abandonedPrompts = new Map<string, Promise<void>>()
+/** Chats whose rewind is restoring files and messages. */
+const rewinding = new Set<string>()
 const asideAborts = new Map<string, Set<AbortController>>()
 const asideSteers = new Map<string, SteerNote[]>()
 let nextGen = 1
@@ -403,6 +406,7 @@ export function isStreaming(chatId: string): boolean {
 /** Claim the chat for a new turn. Nothing is awaited first, so two sends cannot both win. */
 function reserveTurn(chatId: string): Turn {
   if (turns.has(chatId)) throw new Error('This chat is already generating')
+  if (rewinding.has(chatId)) throw new Error('This chat is rewinding. Send again once it is done.')
   const turn = {
     id: nextGen++,
     chatId,
@@ -497,10 +501,18 @@ export function stopStream(chatId: string): boolean {
     turn.killTimer = null
     if (turns.get(chatId) !== turn) return
     // Killing the process would end every other chat on it. End only this turn.
-    if (hasOtherActivePrompts(sessionId)) turn.signalAbandon()
+    if (hasOtherActivePrompts(sessionId) || otherTurnOnAgent(turn)) turn.signalAbandon()
     else abortAgent(turn.agent, turn.agentGeneration)
   }, STOP_GRACE_MS)
   return true
+}
+
+/** Another chat's turn on the same agent, including one still preparing its prompt, that a kill would end. */
+function otherTurnOnAgent(turn: Turn): boolean {
+  for (const other of turns.values()) {
+    if (other !== turn && !other.cancelled && other.agent === turn.agent) return true
+  }
+  return false
 }
 
 /** Stop the chat's turn and wait until it has saved, for steps that must not overlap a turn. */
@@ -582,10 +594,20 @@ function goalObjective(text: string): string {
 }
 
 export async function rewindChat(chatId: string, checkpointId: string, cwd: string | null): Promise<Chat> {
-  // A running turn would write its reply after the rewind. Stop it and let it save first.
-  await stopAndWait(chatId)
-  if (isStreaming(chatId)) throw new Error('This chat is still stopping. Try the rewind again.')
-  await rewindTo(chatId, checkpointId, cwd)
+  if (rewinding.has(chatId)) throw new Error('This chat is already rewinding.')
+  // No new turn until the files and messages are back, or it would run on half of each.
+  rewinding.add(chatId)
+  try {
+    // A rewind that cannot happen must not stop the turn running now.
+    const { checkpoints = [] } = await getChat(chatId)
+    if (!checkpoints.some((item) => item.id === checkpointId)) throw new Error('Checkpoint not found')
+    // A running turn would write its reply after the rewind. Stop it and let it save first.
+    await stopAndWait(chatId)
+    if (isStreaming(chatId)) throw new Error('This chat is still stopping. Try the rewind again.')
+    await rewindTo(chatId, checkpointId, cwd)
+  } finally {
+    rewinding.delete(chatId)
+  }
   livePlans.delete(chatId)
   const chat = await getChat(chatId)
   emitLive({ type: 'chat', chatId, chat })
@@ -894,6 +916,8 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   // A stopped turn the agent kept running. Prompting now would mix its reply into this one.
   const running = abandonedPrompts.get(sessionId)
   if (running) await step(turn, running)
+  // No turn owns the session yet, so the last words of one that ended without saying so are dropped.
+  await step(turn, previousTurnEnded(sessionId))
   const mode = normalizePermissionMode(chat.mode)
   await step(turn, applyAcpMode(sessionId, mode))
 

@@ -74,6 +74,8 @@ async function filesFor(root: string): Promise<FileHit[]> {
   if (!pending) {
     pending = walk(root)
       .then((files) => {
+        // Drop expired roots too, or every worktree ever searched keeps its list.
+        for (const [key, entry] of cache) if (now - entry.at >= CACHE_MS) cache.delete(key)
         cache.set(root, { at: now, files })
         return files
       })

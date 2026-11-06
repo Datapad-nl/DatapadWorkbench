@@ -43,7 +43,7 @@ import {
   type UsagePeriodKind,
   type UsageSnapshot
 } from '../shared/types'
-import { getApiKey, getClaudeModel, getEffort, getMcpServers } from './store'
+import { getApiKey, getClaudeModel, getEffort, getMcpServers, skipNewSession } from './store'
 import { readGrokPlan } from './sessions'
 
 type JsonRpc = {
@@ -214,12 +214,14 @@ type TurnWait = {
   waiters: Array<() => void>
   /** A turn we stopped waiting for still owes its turn_completed. That late one must not end the next turn. */
   owed: number
+  /** Called once nothing is owed. */
+  owedWaiters: Array<() => void>
 }
 
 const turnWaits = new Map<string, TurnWait>()
 
 function turnWait(sessionId: string): TurnWait {
-  const state = turnWaits.get(sessionId) ?? { done: false, waiters: [], owed: 0 }
+  const state = turnWaits.get(sessionId) ?? { done: false, waiters: [], owed: 0, owedWaiters: [] }
   turnWaits.set(sessionId, state)
   return state
 }
@@ -240,9 +242,28 @@ function noteTurnCompleted(sessionId: string): void {
   const state = turnWait(sessionId)
   if (state.owed > 0 && !state.done) {
     state.owed -= 1
+    if (state.owed === 0) for (const waiter of state.owedWaiters.splice(0)) waiter()
     return
   }
   markTurnDone(sessionId)
+}
+
+/**
+ * Waits, up to `timeoutMs`, for an earlier turn still streaming on the session to finish. Its last
+ * words carry no turn id, so a prompt sent before then would take them as its own.
+ */
+export function previousTurnEnded(sessionId: string, timeoutMs = 2_000): Promise<void> {
+  const state = turnWaits.get(sessionId)
+  if (!state || state.owed === 0) return Promise.resolve()
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer)
+      state.owedWaiters = state.owedWaiters.filter((waiter) => waiter !== finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, timeoutMs)
+    state.owedWaiters.push(finish)
+  })
 }
 
 function waitForTurnEnd(sessionId: string, timeoutMs = 500): Promise<void> {
@@ -1355,7 +1376,8 @@ export async function promptIsolated(
     const rules =
       options?.rules ??
       'Read-only aside on the current main task. Use the provided context. You may read project files. Do not edit files or run mutating commands.'
-    const created = await call<{ sessionId: string }>(
+    // Grok keeps every session under its folder. This one must not come back as a chat.
+    const created = await skipNewSession(call<{ sessionId: string }>(
       'session/new',
       {
         cwd,
@@ -1365,7 +1387,7 @@ export async function promptIsolated(
         ...(agent === 'claude' ? { _meta: { claudeCode: { options: { persistSession: false } } } } : {})
       },
       30_000
-    )
+    ))
     if (agent === 'claude') await applyClaudeModel(call, created.sessionId, await getClaudeModel())
     const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
     if (text.trim()) prompt.push({ type: 'text', text })

@@ -20,7 +20,7 @@ import {
   type UpdateProjectInput,
   type VoiceSettings
 } from '../shared/types'
-import { isUnsafeProjectPath, queueIndex } from './codegraph'
+import { forgetProjectIndex, isUnsafeProjectPath, queueIndex } from './codegraph'
 import { id, now, titleFromPrompt } from './ids'
 import { getClaudeCliInfo, peekClaudeCliInfo } from './claudeCli'
 import { listClaudeSessions, readClaudeHistory } from './claudeSessions'
@@ -96,6 +96,11 @@ function dismissedPathsFile(): string {
 
 function recoveryMarkerFile(): string {
   return join(dataDir(), 'projects-recovered.json')
+}
+
+/** Agent sessions the import leaves out: the app's own one-off prompts, and those of chats deleted here. */
+function skippedSessionsFile(): string {
+  return join(dataDir(), 'skipped-sessions.json')
 }
 
 function normalizeProjectPath(value: string): string {
@@ -188,6 +193,41 @@ async function dismissProjectPath(path: string | null | undefined): Promise<void
     dismissed.add(normalizeProjectPath(path))
     await saveDismissedPaths(dismissed)
   })
+}
+
+async function loadSkippedSessions(): Promise<Set<string>> {
+  const ids = await readJson<string[]>(skippedSessionsFile(), [])
+  return new Set(ids.filter((item) => typeof item === 'string'))
+}
+
+async function skipSessionImport(sessionId: string): Promise<void> {
+  await withLock(skippedSessionsFile(), async () => {
+    const skipped = await loadSkippedSessions()
+    if (skipped.has(sessionId)) return
+    skipped.add(sessionId)
+    await writeJson(skippedSessionsFile(), [...skipped])
+  })
+}
+
+/** One-off sessions still starting. An import waits for them, so it cannot take one for a chat first. */
+const startingSkipped = new Set<Promise<unknown>>()
+
+/** Opens a one-off agent session, such as an aside, that must never show up as a chat. */
+export function skipNewSession<T extends { sessionId: string }>(start: Promise<T>): Promise<T> {
+  const recorded = start.then(async (created) => {
+    await skipSessionImport(created.sessionId)
+    return created
+  })
+  startingSkipped.add(recorded)
+  void recorded.catch(() => undefined).finally(() => startingSkipped.delete(recorded))
+  return recorded
+}
+
+/** Leaves out skipped sessions. Call it after reading the chats, so a delete in between is seen. */
+async function importable<T extends { id: string }>(sessions: T[]): Promise<T[]> {
+  await Promise.allSettled([...startingSkipped])
+  const skipped = await loadSkippedSessions()
+  return sessions.filter((session) => !skipped.has(session.id))
 }
 
 async function rememberProjectPath(path: string | null | undefined): Promise<void> {
@@ -500,6 +540,7 @@ export async function removeProject(projectId: string): Promise<void> {
     await dismissProjectPath(project.path)
     project.removedAt = now()
     await saveProjects(projects)
+    forgetProjectIndex(projectId)
   })
 }
 
@@ -697,7 +738,7 @@ async function importGrokSessions(): Promise<void> {
     if (title) await retitleChat(chat.id, title)
   }
 
-  for (const session of sessions) {
+  for (const session of await importable(sessions)) {
     if (known.has(session.id)) continue
     const cwd = normalizeProjectPath(session.cwd)
     if (isUnsafeProjectPath(cwd)) continue
@@ -728,7 +769,7 @@ async function importClaudeSessions(): Promise<void> {
   const sessions = await listClaudeSessions(projects.map((project) => project.path as string))
   if (sessions.length === 0) return
   const known = new Set((await listChats()).map((chat) => chat.grokSessionId).filter(Boolean))
-  for (const session of sessions) {
+  for (const session of await importable(sessions)) {
     if (known.has(session.id)) continue
     const cwd = normalizeProjectPath(session.cwd)
     const project = projects.find((item) => normalizeProjectPath(item.path as string) === cwd)
@@ -758,6 +799,9 @@ export async function mutateChat(chatId: string, fn: (chat: Chat) => void): Prom
 
 export async function deleteChat(chatId: string): Promise<void> {
   deletedChats.add(chatId)
+  // Its agent session stays on disk, and the import would bring the chat back from it.
+  const sessionId = (await readChat(chatId).catch(() => null))?.grokSessionId
+  if (sessionId) await skipSessionImport(sessionId)
   await withLock(chatId, async () => {
     await rm(chatPath(chatId), { force: true })
   })

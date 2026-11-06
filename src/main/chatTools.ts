@@ -3,6 +3,7 @@ import { nextCronRun } from "../shared/cron";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
+import { id, now } from "./ids";
 import {
   createChat,
   getChat,
@@ -390,8 +391,9 @@ async function runDueSchedules(): Promise<void> {
         next = null;
       }
       try {
-        // The turn reports its own failure in the chat and as a notification.
-        (await send(summary.id, schedule.prompt)).done.catch(() => {});
+        const run = await send(summary.id, schedule.prompt);
+        // Kept in the chat: the run's live error is gone once the window misses it.
+        run.done.catch((error: unknown) => recordFailedRun(summary.id, error));
       } catch {
         // Not started, so the run is still due: the next check tries again.
         continue;
@@ -408,6 +410,19 @@ async function runDueSchedules(): Promise<void> {
   } finally {
     checking = false;
   }
+}
+
+async function recordFailedRun(chatId: string, error: unknown): Promise<void> {
+  const reason = error instanceof Error ? error.message : String(error);
+  const chat = await mutateChat(chatId, (latest) => {
+    latest.messages.push({
+      id: id(),
+      role: "assistant",
+      content: `The scheduled run failed: ${reason}`,
+      createdAt: now(),
+    });
+  }).catch(() => null);
+  if (chat) emit?.({ type: "chat", chatId: chat.id, chat });
 }
 
 export function startScheduler(): void {

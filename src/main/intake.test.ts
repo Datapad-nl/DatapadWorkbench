@@ -58,6 +58,20 @@ async function nextCard(): Promise<ReturnType<typeof pendingQuestionRequests>[nu
 }
 
 describe('project intake', () => {
+  it('posts no card when its chat is deleted before the intake got going', async () => {
+    const started = maybeStartProjectIntake('p1', 'chat-gone')
+    // chat:delete cancels while the intake is still reading the chat and the projects.
+    cancelProjectIntake('chat-gone')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const posted = pendingQuestionRequests().length
+    // Let a card that was posted anyway go, so the run ends.
+    cancelProjectIntake('chat-gone')
+    await started
+
+    expect(posted).toBe(0)
+    expect(await needsProjectIntake('p1')).toBe(true)
+  })
+
   it('resumes after a stop with the saved answers, asking only the rounds left', async () => {
     const first = maybeStartProjectIntake('p1', 'chat-1')
     const round1 = await nextCard()

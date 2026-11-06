@@ -12,7 +12,8 @@ vi.mock('os', async (importOriginal) => {
 })
 
 // A stand-in CLI. It logs each command, reports .codegraph as the index, and init creates it.
-// A fail-init file next to it fails the next init. In the folder, slow-init slows init down and
+// A fail-init file next to it fails the next init, and slow-status holds back the next status
+// answer, read before the wait. In the folder, slow-init slows init down and
 // count sets the reported file count.
 const FAKE_CLI = `#!/bin/sh
 echo "$1" >> "$(dirname "$0")/calls.log"
@@ -20,8 +21,10 @@ case "$1" in
   status)
     if [ -f "$(dirname "$0")/hang" ]; then trap '' TERM; echo started >> "$(dirname "$0")/calls.log"; sleep 3; fi
     count=3; if [ -f "$3/count" ]; then count=$(cat "$3/count"); fi
-    if [ -d "$3/.codegraph" ]; then echo "{\\"initialized\\":true,\\"fileCount\\":$count,\\"nodeCount\\":9,\\"languages\\":[\\"typescript\\"]}"
-    else echo '{"initialized":false}'; fi ;;
+    if [ -d "$3/.codegraph" ]; then out="{\\"initialized\\":true,\\"fileCount\\":$count,\\"nodeCount\\":9,\\"languages\\":[\\"typescript\\"]}"
+    else out='{"initialized":false}'; fi
+    if [ -f "$(dirname "$0")/slow-status" ]; then rm "$(dirname "$0")/slow-status"; sleep 1.5; fi
+    echo "$out" ;;
   init)
     if [ -f "$(dirname "$0")/fail-init" ]; then rm "$(dirname "$0")/fail-init"; echo boom >&2; exit 1; fi
     if [ -f "$3/slow-init" ]; then sleep 1.5; fi
@@ -190,6 +193,39 @@ describe('re-indexing', () => {
     expect(seen.get('a')?.some((index) => index.fileCount === 1)).toBe(false)
     expect(seen.get('a')?.at(-1)).toMatchObject({ state: 'indexed', fileCount: 2 })
   }, 20_000)
+})
+
+describe('readIndex racing a job', () => {
+  it('does not let a read that started before a job overwrite what the job reported', async () => {
+    await installFakeCli()
+    await writeFile(join(root, 'bin', 'slow-status'), '')
+    const codegraph = await import('./codegraph')
+    const seen = record(codegraph)
+
+    const reading = codegraph.readIndex(project('a'))
+    await vi.waitFor(async () => expect(await calls()).toContain('status'), waitLong)
+    codegraph.queueIndex('a', folder)
+    await vi.waitFor(() => expect(seen.get('a')?.at(-1)?.state).toBe('indexed'), waitLong)
+
+    // The read answered "not indexed" before the job ran, and lands after it.
+    expect((await reading).state).toBe('indexed')
+    expect((await codegraph.readIndex(project('a'))).state).toBe('indexed')
+  }, 15_000)
+
+  it('forgets a removed project, so a job still running for its folder stays quiet', async () => {
+    await installFakeCli()
+    await writeFile(join(folder, 'slow-init'), '')
+    const codegraph = await import('./codegraph')
+    const seen = record(codegraph)
+
+    codegraph.queueIndex('a', folder)
+    await vi.waitFor(async () => expect(await calls()).toContain('init'), waitLong)
+    codegraph.forgetProjectIndex('a')
+    const before = seen.get('a')?.length
+    await new Promise((resolve) => setTimeout(resolve, 2_500))
+
+    expect(seen.get('a')?.length).toBe(before)
+  }, 15_000)
 })
 
 describe('readIndex failures', () => {

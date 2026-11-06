@@ -335,6 +335,8 @@ export async function maybeStartProjectIntake(projectId: string, chatId: string)
   if (!projectId || !chatId) return
   if (inflight.has(projectId)) return
   inflight.add(projectId)
+  // Registered before the first wait, so deleting the chat meanwhile cancels it.
+  running.set(chatId, false)
   try {
     if (!(await needsProjectIntake(projectId))) return
     const chat = await getChat(chatId).catch(() => null)
@@ -342,7 +344,6 @@ export async function maybeStartProjectIntake(projectId: string, chatId: string)
     const projects = await listProjects()
     const project = projects.find((item) => item.id === projectId)
     if (!project) return
-    running.set(chatId, false)
     await runIntake(project, chatId)
   } finally {
     running.delete(chatId)
