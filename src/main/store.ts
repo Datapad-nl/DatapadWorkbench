@@ -58,6 +58,7 @@ const deletedChats = new Set<string>()
 /** Where an unreadable projects.json was moved in this run, so the user can be told. */
 let projectsMovedTo: string | null = null
 let recoveryWrite: Promise<void> = Promise.resolve()
+let projectsRecoveredListener: ((aside: string) => void) | null = null
 
 /**
  * projects.json didn't parse and was moved aside. A marker on disk keeps Grok sessions from creating
@@ -66,10 +67,16 @@ let recoveryWrite: Promise<void> = Promise.resolve()
 function markProjectsRecovered(aside: string): void {
   projectsMovedTo = aside
   recoveryWrite = writeJson(recoveryMarkerFile(), { movedTo: aside, at: now() }).catch(() => undefined)
+  projectsRecoveredListener?.(aside)
 }
 
 export function unreadableProjectsMovedTo(): string | null {
   return projectsMovedTo
+}
+
+/** Hears of each later time projects.json is found unreadable, e.g. after another program wrote it. */
+export function onUnreadableProjects(listener: (aside: string) => void): void {
+  projectsRecoveredListener = listener
 }
 
 /** Whether the list is still the empty one left by a recovery. A restored or added project ends it. */

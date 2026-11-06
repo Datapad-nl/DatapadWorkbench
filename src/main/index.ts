@@ -22,6 +22,7 @@ import { startScheduler } from './chatTools'
 import { startPrWatcher } from './pullRequests'
 import {
   ensureStore,
+  onUnreadableProjects,
   purgeUnsafeProjects,
   syncClaudeSessions,
   syncGrokSessions,
@@ -158,6 +159,8 @@ app.whenReady().then(async () => {
   createWindow()
   const movedTo = unreadableProjectsMovedTo()
   if (movedTo) void warnUnreadableProjects(movedTo)
+  // It can also break while the app runs; the sidebar would empty with no word why.
+  onUnreadableProjects((aside) => void warnUnreadableProjects(aside))
   startUpdater()
   const { active } = await getThemeState()
   applyWindowChrome(active)

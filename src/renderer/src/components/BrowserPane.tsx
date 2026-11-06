@@ -614,11 +614,19 @@ function AnnotationLayer({
               left: start.left + event.clientX - start.px,
               top: start.top + event.clientY - start.py
             }
-            next.left = Math.min(host.clientWidth - CARD_W - 8, Math.max(8, next.left))
-            next.top = Math.min(host.clientHeight - 72, Math.max(8, next.top))
+            // In a pane narrower than the card, its grip stays on screen, as when it was placed.
+            next.left = Math.max(8, Math.min(host.clientWidth - CARD_W - 8, next.left))
+            next.top = Math.max(8, Math.min(host.clientHeight - 72, next.top))
             onCardPos(next)
           }}
           onPointerUp={() => {
+            drag.current = null
+          }}
+          // A drag the system takes over ends here, or the card would follow the next hover.
+          onPointerCancel={() => {
+            drag.current = null
+          }}
+          onLostPointerCapture={() => {
             drag.current = null
           }}
         >

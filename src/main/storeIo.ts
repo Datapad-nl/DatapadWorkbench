@@ -52,7 +52,12 @@ export async function readJsonFile<T>(path: string, fallback: T, onCorrupt?: (as
     return JSON.parse(text) as T
   } catch {
     const aside = `${path}.corrupt-${Date.now()}`
-    await rename(path, aside).catch(() => undefined)
+    // Reads at the same moment all see it broken; only the one that moved it says where it went.
+    const moved = await rename(path, aside).then(
+      () => true,
+      () => false
+    )
+    if (!moved) return fallback
     console.error(`Unreadable JSON moved to ${aside}`)
     onCorrupt?.(aside)
     return fallback

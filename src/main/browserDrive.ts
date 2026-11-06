@@ -1,4 +1,14 @@
-import { browserContents, browserConsole, getBrowserState, requestShowBrowser, type ConsoleEntry } from './browser'
+import {
+  browserContents,
+  browserConsole,
+  getBrowserState,
+  goBack,
+  goForward,
+  navigateBrowser,
+  reloadBrowser,
+  requestShowBrowser,
+  type ConsoleEntry
+} from './browser'
 import type { BrowserState } from '../shared/types'
 
 /** Which element a tool acts on: a number from the last snapshot, a CSS selector, or visible text. */
@@ -97,6 +107,12 @@ function serial<A extends unknown[], T>(op: (...args: A) => Promise<T>): (...arg
     return next
   }
 }
+
+// Navigation waits its turn too, so a click or typing cannot land on the page that replaces it.
+export const navigate = serial(async (url: string): Promise<BrowserState> => navigateBrowser(url))
+export const back = serial(async (): Promise<BrowserState> => goBack())
+export const forward = serial(async (): Promise<BrowserState> => goForward())
+export const reload = serial(async (): Promise<BrowserState> => reloadBrowser())
 
 function requirePage(): void {
   const { url } = getBrowserState()

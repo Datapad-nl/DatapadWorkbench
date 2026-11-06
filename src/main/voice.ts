@@ -1,6 +1,6 @@
 import { app, net, protocol, shell, systemPreferences } from 'electron'
 import { createWriteStream } from 'fs'
-import { mkdir, rename, stat, writeFile } from 'fs/promises'
+import { mkdir, rename, rm, stat, writeFile } from 'fs/promises'
 import { join, normalize, sep } from 'path'
 import { pathToFileURL } from 'url'
 import { pipeline } from 'stream/promises'
@@ -198,14 +198,14 @@ async function downloadFile(id: string, rel: string, dest: string): Promise<numb
     idle = setTimeout(() => controller.abort(), DOWNLOAD_IDLE_MS)
   }
   touch()
+  // Written beside the target and moved in place at the end, so a cut download never looks ready.
+  const part = `${dest}.part`
   try {
     const response = await net.fetch(url, { redirect: 'follow', signal: controller.signal })
     if (!response.ok || !response.body) {
       throw new Error(`Could not download ${rel} (${response.status})`)
     }
     await mkdir(join(dest, '..'), { recursive: true })
-    // Written beside the target and moved in place at the end, so a cut download never looks ready.
-    const part = `${dest}.part`
     let bytes = 0
     const meter = new Transform({
       transform(chunk: Buffer, _encoding, callback) {
@@ -226,6 +226,8 @@ async function downloadFile(id: string, rel: string, dest: string): Promise<numb
     await rename(part, dest)
     return bytes
   } catch (error) {
+    // A failed download leaves no half file behind on disk.
+    await rm(part, { force: true }).catch(() => undefined)
     if (controller.signal.aborted) throw new Error(`Download of ${rel} stalled`)
     throw error
   } finally {

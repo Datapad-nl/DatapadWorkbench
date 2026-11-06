@@ -207,8 +207,9 @@ function readSession(): UiSession {
   try {
     const parsed = JSON.parse(localStorage.getItem(SESSION_KEY) ?? '') as Partial<UiSession>
     return {
+      // Older builds could save a tab twice.
       openChatIds: Array.isArray(parsed.openChatIds)
-        ? parsed.openChatIds.filter((id): id is string => typeof id === 'string')
+        ? [...new Set(parsed.openChatIds.filter((id): id is string => typeof id === 'string'))]
         : [],
       activeChatId: typeof parsed.activeChatId === 'string' ? parsed.activeChatId : null,
       activeProjectId: typeof parsed.activeProjectId === 'string' ? parsed.activeProjectId : null
@@ -288,7 +289,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
           next[chatId] = {
             status: 'streaming',
             draft: prev.turnId === turnId ? prev.draft + text : text,
-            error: null,
+            // A steer that failed during this turn keeps its message; a new turn clears it.
+            error: prev.turnId === turnId ? prev.error : null,
             turnId
           }
         }
@@ -526,10 +528,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
           for (const chat of loaded) next[chat.id] ??= chat
           return next
         })
-        setOpenChatIds(openIds)
-        setActiveChatId(activeChat && openIds.includes(activeChat) ? activeChat : (openIds.at(-1) ?? null))
+        // Keep a tab opened while loading, such as a chat main asked to show.
+        setOpenChatIds((current) => [...new Set([...openIds, ...current])])
+        // It also stays in front.
+        setActiveChatId(
+          (current) => current ?? (activeChat && openIds.includes(activeChat) ? activeChat : (openIds.at(-1) ?? null))
+        )
       }
-      setActiveProjectId(activeProject)
+      setActiveProjectId((current) => current ?? activeProject)
       setReady(true)
     })()
     return () => {
@@ -604,7 +610,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
           turnsRef.current[event.chatId] = { turnId: event.turnId, live: false }
           flushStreamBuf()
           applyChat(event.chatId, event.chat)
-          setStreams((current) => ({ ...current, [event.chatId]: { ...emptyStream, turnId: event.turnId } }))
+          setStreams((current) => {
+            const prev = current[event.chatId]
+            // A steer that failed during the turn keeps its message until the next send.
+            const error = prev?.turnId === event.turnId ? prev.error : null
+            return { ...current, [event.chatId]: { ...emptyStream, error, turnId: event.turnId } }
+          })
           void refresh()
           void syncLive()
           return

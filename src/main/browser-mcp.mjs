@@ -321,14 +321,15 @@ WORKBENCH_TOOLS.push(
 
 const TOOLS = WORKBENCH ? WORKBENCH_TOOLS : BROWSER_TOOLS
 
-async function callApi(method, path, body) {
+async function callApi(method, path, body, signal) {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${TOKEN}`,
       'Content-Type': 'application/json'
     },
-    body: body ? JSON.stringify(body) : undefined
+    body: body ? JSON.stringify(body) : undefined,
+    signal
   })
   const text = await res.text()
   if (!res.ok) {
@@ -343,14 +344,16 @@ async function callApi(method, path, body) {
   return text ? JSON.parse(text) : {}
 }
 
-// Tool calls in flight, and those the client cancelled (`notifications/cancelled`).
-const running = new Set()
+// Tool calls in flight with their aborts, and those the client cancelled (`notifications/cancelled`).
+const running = new Map()
 const cancelled = new Set()
 
 async function delegate(args, requestId) {
   const started = await callApi('POST', '/chats/delegate', { ...args, from: CHAT_ID })
+  // A cancel ends the wait in progress rather than after it.
+  const signal = running.get(requestId)?.signal
   while (!cancelled.has(requestId)) {
-    const result = await callApi('POST', '/chats/wait', { chatId: started.chatId, ms: 60_000 })
+    const result = await callApi('POST', '/chats/wait', { chatId: started.chatId, ms: 60_000 }, signal)
     if (result.done) return { ...result, chatId: started.chatId, title: started.title }
   }
   throw new Error('Cancelled')
@@ -453,7 +456,11 @@ async function handle(message) {
   }
   if (method === 'notifications/initialized' || method === 'initialized') return
   if (method === 'notifications/cancelled') {
-    if (running.has(params?.requestId)) cancelled.add(params.requestId)
+    const call = running.get(params?.requestId)
+    if (call) {
+      cancelled.add(params.requestId)
+      call.abort()
+    }
     return
   }
   if (method === 'ping') {
@@ -465,7 +472,7 @@ async function handle(message) {
     return
   }
   if (method === 'tools/call') {
-    running.add(id)
+    running.set(id, new AbortController())
     let result
     try {
       const data = await handleTool(params?.name, params?.arguments ?? {}, id)

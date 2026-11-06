@@ -17,6 +17,11 @@ const empty: KnowledgeSnapshot = {
 
 type SimNode = KnowledgeNode & { x: number; y: number; vx: number; vy: number }
 
+function failureText(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : fallback
+  return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
+}
+
 function reasonCopy(snapshot: KnowledgeSnapshot): string {
   if (snapshot.reason === 'no-folder') return 'Attach a folder to this project to build a knowledge vault.'
   if (snapshot.reason === 'error') return snapshot.error || 'Could not read the knowledge vault.'
@@ -299,10 +304,16 @@ function GraphCanvas({
       dragRef.current = null
     }
 
+    // A drag the system takes over ends without counting as a click.
+    function onCancel(): void {
+      dragRef.current = null
+    }
+
     canvas.addEventListener('pointerdown', onDown)
     canvas.addEventListener('pointermove', onMove)
     canvas.addEventListener('pointerup', onUp)
-    canvas.addEventListener('pointercancel', onUp)
+    canvas.addEventListener('pointercancel', onCancel)
+    canvas.addEventListener('lostpointercapture', onCancel)
     if (active) loop()
     return () => {
       running = false
@@ -310,7 +321,8 @@ function GraphCanvas({
       canvas.removeEventListener('pointerdown', onDown)
       canvas.removeEventListener('pointermove', onMove)
       canvas.removeEventListener('pointerup', onUp)
-      canvas.removeEventListener('pointercancel', onUp)
+      canvas.removeEventListener('pointercancel', onCancel)
+      canvas.removeEventListener('lostpointercapture', onCancel)
     }
   }, [active, onSelect])
 
@@ -336,6 +348,9 @@ export function GraphPane(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [note, setNote] = useState<{ title: string; body: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  /** A failed read or rebuild, shown only for the project it failed for. */
+  const [failed, setFailed] = useState<{ projectId: string; message: string } | null>(null)
+  const error = failed && failed.projectId === activeProjectId ? failed.message : null
   const projectIdRef = useRef(activeProjectId)
   projectIdRef.current = activeProjectId
   const project = projects.find((item) => item.id === activeProjectId) ?? null
@@ -360,12 +375,24 @@ export function GraphPane(): React.JSX.Element {
       return
     }
     let cancelled = false
-    void window.workbench.getKnowledgeSnapshot(activeProjectId).then((next) => {
-      if (!cancelled) setSnapshot(next)
-    })
+    // A newer graph replaces an earlier failure to get one.
+    const show = (next: KnowledgeSnapshot): void => {
+      setSnapshot(next)
+      setFailed((current) => (current?.projectId === next.projectId ? null : current))
+    }
+    window.workbench.getKnowledgeSnapshot(activeProjectId).then(
+      (next) => {
+        if (!cancelled) show(next)
+      },
+      (caught: unknown) => {
+        if (!cancelled) {
+          setFailed({ projectId: activeProjectId, message: failureText(caught, 'Could not read the knowledge vault') })
+        }
+      }
+    )
     const unsubscribe = window.workbench.onKnowledgeSnapshot((next) => {
       if (next.projectId !== activeProjectId) return
-      setSnapshot(next)
+      show(next)
     })
     return () => {
       cancelled = true
@@ -396,10 +423,14 @@ export function GraphPane(): React.JSX.Element {
 
   async function rebuild(): Promise<void> {
     if (!activeProjectId || busy) return
+    const projectId = activeProjectId
     setBusy(true)
+    setFailed(null)
     try {
-      const next = await window.workbench.rebuildKnowledge(activeProjectId)
+      const next = await window.workbench.rebuildKnowledge(projectId)
       if (next.projectId === projectIdRef.current) setSnapshot(next)
+    } catch (caught) {
+      setFailed({ projectId, message: failureText(caught, 'Could not rebuild the knowledge vault') })
     } finally {
       setBusy(false)
     }
@@ -412,10 +443,14 @@ export function GraphPane(): React.JSX.Element {
           {otherPanes && <ReorderGrip onSwap={swapRightPanes} label="Reorder panes" />}
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
             <h1 className="shrink-0 text-[13px] font-semibold text-ink">Knowledge</h1>
-            <p className="no-drag min-w-0 truncate font-mono text-[11px] text-faint">
-              {snapshot.available && !loading
-                ? `${snapshot.nodes.length} notes · ${snapshot.edges.length} links`
-                : project?.name ?? 'No project'}
+            <p
+              className={`no-drag min-w-0 truncate font-mono text-[11px] ${error ? 'text-danger' : 'text-faint'}`}
+              title={error ?? undefined}
+            >
+              {error ??
+                (snapshot.available && !loading
+                  ? `${snapshot.nodes.length} notes · ${snapshot.edges.length} links`
+                  : project?.name ?? 'No project')}
             </p>
           </div>
           <div className="no-drag flex shrink-0 items-center gap-1">
@@ -442,7 +477,7 @@ export function GraphPane(): React.JSX.Element {
 
       {!activeProjectId || loading || !snapshot.available ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-[12px] text-muted">
-          {loading ? 'Loading…' : reasonCopy(snapshot)}
+          {error ?? (loading ? 'Loading…' : reasonCopy(snapshot))}
         </div>
       ) : (
         <div className="no-drag flex min-h-0 flex-1 flex-col">

@@ -120,7 +120,11 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
   }, [open])
 
   async function setColor(next: string): Promise<void> {
-    await updateProject({ id: project.id, color: next })
+    try {
+      await updateProject({ id: project.id, color: next })
+    } catch (caught) {
+      window.alert(errorText(caught, 'Could not change the color'))
+    }
   }
 
   return (
@@ -310,8 +314,12 @@ function ProjectMenu({
 
   async function changeFolder(): Promise<void> {
     onClose()
-    const next = await pickFolder()
-    if (next) await updateProject({ id: project.id, path: next })
+    try {
+      const next = await pickFolder()
+      if (next) await updateProject({ id: project.id, path: next })
+    } catch (caught) {
+      window.alert(errorText(caught, 'Could not change the folder'))
+    }
   }
 
   function remove(): void {
@@ -321,7 +329,9 @@ function ProjectMenu({
         `Remove ${project.name} from the Workbench?\n\nIts chats are kept and come back when you add the folder again. Files on disk are not touched.`
       )
     ) {
-      void deleteProject(project.id)
+      deleteProject(project.id).catch((caught: unknown) =>
+        window.alert(errorText(caught, 'Could not remove the project'))
+      )
     }
   }
 
@@ -545,7 +555,9 @@ function ChatRow({
                       : 'Delete this chat?'
                   )
                 )
-                  void deleteChat(chat.id)
+                  deleteChat(chat.id).catch((caught: unknown) =>
+                    window.alert(errorText(caught, 'Could not delete the chat'))
+                  )
               }}
             >
               <Icon name="close" size={12} />

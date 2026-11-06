@@ -83,6 +83,19 @@ describe('readJsonFile', () => {
     expect(await readFile(join(dir, files[0]), 'utf8')).toBe('{"projects": [')
   })
 
+  it('reports a move once when reads overlap, with the path the file is at', async () => {
+    const path = join(dir, 'broken.json')
+    await writeFile(path, '{"projects": [', 'utf8')
+    const reported: string[] = []
+    const onCorrupt = (aside: string): void => {
+      reported.push(aside)
+    }
+    await Promise.all([1, 2, 3].map(() => readJsonFile(path, null, onCorrupt)))
+    const files = await readdir(dir)
+    expect(files).toHaveLength(1)
+    expect(reported).toEqual([join(dir, files[0])])
+  })
+
   it('throws read errors other than a missing file', async () => {
     await expect(readJsonFile(dir, null)).rejects.toThrow()
   })

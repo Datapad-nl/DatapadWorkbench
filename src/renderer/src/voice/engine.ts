@@ -1231,7 +1231,8 @@ export async function openLiveMicStream(preferredId?: string): Promise<MediaStre
     } catch {
       continue
     }
-    const score = await streamSignalScore(stream, 220)
+    // A mic whose probe fails counts as silent, so it is closed or kept like any other.
+    const score = await streamSignalScore(stream, 220).catch(() => 0)
     if (score > 80) {
       fallback?.getTracks().forEach((track) => track.stop())
       return stream

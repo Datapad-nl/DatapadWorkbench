@@ -3,16 +3,22 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { randomBytes } from 'crypto'
 import { existsSync } from 'fs'
 import { join, sep } from 'path'
+import { getBrowserState, requestShowBrowser, stopBrowser } from './browser'
 import {
-  getBrowserState,
-  goBack,
-  goForward,
-  navigateBrowser,
-  reloadBrowser,
-  requestShowBrowser,
-  stopBrowser
-} from './browser'
-import { click, consoleLog, evaluate, press, screenshot, snapshot, type, waitFor, type Target } from './browserDrive'
+  back,
+  click,
+  consoleLog,
+  evaluate,
+  forward,
+  navigate,
+  press,
+  reload,
+  screenshot,
+  snapshot,
+  type,
+  waitFor,
+  type Target
+} from './browserDrive'
 import { transcribeYoutube } from './youtube'
 import {
   cancelProjectSchedule,
@@ -157,22 +163,22 @@ async function handle(
       return
     }
     requestShowBrowser()
-    json(res, 200, await navigateBrowser(urlInput))
+    json(res, 200, await navigate(urlInput))
     return
   }
 
   if (method === 'POST' && path === '/back') {
     requestShowBrowser()
-    json(res, 200, goBack())
+    json(res, 200, await back())
     return
   }
   if (method === 'POST' && path === '/forward') {
     requestShowBrowser()
-    json(res, 200, goForward())
+    json(res, 200, await forward())
     return
   }
   if (method === 'POST' && path === '/reload') {
-    json(res, 200, reloadBrowser())
+    json(res, 200, await reload())
     return
   }
   if (method === 'POST' && path === '/stop') {

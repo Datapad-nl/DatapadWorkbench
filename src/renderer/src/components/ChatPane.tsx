@@ -257,6 +257,7 @@ export function ChatPane(): React.JSX.Element {
   const [rewindBusy, setRewindBusy] = useState(false)
   const [rewindError, setRewindError] = useState<string | null>(null)
   const drafts = useRef(new Map<string, ComposerDraft>())
+  const restorers = useRef(new Map<string, (sent: ComposerDraft) => void>())
 
   if (rewind && rewind.chatId !== activeChatId && !rewindBusy && !rewindError) setRewind(null)
   const rewindTarget = rewind ? chatsById[rewind.chatId] : undefined
@@ -368,6 +369,7 @@ export function ChatPane(): React.JSX.Element {
             chatId={activeChat.id}
             hasFolder={Boolean(activeProject?.path)}
             drafts={drafts}
+            restorers={restorers}
             onSend={(text, attachments, mentions) =>
               sendMessage(activeChat.id, text, attachments, mentions)
             }
@@ -1497,6 +1499,16 @@ function MentionChip({
 
 type ComposerDraft = { value: string; attachments: Attachment[]; mentions: FileMention[] }
 
+/** A failed send's text, put back ahead of what was typed since. */
+function joinText(sent: string, typed: string): string {
+  return typed.trim() ? `${sent.trimEnd()}\n\n${typed}` : sent
+}
+
+function joinBy<T>(sent: T[], typed: T[], key: (item: T) => string): T[] {
+  const seen = new Set(sent.map(key))
+  return [...sent, ...typed.filter((item) => !seen.has(key(item)))]
+}
+
 function Composer({
   streaming,
   progress,
@@ -1508,6 +1520,7 @@ function Composer({
   hasFolder,
   history,
   drafts,
+  restorers,
   onSend,
   onSlash,
   onStop,
@@ -1528,6 +1541,8 @@ function Composer({
   hasFolder: boolean
   history: string[]
   drafts: React.RefObject<Map<string, ComposerDraft>>
+  /** By chat: puts a failed send back in the composer showing that chat now. */
+  restorers: React.RefObject<Map<string, (sent: ComposerDraft) => void>>
   onSend: (text: string, attachments: Attachment[], mentions: FileMention[]) => Promise<boolean>
   onSlash: (def: SlashDef, args: string, draft: { attachments: Attachment[]; mentions: FileMention[] }) => Promise<string | null>
   onStop: () => void
@@ -1611,6 +1626,20 @@ function Composer({
     if (!value && attachments.length === 0 && mentions.length === 0) drafts.current.delete(chatId)
     else drafts.current.set(chatId, { value, attachments, mentions })
   }, [attachments, chatId, drafts, mentions, value])
+
+  // A send that fails after its chat was switched away and back lands in this composer, not the old one.
+  useEffect(() => {
+    const put = (sent: ComposerDraft): void => {
+      setValue((typed) => joinText(sent.value, typed))
+      setAttachments((typed) => joinBy(sent.attachments, typed, (item) => item.id))
+      setMentions((typed) => joinBy(sent.mentions, typed, (item) => item.path))
+    }
+    const live = restorers.current
+    live.set(chatId, put)
+    return () => {
+      if (live.get(chatId) === put) live.delete(chatId)
+    }
+  }, [chatId, restorers])
 
   useEffect(() => {
     let cancelled = false
@@ -1742,13 +1771,22 @@ function Composer({
     }
   }
 
-  /** Puts a failed send back, unless the user has started a new draft. */
+  /** Puts a failed send back, ahead of anything typed since. */
   function restore(sent: ComposerDraft): void {
-    if (drafts.current.has(chatId)) return
-    drafts.current.set(chatId, sent)
-    setValue(sent.value)
-    setAttachments(sent.attachments)
-    setMentions(sent.mentions)
+    const live = restorers.current.get(chatId)
+    if (live) return live(sent)
+    // Its chat is not on screen: the draft waits for it.
+    const typed = drafts.current.get(chatId)
+    drafts.current.set(
+      chatId,
+      typed
+        ? {
+            value: joinText(sent.value, typed.value),
+            attachments: joinBy(sent.attachments, typed.attachments, (item) => item.id),
+            mentions: joinBy(sent.mentions, typed.mentions, (item) => item.path)
+          }
+        : sent
+    )
   }
 
   function pickHit(hit: FileHit): void {

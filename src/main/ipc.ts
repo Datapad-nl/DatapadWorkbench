@@ -387,7 +387,9 @@ export function registerIpc(): void {
       const removed = await removeChatWorktree(project.path, chat.worktreePath)
       // Deleting the chat now would leave its worktree with nothing pointing at it.
       if (!removed) {
-        throw new Error(`Could not remove the worktree at ${chat.worktreePath}, so the chat was kept. Close anything using it and try again.`)
+        throw new Error(
+          `Could not remove the worktree at ${chat.worktreePath}, so the chat was kept. Commit or discard its uncommitted and untracked files, close anything using it, and try again.`
+        )
       }
       // A worktree shares its refs with the project's repo, so its checkpoints are deleted from there.
       cwd = project.path
