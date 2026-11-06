@@ -157,6 +157,16 @@ const api = {
       ipcRenderer.removeListener('theme:changed', wrapped)
     }
   },
+  /** Text quoted from the right-click menu. While something listens, the menu offers "Quote in Reply". */
+  onQuoteSelection: (listener: (text: string) => void) => {
+    const wrapped = (_event: unknown, payload: string): void => listener(payload)
+    ipcRenderer.on('contextMenu:quote', wrapped)
+    ipcRenderer.send('contextMenu:quoteTarget', true)
+    return () => {
+      ipcRenderer.removeListener('contextMenu:quote', wrapped)
+      ipcRenderer.send('contextMenu:quoteTarget', ipcRenderer.listenerCount('contextMenu:quote') > 0)
+    }
+  },
   onChatEvent: (listener: (event: ChatEvent) => void) => {
     const wrapped = (_event: unknown, payload: ChatEvent): void => listener(payload)
     ipcRenderer.on('chat:event', wrapped)

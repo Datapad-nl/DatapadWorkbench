@@ -1622,6 +1622,28 @@ function Composer({
     ref.current?.focus()
   }, [])
 
+  // "Quote in Reply" from the right-click menu adds the selection as a Markdown quote, ready for a question.
+  useEffect(
+    () =>
+      window.workbench.onQuoteSelection((text) => {
+        const quote = text
+          .trim()
+          .split('\n')
+          .map((line) => (line.trim() ? `> ${line.trimEnd()}` : '>'))
+          .join('\n')
+        setValue((current) => `${current.trim() ? `${current.trimEnd()}\n\n` : ''}${quote}\n\n`)
+        requestAnimationFrame(() => {
+          const el = ref.current
+          if (!el) return
+          el.focus()
+          const pos = el.value.length
+          el.setSelectionRange(pos, pos)
+          el.scrollTop = el.scrollHeight
+        })
+      }),
+    []
+  )
+
   useEffect(() => {
     if (!value && attachments.length === 0 && mentions.length === 0) drafts.current.delete(chatId)
     else drafts.current.set(chatId, { value, attachments, mentions })

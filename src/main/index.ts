@@ -7,6 +7,7 @@ import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
 import { attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
 import { augmentPath, killOrphanCodegraphInits, stopCodegraphJobs } from './codegraph'
+import { attachContextMenu } from './contextMenu'
 import { loadDotEnv } from './env'
 import { stopGitWatchers } from './git'
 import { stopKnowledgeJobs, stopKnowledgeWatchers } from './knowledge'
@@ -81,6 +82,7 @@ function createWindow(): void {
   })
 
   trackWindowState(mainWindow)
+  attachContextMenu(mainWindow)
 
   mainWindow.on('ready-to-show', () => {
     if (state.isMaximized) mainWindow.maximize()
