@@ -40,7 +40,7 @@ import {
   setAcpSessionMode,
   type SessionUpdate
 } from './acp'
-import { emitGoal, emitNotice, finishTurn, startTurn } from './activity'
+import { emitNotice, finishTurn, startTurn } from './activity'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
 import { id, now, titleFromPrompt } from './ids'
@@ -576,23 +576,6 @@ function promptForMode(mode: PermissionMode, text: string): string {
   return `${PLAN_MODE_INSTRUCTION}\n\n${text}`
 }
 
-const LONG_TASK_RE =
-  /\b(implement|fix|add|create|write|edit|refactor|rename|delete|remove|migrate|update the|patch|wire|replace|extract|introduce|scaffold|build out|change the|extend|rerun|re-run|sweep|investigate|compare|measure|analyze|analyse|backtest|debug)\b/i
-
-/** Long work goes through Grok's /goal loop so it keeps running and reports milestones. */
-export function shouldStartGoal(mode: PermissionMode, text: string): boolean {
-  if (mode !== 'accept') return false
-  const trimmed = text.trim()
-  if (!trimmed || trimmed.startsWith('/')) return false
-  if (LONG_TASK_RE.test(trimmed)) return true
-  return trimmed.length >= 280
-}
-
-function goalObjective(text: string): string {
-  const line = text.trim().split('\n').find((item) => item.trim())?.trim() ?? 'this task'
-  return line.length > 140 ? `${line.slice(0, 139).trim()}…` : line
-}
-
 export async function rewindChat(chatId: string, checkpointId: string, cwd: string | null): Promise<Chat> {
   if (rewinding.has(chatId)) throw new Error('This chat is already rewinding.')
   // No new turn until the files and messages are back, or it would run on half of each.
@@ -940,7 +923,6 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const userText = followText || lastUser!.content
   const mentioned = followText ? followText : promptForMentions(lastUser!.content, lastUser!.mentions)
   const cued = promptForMode(mode, mentioned)
-  const asGoal = !followText && shouldStartGoal(mode, userText)
   const images = followUp ? (followUp.attachments ?? []) : (lastUser!.attachments ?? [])
 
   // From here the agent owns the turn. Nothing is awaited until the prompt is sent.
@@ -952,16 +934,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   sessionChats.set(sessionId, chat.id)
   bindPermissionSession(sessionId, chat.id, mode)
   startTurn({ chatId: chat.id, chatTitle: chat.title, sessionId, prompt: opening })
-  if (asGoal) {
-    emitGoal({
-      chatId: chat.id,
-      chatTitle: chat.title,
-      sessionId,
-      title: goalObjective(userText),
-      detail: 'Running as a goal until this is done.'
-    })
-  }
-  const prompt = promptSession(sessionId, asGoal ? `/goal ${cued}` : cued, images)
+  const prompt = promptSession(sessionId, cued, images)
   prompt.catch(() => {})
   const result = await Promise.race([prompt.then(() => null), turn.abandoned])
   if (result === STOP) {
