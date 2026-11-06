@@ -1,5 +1,6 @@
 import type { Chat, ChatAgent, ChatEvent } from "../shared/types";
 import { nextCronRun } from "../shared/cron";
+import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { isStreaming } from "./grok";
@@ -150,7 +151,7 @@ export async function readProjectChat(input: {
   const messages = chat.messages.slice(-last);
   const head = `${chat.title} (${chat.id}) · ${chatAgentLabel(normalizeChatAgent(chat.agent))} · ${chat.messages.length} messages${isStreaming(chat.id) ? " · running" : ""}`;
   const body = messages
-    .map((message) => `## ${message.role}\n\n${clip(message.content, 8000)}`)
+    .map((message) => `## ${message.role}\n\n${clip(plainReply(message.content), 8000)}`)
     .join("\n\n");
   const skipped = chat.messages.length - messages.length;
   return {
@@ -214,7 +215,7 @@ export async function delegateTask(input: {
   run.done = finished
     .then((done) => {
       const reply = done?.messages.at(-1);
-      run.answer = reply?.role === "assistant" ? reply.content : "";
+      run.answer = reply?.role === "assistant" ? plainReply(reply.content) : "";
       if (!done) run.error = "The chat was stopped.";
     })
     .catch((error: unknown) => {

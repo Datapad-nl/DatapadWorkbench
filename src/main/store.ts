@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'fs/promises'
 import { join, normalize } from 'path'
 import { type McpServers, parseMcpServers } from '../shared/mcp'
 import { normalizeHexColor, pickProjectColor } from '../shared/projectColor'
+import { plainReply } from '../shared/steps'
 import { DEFAULT_THEME_ID } from '../shared/theme'
 import {
   DEFAULT_MODEL,
@@ -546,7 +547,7 @@ export async function searchChats(query: string): Promise<string[]> {
     if (entry?.updatedAt !== stored.updatedAt) {
       // getChat also reads the messages an imported chat keeps in its agent's session files.
       const chat = await getChat(stored.id).catch(() => null)
-      const text = (chat?.messages ?? []).map((message) => message.content).join('\n').toLowerCase()
+      const text = (chat?.messages ?? []).map((message) => plainReply(message.content)).join('\n').toLowerCase()
       entry = { updatedAt: stored.updatedAt, text }
       searchText.set(stored.id, entry)
     }

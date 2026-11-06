@@ -53,6 +53,7 @@ import { chatWorkingDir, isolateChatIfNeeded } from './git'
 import { projectSessionRules } from './intake'
 import { getApiKey, getChat, listChats, mutateChat, saveChat } from './store'
 import { saveVisual, visualFromUpdate } from './visuals'
+import { STEP_BREAK, plainReply } from '../shared/steps'
 
 const BTW_INSTRUCTION = [
   'You are answering a /btw aside on the ongoing main task in this chat.',
@@ -92,6 +93,8 @@ const asideAborts = new Map<string, Set<AbortController>>()
 const asideSteers = new Map<string, SteerNote[]>()
 let nextGen = 1
 const drafts = new Map<string, string>()
+/** Sessions that ran a tool since their last text, so the next text starts a new step. */
+const stepBreaks = new Set<string>()
 const livePlans = new Map<string, ChatPlan>()
 const sessionChats = new Map<string, string>()
 const liveListeners = new Set<(event: ChatEvent) => void>()
@@ -273,14 +276,16 @@ onSessionUpdate((event) => {
     }
     if (chatId) void snapshotTouched(chatId, event.update)
     showVisual(event.sessionId, event.update)
+    if (drafts.get(event.sessionId)?.trim()) stepBreaks.add(event.sessionId)
     return
   }
   if (event.update.sessionUpdate !== 'agent_message_chunk') return
   const text = contentText(event.update.content)
   if (!text) return
   const current = drafts.get(event.sessionId) ?? ''
-  drafts.set(event.sessionId, current + text)
-  deltaListeners.get(event.sessionId)?.(text)
+  const chunk = stepBreaks.delete(event.sessionId) && current.trim() ? STEP_BREAK + text : text
+  drafts.set(event.sessionId, current + chunk)
+  deltaListeners.get(event.sessionId)?.(chunk)
 })
 
 const deltaListeners = new Map<string, (text: string) => void>()
@@ -610,6 +615,7 @@ export async function streamAssistant(
     normalizePermissionMode(resolved.chat.mode)
   )
   drafts.set(resolved.sessionId, '')
+  stepBreaks.delete(resolved.sessionId)
   deltaListeners.set(resolved.sessionId, onDelta)
   const opening = followText || lastUser?.content || 'Screenshot'
   startTurn({
@@ -702,6 +708,7 @@ export async function streamAssistant(
     if (isCurrentTurn(chat.id, gen) || cancelled.has(chat.id)) inflight.delete(chat.id)
     cancelled.delete(chat.id)
     drafts.delete(resolved.sessionId)
+    stepBreaks.delete(resolved.sessionId)
     deltaListeners.delete(resolved.sessionId)
   }
 }
@@ -804,10 +811,10 @@ function asideContext(chat: Chat, skipMessageId?: string): string {
     const who = message.role === 'user' ? 'User' : chatAgentLabel(normalizeChatAgent(chat.agent))
     const tag =
       message.kind === 'btw' ? ' (aside)' : message.kind === 'steer' ? ' (steer)' : ''
-    lines.push(`${who}${tag}: ${clipText(message.content, ASIDE_MESSAGE_MAX)}`)
+    lines.push(`${who}${tag}: ${clipText(plainReply(message.content), ASIDE_MESSAGE_MAX)}`)
   }
   const liveSession = inflight.get(chat.id)?.sessionId ?? chat.grokSessionId
-  const live = liveSession ? drafts.get(liveSession)?.trim() : ''
+  const live = liveSession ? plainReply(drafts.get(liveSession) ?? '').trim() : ''
   if (live) {
     lines.push(`${chatAgentLabel(normalizeChatAgent(chat.agent))} (in progress): ${clipText(live, 3_000)}`)
   }

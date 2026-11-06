@@ -26,6 +26,7 @@ import {
   slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
+import { plainReply } from '../../../shared/steps'
 import {
   chatAgentLabel,
   formatGrokCli,
@@ -40,6 +41,7 @@ import { useChatProgress } from '../progress'
 import { VoiceBlob } from '../voice/VoiceBlob'
 import { useVoice } from '../voice/VoiceProvider'
 import { useStreams, useWorkspace, type RightPaneId } from '../workspace'
+import { AgentReply } from './AgentReply'
 import { AgentGlyph, Icon, IconButton, type IconName } from './icons'
 import { Markdown } from './Markdown'
 import { ProjectOrientation } from './OrientationCard'
@@ -95,7 +97,7 @@ function conversationMarkdown(messages: Message[]): string {
     .map((message) => {
       const who = message.role === 'user' ? 'You' : 'Agent'
       const extras = (message.mentions ?? []).map((item) => `@${item.path}`).join(' ')
-      return `## ${who}\n\n${message.content}${extras ? `\n\n${extras}` : ''}`
+      return `## ${who}\n\n${plainReply(message.content)}${extras ? `\n\n${extras}` : ''}`
     })
     .join('\n\n')
 }
@@ -140,7 +142,7 @@ async function runSlash(input: SlashRun): Promise<string | null> {
       const offset = args && /^\d+$/.test(args) ? Number(args) : 1
       const reply = replies.at(-offset)
       if (!reply?.content) return 'No reply to copy'
-      return (await copyText(reply.content)) ? 'Copied last reply' : 'Could not copy'
+      return (await copyText(plainReply(reply.content))) ? 'Copied last reply' : 'Could not copy'
     }
     case 'export': {
       const text = conversationMarkdown(input.messages)
@@ -935,13 +937,13 @@ function MessageList({
                     <div className="min-w-0 flex-1">
                       <AssistantHeader agent={agent} meta={side === 'btw' ? 'side answer' : undefined} />
                       <div className="mt-1 text-[14.5px] leading-[1.65]">
-                        {message.content ? <Markdown text={message.content} chatId={chatId} /> : null}
+                        {message.content ? <AgentReply text={message.content} chatId={chatId} /> : null}
                         {message.kind === 'btw' && !message.content ? <span className="cursor" /> : null}
                       </div>
                       {extras}
                       {message.content && (
                         <div className="mt-2 flex items-center gap-0.5">
-                          <CopyAction text={message.content} />
+                          <CopyAction text={plainReply(message.content)} />
                           {checkpoint && (
                             <ReplyAction
                               icon="retry"
@@ -963,7 +965,7 @@ function MessageList({
               <div className="min-w-0 flex-1">
                 <AssistantHeader agent={agent} />
                 <div className="mt-1 text-[14.5px] leading-[1.65]">
-                  {draft ? <Markdown text={draft} chatId={chatId} /> : null}
+                  {draft ? <AgentReply text={draft} chatId={chatId} live /> : null}
                 </div>
                 {streaming && (
                   <div

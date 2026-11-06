@@ -1,4 +1,5 @@
 import type { VoiceLanguage, VoiceSettings } from '../../../shared/types'
+import { plainReply } from '../../../shared/steps'
 import { loadSupertonic, synthesize } from './supertonic'
 import { getAsr } from './whisper'
 
@@ -110,7 +111,7 @@ function expandSpokenContractions(text: string): string {
 }
 
 export function speakableText(markdown: string): string {
-  let text = markdown.replace(/```[\s\S]*?```/g, ' ')
+  let text = plainReply(markdown).replace(/```[\s\S]*?```/g, ' ')
   text = text.replace(/`[^`]+`/g, ' ')
   text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
   text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')

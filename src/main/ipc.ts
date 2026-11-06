@@ -112,6 +112,7 @@ import {
   openMicPrivacySettings
 } from './voice'
 import { checkForUpdates, getUpdateState, installUpdate, onUpdateState } from './updater'
+import { replySteps } from '../shared/steps'
 import {
   checkoutGit,
   chatWorkingDir,
@@ -197,7 +198,8 @@ async function sendTurn(
       if (!done) return null
       emit({ type: 'done', chatId, chat: done })
       const reply = done.messages.at(-1)
-      notifyChat(done, reply?.role === 'assistant' && reply.content ? reply.content : 'Finished', openFromNotice)
+      const answer = reply?.role === 'assistant' ? replySteps(reply.content).at(-1) : undefined
+      notifyChat(done, answer || 'Finished', openFromNotice)
       drainAsideSteers(chatId, project)
       return done
     })
