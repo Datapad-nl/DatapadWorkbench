@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KnowledgeNode, KnowledgeSnapshot } from '../../../shared/types'
+import { linkNotes } from '../noteLinks'
 import { useWorkspace } from '../workspace'
 import { Markdown } from './Markdown'
 import { IconButton } from './icons'
@@ -515,7 +516,10 @@ export function GraphPane(): React.JSX.Element {
                 <div className="text-[11px] text-muted">
                   {selectedId}
                 </div>
-                <Markdown text={stripFrontmatter(note.body)} />
+                <Markdown
+                  text={linkNotes(stripFrontmatter(note.body), selectedId ?? '', snapshot.nodes)}
+                  onNoteLink={setSelectedId}
+                />
               </div>
             ) : (
               <p className="text-[12px] text-muted">Click a node to read the note. Open the `knowledge` folder in Obsidian for the full vault.</p>
