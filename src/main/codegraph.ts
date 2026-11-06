@@ -51,7 +51,9 @@ const BLOCKED_ROOTS = new Set([
   '/opt',
   '/usr',
   '/var',
-  '/private'
+  '/private',
+  '/tmp',
+  '/private/tmp'
 ])
 
 export function isUnsafeProjectPath(path: string): boolean {

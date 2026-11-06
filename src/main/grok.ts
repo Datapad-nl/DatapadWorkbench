@@ -91,8 +91,8 @@ type SteerNote = {
   attachments: Attachment[]
   /** The steer's own message, taken out of the chat if the steer is dropped. */
   messageId?: string
-  /** Said in a voice conversation, which drops it when the conversation ends. */
-  spoken: boolean
+  /** The voice conversation it was said in. Ending that conversation drops it. */
+  conversation?: string
 }
 
 type FollowUp = {
@@ -1024,24 +1024,39 @@ function queueAsideSteer(chatId: string, note: SteerNote): void {
   asideSteers.set(chatId, list)
 }
 
+/** Voice conversations that have ended. What was said in one is not sent, even if it arrives late. */
+const endedConversations = new Set<string>()
+
+export function conversationEnded(conversation: string | undefined): boolean {
+  return conversation !== undefined && endedConversations.has(conversation)
+}
+
+async function removeMessages(chatId: string, ids: Set<string>): Promise<Chat | null> {
+  try {
+    const chat = await mutateChat(chatId, (current) => {
+      current.messages = current.messages.filter((message) => !ids.has(message.id))
+    })
+    emitLive({ type: 'chat', chatId, chat })
+    return chat
+  } catch {
+    // the chat was deleted
+    return null
+  }
+}
+
 /** Ending a voice conversation takes back what was said in it and has not reached the agent. */
-export async function dropSpokenSteers(): Promise<void> {
+export async function endConversation(conversation: string): Promise<void> {
+  endedConversations.add(conversation)
   for (const [chatId, list] of [...asideSteers]) {
-    const kept = list.filter((note) => !note.spoken)
+    const kept = list.filter((note) => note.conversation !== conversation)
     if (kept.length === list.length) continue
     // Taken out before the await, so a turn ending meanwhile does not send them.
     if (kept.length > 0) asideSteers.set(chatId, kept)
     else asideSteers.delete(chatId)
-    const dropped = new Set(list.flatMap((note) => (note.spoken && note.messageId ? [note.messageId] : [])))
-    if (dropped.size === 0) continue
-    try {
-      const chat = await mutateChat(chatId, (current) => {
-        current.messages = current.messages.filter((message) => !dropped.has(message.id))
-      })
-      emitLive({ type: 'chat', chatId, chat })
-    } catch {
-      // the chat was deleted
-    }
+    const dropped = new Set(
+      list.flatMap((note) => (note.conversation === conversation && note.messageId ? [note.messageId] : []))
+    )
+    if (dropped.size > 0) await removeMessages(chatId, dropped)
   }
 }
 
@@ -1122,10 +1137,11 @@ async function startSteer(
   content: string,
   attachments: Attachment[],
   mentions: FileMention[],
-  spoken: boolean
+  conversation: string | undefined
 ): Promise<Chat> {
   const question = stripBtwPrefix(promptForMentions(content, mentions))
   if (!question && attachments.length === 0) throw new Error('Message is empty')
+  if (conversationEnded(conversation)) return getChat(chatId)
 
   const messageId = id()
   const started = await mutateChat(chatId, (chat) => {
@@ -1139,6 +1155,8 @@ async function startSteer(
       createdAt: now()
     })
   })
+  // The conversation can end while the message is saved.
+  if (conversationEnded(conversation)) return (await removeMessages(chatId, new Set([messageId]))) ?? started
   emitLive({ type: 'chat', chatId, chat: started })
   emitNotice({
     chatId,
@@ -1146,7 +1164,7 @@ async function startSteer(
     title: 'Steer',
     detail: question || 'Screenshot'
   })
-  queueAsideSteer(chatId, { text: question, attachments, messageId, spoken })
+  queueAsideSteer(chatId, { text: question, attachments, messageId, conversation })
   drainAsideSteers(chatId)
   return started
 }
@@ -1157,10 +1175,10 @@ export async function startAside(
   content: string,
   attachments: Attachment[] = [],
   mentions: FileMention[] = [],
-  spoken = false
+  conversation?: string
 ): Promise<Chat> {
   if (!content.trim().startsWith(BTW_PREFIX)) {
-    return startSteer(chatId, content, attachments, mentions, spoken)
+    return startSteer(chatId, content, attachments, mentions, conversation)
   }
   const question = stripBtwPrefix(promptForMentions(content, mentions))
   if (!question && attachments.length === 0) throw new Error('Message is empty')
@@ -1185,7 +1203,7 @@ export async function startAside(
     })
   })
   emitLive({ type: 'chat', chatId, chat: started })
-  void runAside(started, project, replyId, question, attachments, spoken)
+  void runAside(started, project, replyId, question, attachments, conversation)
   return started
 }
 
@@ -1195,7 +1213,7 @@ async function runAside(
   replyId: string,
   question: string,
   attachments: Attachment[],
-  spoken: boolean
+  conversation: string | undefined
 ): Promise<void> {
   const chatId = started.id
   const agent = normalizeChatAgent(started.agent)
@@ -1260,9 +1278,9 @@ async function runAside(
   } finally {
     release()
   }
-  if (steer && question.trim() && !abort.signal.aborted) {
+  if (steer && question.trim() && !abort.signal.aborted && !conversationEnded(conversation)) {
     // The side question stays in the chat with its answer.
-    queueAsideSteer(chatId, { text: question, attachments, spoken })
+    queueAsideSteer(chatId, { text: question, attachments, conversation })
     drainAsideSteers(chatId)
   }
 }

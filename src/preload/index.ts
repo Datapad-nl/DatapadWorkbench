@@ -67,10 +67,11 @@ const api = {
     content: string,
     attachments?: Array<{ id: string; mimeType: string; data: string }>,
     mentions?: FileMention[],
-    spoken?: boolean
-  ) => ipcRenderer.invoke('chat:send', { chatId, content, attachments, mentions, spoken }),
+    conversation?: string
+  ) => ipcRenderer.invoke('chat:send', { chatId, content, attachments, mentions, conversation }),
   /** Ending a voice conversation takes back the corrections said in it that the agent has not received. */
-  dropSpokenSteers: () => ipcRenderer.invoke('chat:dropSpokenSteers') as Promise<void>,
+  endConversation: (conversation: string) =>
+    ipcRenderer.invoke('chat:endConversation', conversation) as Promise<void>,
   searchFiles: (projectId: string, query: string, chatId?: string) =>
     ipcRenderer.invoke('project:searchFiles', { projectId, query, chatId }) as Promise<FileHit[]>,
   /** False when nothing was running. Otherwise the turn sends done once its reply is saved. */

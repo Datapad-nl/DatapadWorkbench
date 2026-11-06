@@ -70,6 +70,15 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
+describe('isUnsafeProjectPath', () => {
+  it('refuses the shared temp folder itself, but not a project inside it', async () => {
+    const { isUnsafeProjectPath } = await import('./codegraph')
+    expect(isUnsafeProjectPath('/tmp')).toBe(true)
+    expect(isUnsafeProjectPath('/private/tmp/')).toBe(true)
+    expect(isUnsafeProjectPath('/tmp/scratch')).toBe(false)
+  })
+})
+
 describe('queueIndex', () => {
   it('reports one shared job to every project with the same folder', async () => {
     await installFakeCli()

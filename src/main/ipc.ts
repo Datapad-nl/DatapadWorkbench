@@ -57,7 +57,8 @@ import { killProcessesUnder } from './worktreeProcs'
 import { deleteAllCheckpoints } from './checkpoints'
 import {
   chatCommands,
-  dropSpokenSteers,
+  conversationEnded,
+  endConversation,
   forgetChat,
   isStreaming,
   liveState,
@@ -418,9 +419,10 @@ export function registerIpc(): void {
         content: string
         attachments?: Array<{ id: string; mimeType: string; data: string }>
         mentions?: FileMention[]
-        spoken?: boolean
+        conversation?: string
       }
     ) => {
+    const conversation = typeof input.conversation === 'string' ? input.conversation : undefined
     const projects = await listProjects()
     if (isStreaming(input.chatId)) {
       const current = await getChat(input.chatId)
@@ -431,10 +433,12 @@ export function registerIpc(): void {
         input.content,
         input.attachments ?? [],
         input.mentions ?? [],
-        input.spoken === true
+        conversation
       )
       return started
     }
+    // A clip from a conversation that ended while it was on its way does not start a turn.
+    if (conversationEnded(conversation)) return getChat(input.chatId)
     const { chat, done } = await sendTurn(
       input.chatId,
       input.content,
@@ -450,7 +454,9 @@ export function registerIpc(): void {
     return stopStream(chatId)
   })
 
-  ipcMain.handle('chat:dropSpokenSteers', async () => dropSpokenSteers())
+  ipcMain.handle('chat:endConversation', async (_event, conversation: unknown) => {
+    if (typeof conversation === 'string') await endConversation(conversation)
+  })
 
   ipcMain.handle('chat:liveState', async () => liveState())
 

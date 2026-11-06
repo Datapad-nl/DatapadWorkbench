@@ -27,6 +27,7 @@ import {
   speechLanguage,
   stopAside,
   warmAsideVoice,
+  warmAudioOutput,
   textLanguage,
   startRecorder,
   stopSpeaking,
@@ -90,6 +91,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   const [replyMuted, setReplyMuted] = useState(false)
   const recorder = useRef<Recorder | null>(null)
   const liveRef = useRef(false)
+  /** The running conversation, so main can drop what was said in it once it ends. */
+  const conversationId = useRef<string | null>(null)
   const levelFrame = useRef(0)
   const pendingLevel = useRef({ rms: 0, heard: false, silentFor: 0 })
   const primedChats = useRef(new Set<string>())
@@ -185,7 +188,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   const stopAll = useCallback(() => {
     micSession.current += 1
     // A correction said during the conversation would otherwise go out once the running turn ends.
-    if (liveRef.current) void window.workbench.dropSpokenSteers()
+    if (conversationId.current) void window.workbench.endConversation(conversationId.current)
+    conversationId.current = null
     liveRef.current = false
     awaitingReply.current = false
     clipBusy.current = null
@@ -272,12 +276,9 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
           stopSpeaking()
           speakEpoch.current += 1
         }
-        const sent = await sendMessage(chatId, leftover, undefined, undefined, looping)
-        if (stale()) {
-          // The conversation ended while this was on its way, so it was queued after the drop.
-          if (looping && sent) void window.workbench.dropSpokenSteers()
-          return
-        }
+        const conversation = looping ? (conversationId.current ?? undefined) : undefined
+        const sent = await sendMessage(chatId, leftover, undefined, undefined, conversation)
+        if (stale()) return
         if (!looping) {
           setStatus('idle')
         } else if (!sent) {
@@ -381,6 +382,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         return
       }
       liveRef.current = true
+      conversationId.current = crypto.randomUUID()
       setLive(true)
       void startListen({ preserveSpeech: true })
       return
@@ -407,6 +409,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       return
     }
     liveRef.current = true
+    conversationId.current = crypto.randomUUID()
     setCaption('')
     setLive(true)
     setError(null)
@@ -677,9 +680,12 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
 
   useEffect(() => {
     if (!voice.enabled) return
+    // Audio starts up while the app is idle, so the first spoken reply does not stall the window.
+    const idle = requestIdleCallback(warmAudioOutput, { timeout: 5000 })
     void window.workbench.ensureVoiceModel().then((next) => {
       if (next.state === 'ready') warmAsideVoice()
     })
+    return () => cancelIdleCallback(idle)
   }, [voice.enabled])
 
   const consumeTranscript = useCallback(() => setPendingTranscript(null), [])

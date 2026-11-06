@@ -275,14 +275,32 @@ function voiceId(settings: VoiceSettings): string {
 }
 
 const STREAM_CLAUSE = 220
+const SPEAK_CHUNK = 280
+
+/** A sentence longer than one chunk, cut between words. A single longer word stays whole. */
+function splitLongSentence(part: string): string[] {
+  if (part.length <= SPEAK_CHUNK) return [part]
+  const pieces: string[] = []
+  let piece = ''
+  for (const word of part.split(/(?<=\s)/)) {
+    if (piece.length + word.length > SPEAK_CHUNK && piece.trim()) {
+      pieces.push(piece)
+      piece = word
+    } else {
+      piece += word
+    }
+  }
+  if (piece) pieces.push(piece)
+  return pieces
+}
 
 function splitSpeakChunks(text: string): string[] {
-  const parts = text.match(/[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g) ?? [text]
+  const parts = (text.match(/[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g) ?? [text]).flatMap(splitLongSentence)
   const chunks: string[] = []
   let buf = ''
   for (const part of parts) {
     const next = `${buf}${part}`
-    if (next.length > 280 && buf.trim()) {
+    if (next.length > SPEAK_CHUNK && buf.trim()) {
       chunks.push(buf.trim())
       buf = part
     } else {
@@ -342,6 +360,15 @@ function ensureTtsOutput(sampleRate: number): { context: AudioContext; gain: Gai
   }
   ttsGain ??= ttsContext.createGain()
   return { context: ttsContext, gain: ttsGain }
+}
+
+let audioWarmed = false
+
+/** The window's first AudioContext blocks it for a few hundred ms while audio starts up. Later ones open at once. */
+export function warmAudioOutput(): void {
+  if (audioWarmed) return
+  audioWarmed = true
+  void new AudioContext().close().catch(() => undefined)
 }
 
 export function primeTtsOutput(): void {
@@ -630,8 +657,12 @@ function cancelTtsJobs(urgent: boolean): void {
   ttsWorker?.postMessage({ type: 'cancel', ids })
 }
 
-function failTtsWorker(error: Error): void {
+/** Until then the model files failed to load on the worker. They would fail on the UI thread too. */
+let ttsModelBrokenUntil = 0
+
+function failTtsWorker(error: Error, modelFailed = false): void {
   ttsWorkerBrokenUntil = Date.now() + WORKER_RETRY_MS
+  if (modelFailed) ttsModelBrokenUntil = ttsWorkerBrokenUntil
   resetTtsWorker(error)
 }
 
@@ -657,7 +688,8 @@ function ttsWorkerHandle(): Worker {
     if (message.type === 'error') {
       const id = message.id
       if (id === undefined) {
-        failTtsWorker(new Error(message.message))
+        // Only loading the model reports an error without a job.
+        failTtsWorker(new Error(message.message), true)
         return
       }
       takeTtsJob(id)?.reject(new Error(message.message))
@@ -729,6 +761,8 @@ async function synth(text: string, lang: VoiceLanguage, settings: VoiceSettings,
       console.error('voice worker', error)
     }
   }
+  // Loading model files that just failed on the worker would block the window, then fail the same way.
+  if (Date.now() < ttsModelBrokenUntil) throw new Error('Speech model failed to load')
   return synthHere(text, lang, settings)
 }
 

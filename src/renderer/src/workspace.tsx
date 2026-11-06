@@ -146,7 +146,7 @@ type WorkspaceContextValue = {
     content: string,
     attachments?: Attachment[],
     mentions?: FileMention[],
-    spoken?: boolean
+    conversation?: string
   ) => Promise<boolean>
   stopChat: (chatId: string) => Promise<void>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
@@ -807,7 +807,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       content: string,
       attachments?: Attachment[],
       mentions?: FileMention[],
-      spoken?: boolean
+      conversation?: string
     ) => {
       const atSend = turnsRef.current[chatId]
       const asAside = atSend?.live === true
@@ -820,7 +820,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         }))
       }
       try {
-        const chat = await window.workbench.sendMessage(chatId, content, attachments, mentions, spoken)
+        // Ending the conversation takes back a correction to the running turn. A new turn shows as started at once, so it goes.
+        const chat = await window.workbench.sendMessage(
+          chatId,
+          content,
+          attachments,
+          mentions,
+          asAside ? conversation : undefined
+        )
         // The turn's done can come before this reply; its chat is newer than this one.
         const now = turnsRef.current[chatId]
         if (!(now && !now.live && now !== atSend)) applyChat(chatId, chat)
