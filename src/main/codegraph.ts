@@ -386,6 +386,22 @@ export async function readIndex(project: Project): Promise<ProjectIndex> {
   return settleRead(project.id, cached, fromStatus(project.id, status, 'not-indexed'))
 }
 
+/**
+ * Brings an indexed folder's index up to date with its files, and caches the counts it then holds.
+ * The sync fails while an agent's codegraph server holds the index's lock; that server is syncing the same changes.
+ */
+export async function syncIndex(project: Project): Promise<void> {
+  const path = project.path
+  if (!path || stopping || jobs.has(path) || isUnsafeProjectPath(path)) return
+  if (!existsSync(join(path, '.codegraph'))) return
+  const bin = await resolveCodegraphBin()
+  if (!bin) return
+  const before = cache.get(project.id)
+  await run(bin, ['sync', '--quiet', path], { cwd: path, timeoutMs: 60_000 }).catch(() => null)
+  const status = await readStatusJson(bin, path).catch(() => null)
+  if (status) settleRead(project.id, before, fromStatus(project.id, status, 'not-indexed'))
+}
+
 export async function collectIndexes(projects: Project[]): Promise<Record<string, ProjectIndex>> {
   const entries = await Promise.all(projects.map((project) => readIndex(project)))
   return Object.fromEntries(entries.map((index) => [index.projectId, index]))
@@ -622,10 +638,36 @@ async function indexedTree(bin: string, root: string): Promise<string | null> {
   })
   if (result.code !== 0) return null
   const lines = result.stdout
+    // The CLI styles its header for a terminal.
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\[[0-9;]*m/g, '')
     .split('\n')
     .map((line) => line.trimEnd())
     .filter((line) => line && !line.startsWith('Project Structure') && !line.startsWith('(node:'))
   return lines.length > 0 ? lines.slice(0, 24).join('\n') : null
+}
+
+export type IndexedFile = { path: string; language: string; nodeCount: number }
+
+/** The files in a folder's index, by project-relative path. Null when there is no index to ask. */
+export async function listIndexedFiles(project: Project): Promise<IndexedFile[] | null> {
+  const path = project.path
+  if (!path || !existsSync(join(path, '.codegraph'))) return null
+  const bin = await resolveCodegraphBin()
+  if (!bin) return null
+  const result = await run(bin, ['files', '--path', path, '--json'], { cwd: path, timeoutMs: 20_000 }).catch(() => null)
+  if (!result || result.code !== 0) return null
+  try {
+    const parsed = JSON.parse(result.stdout.slice(result.stdout.indexOf('['))) as unknown
+    if (!Array.isArray(parsed)) return null
+    return parsed.flatMap((item: { path?: unknown; language?: unknown; nodeCount?: unknown }) =>
+      typeof item?.path === 'string'
+        ? [{ path: item.path, language: String(item.language ?? ''), nodeCount: Number(item.nodeCount) || 0 }]
+        : []
+    )
+  } catch {
+    return null
+  }
 }
 
 export async function buildOrientation(project: Project): Promise<OrientationCard> {

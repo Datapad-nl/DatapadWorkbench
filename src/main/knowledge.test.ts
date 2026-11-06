@@ -1,5 +1,5 @@
 import { existsSync } from 'fs'
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,14 +8,20 @@ import type { KnowledgeSnapshot, OrientationCard, Project } from '../shared/type
 const stub = vi.hoisted(() => ({
   projects: [] as Project[],
   send: vi.fn(),
-  orientation: vi.fn()
+  orientation: vi.fn(),
+  sync: vi.fn(),
+  files: vi.fn()
 }))
 
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, webContents: { send: stub.send } }] },
   shell: {}
 }))
-vi.mock('./codegraph', () => ({ buildOrientation: stub.orientation }))
+vi.mock('./codegraph', () => ({
+  buildOrientation: stub.orientation,
+  syncIndex: stub.sync,
+  listIndexedFiles: stub.files
+}))
 vi.mock('./store', () => ({ listProjects: async () => stub.projects }))
 
 let root = ''
@@ -76,6 +82,8 @@ beforeEach(async () => {
   stub.projects = [project]
   stub.send.mockReset()
   stub.orientation.mockReset().mockImplementation(async (target: Project) => card(target))
+  stub.sync.mockReset().mockResolvedValue(undefined)
+  stub.files.mockReset().mockResolvedValue(null)
 })
 
 afterEach(async () => {
@@ -127,6 +135,157 @@ describe('outside edits', () => {
     expect(stub.orientation).toHaveBeenCalledTimes(3)
     knowledge.stopKnowledgeWatchers()
   }, 20_000)
+})
+
+describe('project edits', () => {
+  it('deep inside the project folder get a run', async () => {
+    const knowledge = await load()
+    await knowledge.syncKnowledgeWatchers()
+    await vi.waitFor(() => expect(existsSync(join(root, 'knowledge', 'generated', 'Overview.md'))).toBe(true))
+    await settle()
+    expect(stub.orientation).toHaveBeenCalledTimes(1)
+
+    await mkdir(join(root, 'src', 'main'), { recursive: true })
+    await settle()
+    stub.orientation.mockClear()
+    await writeFile(join(root, 'src', 'main', 'feature.ts'), 'export const x = 1\n')
+    await vi.waitFor(() => expect(stub.orientation).toHaveBeenCalledTimes(1), { timeout: 5_000, interval: 50 })
+    knowledge.stopKnowledgeWatchers()
+  }, 15_000)
+
+  it('under dependency, build and dot folders get none', async () => {
+    const knowledge = await load()
+    await mkdir(join(root, 'node_modules', 'dep'), { recursive: true })
+    await mkdir(join(root, '.git'))
+    await mkdir(join(root, '.codegraph'))
+    await knowledge.syncKnowledgeWatchers()
+    await vi.waitFor(() => expect(existsSync(join(root, 'knowledge', 'generated', 'Overview.md'))).toBe(true))
+    await settle()
+    expect(stub.orientation).toHaveBeenCalledTimes(1)
+
+    await writeFile(join(root, 'node_modules', 'dep', 'index.js'), 'module.exports = 1\n')
+    await writeFile(join(root, '.git', 'index'), 'x')
+    await writeFile(join(root, '.codegraph', 'codegraph.db-wal'), 'x')
+    await settle()
+    expect(stub.orientation).toHaveBeenCalledTimes(1)
+    knowledge.stopKnowledgeWatchers()
+  }, 15_000)
+
+  it('reach the generated notes, because each run syncs the index before it reads it', async () => {
+    const knowledge = await load()
+    await knowledge.maintainVault(project)
+    expect(stub.sync).toHaveBeenCalledWith(project)
+    expect(stub.sync.mock.invocationCallOrder[0]).toBeLessThan(stub.orientation.mock.invocationCallOrder[0])
+  })
+})
+
+/** Writes project files and has the index list them. */
+async function indexFiles(files: Record<string, string>): Promise<void> {
+  for (const [path, contents] of Object.entries(files)) {
+    await mkdir(join(root, path, '..'), { recursive: true })
+    await writeFile(join(root, path), contents)
+  }
+  stub.files.mockResolvedValue(
+    Object.keys(files).map((path) => ({ path, language: path.endsWith('.ts') ? 'typescript' : 'json', nodeCount: 1 }))
+  )
+}
+
+const generated = (path: string): Promise<string> => readFile(join(root, 'knowledge', 'generated', path), 'utf8')
+
+describe('the layout', () => {
+  it('gives each indexed folder a note, linked to the folder holding it and the folders it imports from', async () => {
+    await indexFiles({
+      'src/main/a.ts': "import { b } from './b'\nimport type { T } from '../shared/types.js'\nimport './a.test'\n",
+      'src/main/c.ts': "import { b } from './b'\nimport type { T } from '../shared/types'\n",
+      'src/main/b.ts': 'export const b = 1\n',
+      'src/main/a.test.ts': "import './a'\nimport './b'\n",
+      'src/shared/types.ts': 'export type T = 1\n',
+      'node_modules/dep/index.ts': '',
+      '.github/ci.ts': '',
+      'root.ts': ''
+    })
+    const knowledge = await load()
+    const snapshot = await knowledge.maintainVault(project)
+
+    expect(snapshot.nodes.map((node) => node.path).filter((path) => path.startsWith('generated/src')).sort()).toEqual([
+      'generated/src.md',
+      'generated/src/main.md',
+      'generated/src/shared.md'
+    ])
+    const edges = snapshot.edges.map((edge) => `${edge.from} -> ${edge.to}`)
+    expect(edges).toEqual(
+      expect.arrayContaining([
+        'Home.md -> generated/src.md',
+        'generated/src.md -> generated/src/main.md',
+        'generated/src.md -> generated/src/shared.md',
+        'generated/src/main.md -> generated/src.md',
+        'generated/src/main.md -> generated/src/shared.md'
+      ])
+    )
+    expect(edges).not.toContain('generated/src/shared.md -> generated/src/main.md')
+    const main = await generated('src/main.md')
+    expect(main).toContain('- [[generated/src/shared.md|shared]] (2 imports)')
+    // The test's import of b.ts doesn't count.
+    expect(main).toContain('- `b.ts`: imported by 2 files')
+    expect(main).toContain('- `a.ts`')
+    expect(main).toContain('- `a.test.ts` (test)')
+    expect(await generated('src/shared.md')).toContain('- `types.ts`: imported by 2 files')
+    expect(existsSync(join(root, 'knowledge', 'generated', 'node_modules.md'))).toBe(false)
+  })
+
+  it('describes a folder with the lines of the rules file and README about it', async () => {
+    await writeFile(
+      join(root, 'CLAUDE.md'),
+      [
+        '# Demo',
+        '',
+        '- Main process: `src/main` (persistence, IPC)',
+        '- Shared types: `src/shared/types.ts`',
+        '- The main helpers: `src/main/util/x.ts`',
+        '',
+        '```',
+        'src/main  <- not this',
+        '```'
+      ].join('\n')
+    )
+    await writeFile(join(root, 'README.md'), 'Build output lands next to src/main.\n')
+    stub.orientation.mockImplementation(async (target: Project) => ({ ...card(target), rulesFile: 'CLAUDE.md' }))
+    await indexFiles({ 'src/main/a.ts': '', 'src/main/util/x.ts': '', 'src/shared/types.ts': '' })
+    const knowledge = await load()
+    await knowledge.maintainVault(project)
+
+    const main = await generated('src/main.md')
+    expect(main).toContain('\nMain process: `src/main` (persistence, IPC)\n')
+    expect(main.indexOf('Main process')).toBeLessThan(main.indexOf('## In'))
+    expect(main).toContain('\nBuild output lands next to src/main.\n')
+    expect(main).not.toContain('helpers')
+    expect(main).not.toContain('not this')
+    // No line names the folder, so one about a file directly in it stands in.
+    expect(await generated('src/shared.md')).toContain('\nShared types: `src/shared/types.ts`\n')
+    expect(await generated('src.md')).not.toContain('Main process')
+  })
+
+  it('drops the notes of folders that left the index, and the folders under generated/ that emptied', async () => {
+    await indexFiles({ 'src/main/a.ts': '', 'src/ui/web/b.ts': '' })
+    const knowledge = await load()
+    await knowledge.maintainVault(project)
+    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'ui', 'web.md'))).toBe(true)
+
+    await rm(join(root, 'src', 'ui'), { recursive: true })
+    await indexFiles({ 'src/main/a.ts': '' })
+    await knowledge.maintainVault(project)
+    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'ui'))).toBe(false)
+    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'ui.md'))).toBe(false)
+    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'main.md'))).toBe(true)
+  })
+
+  it('past the note budget, lists the deepest folders in their parent without a note', async () => {
+    await indexFiles(Object.fromEntries(Array.from({ length: 125 }, (_, i) => [`src/m${i}/f.ts`, ''])))
+    const knowledge = await load()
+    const snapshot = await knowledge.maintainVault(project)
+    expect(snapshot.nodes.filter((node) => node.path.startsWith('generated/src/'))).toHaveLength(120)
+    expect(await generated('src.md')).toMatch(/^- `m\d+\/`$/m)
+  })
 })
 
 describe('requests during a run', () => {

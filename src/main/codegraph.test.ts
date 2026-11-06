@@ -13,8 +13,8 @@ vi.mock('os', async (importOriginal) => {
 
 // A stand-in CLI. It logs each command, reports .codegraph as the index, and init creates it.
 // A fail-init file next to it fails the next init, and slow-status holds back the next status
-// answer, read before the wait. In the folder, slow-init slows init down and
-// count sets the reported file count.
+// answer, read before the wait. In the folder, slow-init slows init down,
+// count sets the reported file count, and sync makes next-count the count.
 const FAKE_CLI = `#!/bin/sh
 echo "$1" >> "$(dirname "$0")/calls.log"
 case "$1" in
@@ -29,6 +29,11 @@ case "$1" in
     if [ -f "$(dirname "$0")/fail-init" ]; then rm "$(dirname "$0")/fail-init"; echo boom >&2; exit 1; fi
     if [ -f "$3/slow-init" ]; then sleep 1.5; fi
     sleep 0.2; mkdir -p "$3/.codegraph" ;;
+  sync)
+    if [ -f "$3/next-count" ]; then mv "$3/next-count" "$3/count"; fi ;;
+  files)
+    if [ "$4" = "--json" ]; then echo '[{"path":"src/main.ts","language":"typescript","nodeCount":4,"size":10}]'
+    else printf '\\033[1m\\nProject Structure (1 files):\\n\\033[0m\\n├── src\\n│   └── main.ts\\n'; fi ;;
 esac
 `
 
@@ -226,6 +231,48 @@ describe('readIndex racing a job', () => {
 
     expect(seen.get('a')?.length).toBe(before)
   }, 15_000)
+})
+
+describe('syncIndex', () => {
+  it('brings the index up to date, so the next read reports the new counts', async () => {
+    await installFakeCli()
+    await mkdir(join(folder, '.codegraph'))
+    const { readIndex, syncIndex } = await import('./codegraph')
+    expect((await readIndex(project('a'))).fileCount).toBe(3)
+    await writeFile(join(folder, 'next-count'), '7')
+    // Files changed since the last read. The cached read doesn't know.
+    expect((await readIndex(project('a'))).fileCount).toBe(3)
+
+    await syncIndex(project('a'))
+    expect((await readIndex(project('a'))).fileCount).toBe(7)
+    expect(await calls()).toContain('sync')
+  })
+
+  it('leaves a folder that was never indexed alone', async () => {
+    await installFakeCli()
+    const { syncIndex } = await import('./codegraph')
+    await syncIndex(project('a'))
+    expect(await calls()).not.toContain('sync')
+  })
+})
+
+describe('buildOrientation', () => {
+  it('keeps the CLI’s terminal styling out of the indexed tree', async () => {
+    await installFakeCli()
+    await mkdir(join(folder, '.codegraph'))
+    const { buildOrientation } = await import('./codegraph')
+    expect((await buildOrientation(project('a'))).tree).toBe('├── src\n│   └── main.ts')
+  })
+})
+
+describe('listIndexedFiles', () => {
+  it('lists what the index holds, and nothing for a folder without one', async () => {
+    await installFakeCli()
+    const { listIndexedFiles } = await import('./codegraph')
+    expect(await listIndexedFiles(project('a'))).toBeNull()
+    await mkdir(join(folder, '.codegraph'))
+    expect(await listIndexedFiles(project('a'))).toEqual([{ path: 'src/main.ts', language: 'typescript', nodeCount: 4 }])
+  })
 })
 
 describe('readIndex failures', () => {

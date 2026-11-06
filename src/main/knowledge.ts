@@ -1,7 +1,7 @@
 import { execFile } from 'child_process'
 import { createHash, randomBytes } from 'crypto'
 import { existsSync, watch, type FSWatcher } from 'fs'
-import { mkdir, readdir, readFile, rm, stat, writeFile } from 'fs/promises'
+import { mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { BrowserWindow, shell } from 'electron'
@@ -14,7 +14,7 @@ import type {
   KnowledgeSnapshot,
   Project
 } from '../shared/types'
-import { buildOrientation } from './codegraph'
+import { buildOrientation, listIndexedFiles, syncIndex, type IndexedFile } from './codegraph'
 import { listProjects } from './store'
 import { writeFileAtomic } from './storeIo'
 
@@ -51,6 +51,12 @@ const WATCH_MS = 400
 const MAX_NOTES = 200
 const MAX_AREAS = 16
 const MAX_CHILDREN = 8
+/** Folder notes below the top-level areas, so the area, fixed and user notes still fit in MAX_NOTES. */
+const LAYOUT_BUDGET = 120
+const MAX_KEY_FILES = 3
+const SCRIPT_LANGUAGES = new Set(['typescript', 'tsx', 'javascript', 'jsx'])
+const SCRIPT_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
+const RELATIVE_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*['"](\.{1,2}\/[^'"\n]+)['"]/g
 
 /** How many runs are writing each project's vault. While one is, its watchers skip the runs' own writes. */
 const writing = new Map<string, number>()
@@ -71,6 +77,11 @@ const pending = new Map<string, ReturnType<typeof setTimeout>>()
 let activeProjectId: string | null = null
 
 type Area = { name: string; children: string[] }
+type Folder = { folders: string[]; files: string[]; tests: string[] }
+/** The index's folders and files under the top-level areas, by project path. `noted` holds the folders with a note. */
+type Layout = { folders: Map<string, Folder>; files: Map<string, IndexedFile>; noted: Set<string> }
+/** Imports between noted folders, by importing folder then imported one, and how many files import each file. */
+type ModuleLinks = { uses: Map<string, Map<string, number>>; importers: Map<string, number> }
 
 function posix(path: string): string {
   return path.split(/[\\/]/).join('/')
@@ -470,6 +481,155 @@ function wiki(title: string): string {
   return `[[${title}]]`
 }
 
+/** A test is listed in its folder's note, without a note of its own. */
+function isTestFile(path: string): boolean {
+  return /\.(test|spec)\.[^./]+$/.test(path) || path.split('/').includes('__tests__')
+}
+
+function buildLayout(indexed: IndexedFile[], areas: Set<string>): Layout {
+  const folders = new Map<string, Folder>()
+  const files = new Map<string, IndexedFile>()
+  const folderAt = (path: string): Folder => {
+    let folder = folders.get(path)
+    if (!folder) {
+      folder = { folders: [], files: [], tests: [] }
+      folders.set(path, folder)
+      const cut = path.lastIndexOf('/')
+      if (cut > 0) folderAt(path.slice(0, cut)).folders.push(path)
+    }
+    return folder
+  }
+  for (const file of [...indexed].sort((a, b) => a.path.localeCompare(b.path))) {
+    const path = posix(file.path)
+    const parts = path.split('/')
+    // Loose files at the root are listed in Architecture.
+    if (parts.length < 2 || !areas.has(parts[0])) continue
+    if (parts.some((part) => part.startsWith('.') || IGNORE.has(part))) continue
+    const folder = folderAt(parts.slice(0, -1).join('/'))
+    if (isTestFile(path)) {
+      folder.tests.push(path)
+    } else {
+      folder.files.push(path)
+      files.set(path, { ...file, path })
+    }
+  }
+  for (const folder of folders.values()) folder.folders.sort()
+  const depth = (path: string): number => path.split('/').length
+  const nested = [...folders.keys()]
+    .filter((path) => path.includes('/'))
+    .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))
+  // Past the budget, the deepest folders go without a note.
+  const noted = new Set([...folders.keys()].filter((path) => !path.includes('/')))
+  for (const path of nested.slice(0, LAYOUT_BUDGET)) noted.add(path)
+  return { folders, files, noted }
+}
+
+/** The noted folder a file counts toward: its own, or the nearest one above it. */
+function moduleOf(path: string, layout: Layout): string {
+  let dir = path.slice(0, path.lastIndexOf('/'))
+  // Top-level folders are always noted.
+  while (!layout.noted.has(dir)) dir = dir.slice(0, dir.lastIndexOf('/'))
+  return dir
+}
+
+/** Where a folder's note lives under `generated/`. A top-level folder's is its area note. */
+function layoutFile(path: string): string {
+  const parts = path.split('/')
+  const dirs = [areaFileName(parts[0]), ...parts.slice(1, -1).map(sanitizeName)]
+  if (parts.length === 1) return `${dirs[0]}.md`
+  return `${dirs.join('/')}/${areaFileName(parts[parts.length - 1])}.md`
+}
+
+/** A link by path: folders share names across the project, so a title alone could point at several notes. */
+function layoutLink(path: string): string {
+  return `[[generated/${layoutFile(path)}|${path.split('/').pop() ?? path}]]`
+}
+
+function folderContents(path: string, folder: Folder, layout: Layout): string {
+  const name = (item: string): string => item.slice(path.length + 1)
+  const lines = [
+    ...folder.folders.map((item) => (layout.noted.has(item) ? `- ${layoutLink(item)}` : `- \`${name(item)}/\``)),
+    ...folder.files.map((item) => `- \`${name(item)}\``),
+    ...folder.tests.map((item) => `- \`${name(item)}\` (test)`)
+  ]
+  return lines.length > 0 ? lines.join('\n') : '_Nothing indexed._'
+}
+
+/** The indexed files a JS or TS file imports by relative path. */
+function relativeImports(from: string, source: string, layout: Layout): string[] {
+  const found = new Set<string>()
+  for (const match of source.matchAll(RELATIVE_IMPORT)) {
+    const base = posix(join(dirname(from), match[1]))
+    // TypeScript imports `./a.js` for `a.ts`.
+    const stem = base.replace(/\.(?:[mc]?js|jsx)$/, '')
+    const target = [base, ...SCRIPT_EXTENSIONS.flatMap((ext) => [stem + ext, `${base}/index${ext}`])].find(
+      (candidate) => candidate !== from && layout.files.has(candidate)
+    )
+    if (target) found.add(target)
+  }
+  return [...found]
+}
+
+async function readModuleLinks(root: string, layout: Layout): Promise<ModuleLinks> {
+  const uses = new Map<string, Map<string, number>>()
+  const importers = new Map<string, number>()
+  for (const file of layout.files.values()) {
+    if (!SCRIPT_LANGUAGES.has(file.language)) continue
+    const source = await readFile(join(root, file.path), 'utf8').catch(() => '')
+    const from = moduleOf(file.path, layout)
+    for (const target of relativeImports(file.path, source, layout)) {
+      importers.set(target, (importers.get(target) ?? 0) + 1)
+      const to = moduleOf(target, layout)
+      if (to === from) continue
+      const counts = uses.get(from) ?? new Map<string, number>()
+      counts.set(to, (counts.get(to) ?? 0) + 1)
+      uses.set(from, counts)
+    }
+  }
+  return { uses, importers }
+}
+
+/** Lines of the project's docs about a folder, or failing that about a file directly in it. */
+function describedIn(docs: string, path: string): string[] {
+  const at = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // The folder itself, maybe with a trailing slash or full stop, but not a path inside it or a longer name.
+  const folder = new RegExp(`(?<![\\w./-])${at}/?(?![\\w-]|\\.\\w|/[\\w.-])`)
+  const file = new RegExp(`(?<![\\w./-])${at}/[\\w-]+(?:\\.[\\w-]+)+(?![\\w/-])`)
+  const lines: string[] = []
+  let fenced = false
+  for (const line of docs.split('\n')) {
+    if (line.trimStart().startsWith('```')) fenced = !fenced
+    else if (!fenced && line.trim()) lines.push(line)
+  }
+  const aboutFolder = lines.filter((line) => folder.test(line))
+  const picked = aboutFolder.length > 0 ? aboutFolder : lines.filter((line) => file.test(line))
+  return picked.slice(0, 3).map((line) => line.trim().replace(/^(?:#+|[-*+]|\d+[.)])\s+/, ''))
+}
+
+/** What a folder's note says: what the docs call it, its parent, the folders it uses, its key files, what it holds. */
+function moduleSections(path: string, folder: Folder, layout: Layout, links: ModuleLinks, docs: string): string[] {
+  const described = describedIn(docs, path)
+  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null
+  const uses = [...(links.uses.get(path) ?? [])].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  const key = [...links.importers]
+    .filter(([file, count]) => count >= 2 && moduleOf(file, layout) === path)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, MAX_KEY_FILES)
+  return [
+    ...(described.length > 0 ? [...described, ''] : []),
+    ...(parent != null ? ['## In', '', `- ${layoutLink(parent)}`, ''] : []),
+    ...(uses.length > 0
+      ? ['## Uses', '', ...uses.map(([to, count]) => `- ${layoutLink(to)} (${count} import${count === 1 ? '' : 's'})`), '']
+      : []),
+    ...(key.length > 0
+      ? ['## Key files', '', ...key.map(([file, count]) => `- \`${file.slice(path.length + 1)}\`: imported by ${count} files`), '']
+      : []),
+    '## Contains',
+    '',
+    folderContents(path, folder, layout)
+  ]
+}
+
 async function listUserNotes(vault: string): Promise<string[]> {
   const dir = join(vault, 'notes')
   let entries: Array<{ name: string; isFile: () => boolean }>
@@ -494,7 +654,7 @@ function homeGeneratedBlock(
     links.architecture ? `- ${wiki('Architecture')}` : null,
     links.stack ? `- ${wiki('Stack')}` : null,
     links.rules ? `- ${wiki('Rules')}` : null,
-    ...links.areas.map((name) => `- ${wiki(name)}`)
+    ...links.areas.map((link) => `- ${link}`)
   ].filter(Boolean)
   const notes =
     userNotes.length > 0
@@ -573,21 +733,33 @@ async function writeGenerated(vault: string, fileName: string, contents: string)
   const path = join(vault, 'generated', fileName)
   // An unchanged note keeps its mtime, so Obsidian and other watchers see no churn.
   if ((await readFile(path, 'utf8').catch(() => null)) === contents) return
+  // writeFileAtomic makes the folders on the way; writeOwn notes only the last.
+  const parts = fileName.split('/')
+  for (let i = 0; i < parts.length - 1; i++) claim(join(vault, 'generated', ...parts.slice(0, i)), DIR)
   await writeOwn(path, contents)
 }
 
-async function pruneGenerated(vault: string, keep: Set<string>): Promise<void> {
-  const dir = join(vault, 'generated')
-  let entries: string[]
+/** Removes the notes under `generated/` that aren't in `keep`, by path below it, and the folders that leaves empty. */
+async function pruneGenerated(vault: string, keep: Set<string>, rel = ''): Promise<void> {
+  const dir = join(vault, 'generated', rel)
+  let entries: Array<{ name: string; isDirectory: () => boolean }>
   try {
-    entries = await readdir(dir)
+    entries = await readdir(dir, { withFileTypes: true })
   } catch {
     return
   }
-  for (const name of entries) {
-    if (!name.toLowerCase().endsWith('.md') || keep.has(name)) continue
-    claim(join(dir, name), null)
-    await rm(join(dir, name), { force: true })
+  for (const entry of entries) {
+    const child = rel ? `${rel}/${entry.name}` : entry.name
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      await pruneGenerated(vault, keep, child)
+      if ((await readdir(path).catch(() => [entry.name])).length > 0) continue
+      claim(path, null)
+      await rmdir(path).catch(() => undefined)
+    } else if (entry.name.toLowerCase().endsWith('.md') && !keep.has(child)) {
+      claim(path, null)
+      await rm(path, { force: true })
+    }
   }
 }
 
@@ -655,13 +827,26 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
     await makeDir(vault)
     await ensureObsidian(vault)
     await ensureStarterNote(vault)
-    const [orientation, listing, userNotes] = await Promise.all([
+    // The counts and tree come from the index, which nothing else keeps up with the files.
+    await syncIndex(project)
+    const [orientation, listing, userNotes, indexed] = await Promise.all([
       buildOrientation(project),
       listAreas(project.path),
-      listUserNotes(vault)
+      listUserNotes(vault),
+      listIndexedFiles(project)
     ])
+    const layout = buildLayout(indexed ?? [], new Set(listing.areas.map((area) => area.name)))
+    const root = project.path
+    const links = await readModuleLinks(root, layout)
+    const docs = (
+      await Promise.all(
+        [orientation.rulesFile, 'README.md']
+          .filter((name): name is string => name != null)
+          .map((name) => readFile(join(root, name), 'utf8').catch(() => ''))
+      )
+    ).join('\n')
     const keep = new Set<string>()
-    const areaTitles: string[] = []
+    const areaLinks: string[] = []
 
     const overviewBits = [
       orientation.summary,
@@ -686,17 +871,23 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
 
     const areaLines: string[] = []
     for (const area of listing.areas) {
-      const file = `${areaFileName(area.name)}.md`
+      const file = layoutFile(area.name)
       const title = area.name
-      areaTitles.push(title)
-      const childList =
-        area.children.length > 0
-          ? area.children.map((child) => `- \`${area.name}/${child}\``).join('\n')
-          : '_Empty or unread folder._'
+      areaLinks.push(layoutLink(area.name))
+      const indexedFolder = layout.folders.get(area.name)
+      const sections = indexedFolder
+        ? moduleSections(area.name, indexedFolder, layout, links, docs)
+        : [
+            '## Contains',
+            '',
+            area.children.length > 0
+              ? area.children.map((child) => `- \`${area.name}/${child}\``).join('\n')
+              : '_Empty or unread folder._'
+          ]
       const related = listing.areas
         .filter((item) => item.name !== area.name)
         .slice(0, 8)
-        .map((item) => `- ${wiki(item.name)}`)
+        .map((item) => `- ${layoutLink(item.name)}`)
       await writeGenerated(
         vault,
         file,
@@ -706,9 +897,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
           [
             `Top-level area \`${area.name}/\`.`,
             '',
-            '## Contains',
-            '',
-            childList,
+            ...sections,
             '',
             '## Related',
             '',
@@ -719,7 +908,26 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
         )
       )
       keep.add(file)
-      areaLines.push(`- ${wiki(title)} — \`${area.name}/\``)
+      areaLines.push(`- ${layoutLink(area.name)} — \`${area.name}/\``)
+    }
+
+    for (const [path, folder] of layout.folders) {
+      if (!path.includes('/') || !layout.noted.has(path)) continue
+      const file = layoutFile(path)
+      await writeGenerated(
+        vault,
+        file,
+        generatedNote(
+          path,
+          ['folder'],
+          [
+            `Folder \`${path}/\`.`,
+            '',
+            ...moduleSections(path, folder, layout, links, docs)
+          ].join('\n')
+        )
+      )
+      keep.add(file)
     }
 
     const rootFiles =
@@ -808,7 +1016,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
           architecture: true,
           stack: hasStack,
           rules: hasRules,
-          areas: areaTitles
+          areas: areaLinks
         },
         userNotes
       )
@@ -962,6 +1170,14 @@ function schedule(projectId: string, fn: () => void): void {
   )
 }
 
+/** A change under a folder the vault doesn't describe: dependencies, builds, the vault itself, or a dot folder. */
+function skippedPath(filename: string | null): boolean {
+  if (filename == null) return false
+  return posix(filename)
+    .split('/')
+    .some((part) => part.startsWith('.') || IGNORE.has(part))
+}
+
 function watchProjectRoot(project: Project): void {
   if (!project.path) return
   if (projectWatchers.has(project.id) && projectWatchPaths.get(project.id) === project.path) return
@@ -972,7 +1188,8 @@ function watchProjectRoot(project: Project): void {
   }
   const root = project.path
   try {
-    const watcher = watch(root, { persistent: false }, (_event, filename) => {
+    const watcher = watch(root, { persistent: false, recursive: true }, (_event, filename) => {
+      if (skippedPath(filename)) return
       unlessOwn(project.id, root, filename, () =>
         schedule(project.id, () => {
           // By id, so a rename since this watcher started is picked up.
