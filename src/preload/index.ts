@@ -104,6 +104,8 @@ const api = {
       'granted' | 'denied' | 'not-determined' | 'restricted' | 'unknown'
     >,
   openMicSettings: () => ipcRenderer.invoke('voice:openMicSettings') as Promise<void>,
+  /** While voice is in use, a hidden or covered window keeps its timers running. */
+  setVoiceActive: (active: boolean) => ipcRenderer.send('voice:active', active),
   onVoiceModelStatus: (listener: (status: VoiceModelStatus) => void) => {
     const wrapped = (_event: unknown, payload: VoiceModelStatus): void => listener(payload)
     ipcRenderer.on('voice:modelStatus', wrapped)

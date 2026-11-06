@@ -459,6 +459,12 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         spoken.plain = ''
         spoken.draftLen = 0
         resetSpokenLog()
+        // The last reply would hold this one back until it finished. The new request wins.
+        if (isSpeaking()) {
+          speakEpoch.current += 1
+          stopSpeaking()
+          if (statusRef.current === 'speaking') setStatus('waiting')
+        }
         if (spoken.silenced) {
           spoken.silenced = false
           setReplyMuted(false)
@@ -630,6 +636,13 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     return () => window.clearInterval(timer)
   }, [setStatus])
 
+  // Voice runs on timers and animation frames, which the window slows or stops when it is hidden.
+  const voiceActive =
+    live || (status !== 'idle' && status !== 'error') || (activeStreaming && voice.enabled && voice.speakReplies)
+  useEffect(() => {
+    window.workbench.setVoiceActive(voiceActive)
+  }, [voiceActive])
+
   const wasEnabled = useRef(voice.enabled)
   useEffect(() => {
     if (wasEnabled.current && !voice.enabled) stopAll()
@@ -683,10 +696,12 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       toggleConversation,
       stopAll,
       speaks: live || (voice.enabled && voice.speakReplies),
-      replyMuted,
+      // Muting lasts one request. Once it is over there is nothing left to mute.
+      replyMuted: replyMuted && activeStreaming,
       muteReply
     }),
     [
+      activeStreaming,
       caption,
       consumeTranscript,
       bands,

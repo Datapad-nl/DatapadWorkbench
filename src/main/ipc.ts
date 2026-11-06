@@ -540,6 +540,10 @@ export function registerIpc(): void {
   ipcMain.handle('voice:openMicSettings', () => {
     openMicPrivacySettings()
   })
+  // A hidden or covered window slows its timers and stops animation frames, which voice relies on.
+  ipcMain.on('voice:active', (event, active: unknown) => {
+    event.sender.setBackgroundThrottling(active !== true)
+  })
   onVoiceModelStatus((payload) => {
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send('voice:modelStatus', payload)

@@ -412,7 +412,9 @@ export function stopSpeaking(): void {
 }
 
 export function isSpeaking(): boolean {
-  return liveSources.size > 0 || speakQueue.length > 0 || drainPromise !== null
+  // The system voice reads replies when the local model fails.
+  const system = typeof speechSynthesis !== 'undefined' && (speechSynthesis.speaking || speechSynthesis.pending)
+  return liveSources.size > 0 || speakQueue.length > 0 || drainPromise !== null || system
 }
 
 /**
