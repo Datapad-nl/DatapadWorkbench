@@ -108,7 +108,8 @@ export type Checkpoint = {
   chatId: string
   messageId: string
   createdAt: string
-  kind: 'git' | 'files'
+  /** 'git': a commit in the project's repository. 'shadow': a commit in the chat's own repository, for a folder outside git. 'files': only the per-file copies. */
+  kind: 'git' | 'shadow' | 'files'
   gitSha: string | null
   label: string
   files: string[]

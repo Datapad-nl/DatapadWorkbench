@@ -1,6 +1,7 @@
 import { execFile } from 'child_process'
 import { app } from 'electron'
-import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'fs/promises'
+import type { Stats } from 'fs'
+import { copyFile, lstat, mkdir, readFile, rm, stat, writeFile } from 'fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'path'
 import type { Chat, Checkpoint } from '../shared/types'
 import { withRepoLock } from './gitLock'
@@ -11,6 +12,13 @@ import type { SessionUpdate } from './acp'
 
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 const PATH_KEYS = ['path', 'file', 'file_path', 'target_file', 'filename']
+/** A folder outside git gets a whole-tree copy before each turn only up to this size. */
+const MAX_SHADOW_FILES = 20_000
+const MAX_SHADOW_BYTES = 200 * 1024 * 1024
+/** Folders a project can rebuild, left out of that copy. */
+const SHADOW_EXCLUDES = ['node_modules/', '.venv/', 'venv/', '__pycache__/', '.cache/', '.next/', '.DS_Store']
+/** Folders found too big for that copy, not listed again this session. */
+const tooBigForShadow = new Set<string>()
 
 type Active = {
   checkpoint: Checkpoint
@@ -44,13 +52,14 @@ function gitEnv(indexFile?: string): NodeJS.ProcessEnv {
 function runGit(
   cwd: string,
   args: string[],
-  extra?: NodeJS.ProcessEnv
+  extra?: NodeJS.ProcessEnv,
+  timeout = 30_000
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolveResult) => {
     execFile(
       'git',
       args,
-      { cwd, env: extra ?? gitEnv(), timeout: 30_000, maxBuffer: 20 * 1024 * 1024 },
+      { cwd, env: extra ?? gitEnv(), timeout, maxBuffer: 20 * 1024 * 1024 },
       (error, stdout, stderr) => {
         if (!error) {
           resolveResult({ code: 0, stdout, stderr })
@@ -108,10 +117,16 @@ export function pathsFromUpdate(update: SessionUpdate['update'], root: string | 
   return unique
 }
 
-async function createGitCheckpoint(cwd: string, chatId: string, checkpointId: string): Promise<string | null> {
-  const inside = await runGit(cwd, ['rev-parse', '--is-inside-work-tree'])
-  if (inside.code !== 0 || inside.stdout.trim() !== 'true') return null
+function nulList(stdout: string): string[] {
+  return stdout.split('\0').filter(Boolean)
+}
 
+async function insideGitWorkTree(cwd: string): Promise<boolean> {
+  const inside = await runGit(cwd, ['rev-parse', '--is-inside-work-tree'])
+  return inside.code === 0 && inside.stdout.trim() === 'true'
+}
+
+async function createGitCheckpoint(cwd: string, chatId: string, checkpointId: string): Promise<string | null> {
   const gitDirRaw = await runGit(cwd, ['rev-parse', '--git-dir'])
   if (gitDirRaw.code !== 0) return null
   const gitDir = isAbsolute(gitDirRaw.stdout.trim())
@@ -154,6 +169,82 @@ async function createGitCheckpoint(cwd: string, chatId: string, checkpointId: st
   }
 }
 
+function shadowGitDir(chatId: string): string {
+  return join(checkpointRoot(chatId), 'shadow.git')
+}
+
+/** Git options for a chat's private repository holding copies of a folder that is not in git. */
+function shadowArgs(chatId: string, cwd: string): string[] {
+  return [`--git-dir=${shadowGitDir(chatId)}`, `--work-tree=${cwd}`]
+}
+
+/** What that repository copies: links, and files up to MAX_SNAPSHOT_BYTES. */
+function shadowHolds(info: Stats): boolean {
+  return info.isSymbolicLink() || (info.isFile() && info.size <= MAX_SNAPSHOT_BYTES)
+}
+
+/**
+ * Commits a whole folder that is not in git to the chat's private repository, so a rewind also
+ * restores files a tool changed before the app heard about it.
+ */
+async function createShadowCheckpoint(cwd: string, chatId: string, checkpointId: string): Promise<string | null> {
+  if (tooBigForShadow.has(cwd)) return null
+  const gitDir = shadowGitDir(chatId)
+  const git = shadowArgs(chatId, cwd)
+  const exists = await stat(join(gitDir, 'HEAD')).then(
+    () => true,
+    () => false
+  )
+  if (!exists) {
+    if ((await runGit(cwd, ['init', '--bare', '--quiet', gitDir])).code !== 0) return null
+    await mkdir(join(gitDir, 'info'), { recursive: true })
+    await writeFile(join(gitDir, 'info', 'exclude'), SHADOW_EXCLUDES.join('\n') + '\n')
+  }
+
+  // A folder too big to list in 10 seconds is too big to copy before every turn.
+  const listed = await runGit(cwd, [...git, 'ls-files', '-co', '--exclude-standard', '-z'], undefined, 10_000)
+  if (listed.code !== 0) {
+    tooBigForShadow.add(cwd)
+    return null
+  }
+  const files: string[] = []
+  let bytes = 0
+  for (const rel of nulList(listed.stdout)) {
+    const info = await lstat(join(cwd, rel)).catch(() => null)
+    if (!info || !shadowHolds(info)) continue
+    files.push(rel)
+    bytes += info.isFile() ? info.size : 0
+    if (files.length > MAX_SHADOW_FILES || bytes > MAX_SHADOW_BYTES) {
+      tooBigForShadow.add(cwd)
+      return null
+    }
+  }
+
+  const list = join(gitDir, `list-${checkpointId}`)
+  const indexFile = join(gitDir, `index-${checkpointId}`)
+  try {
+    await writeFile(list, files.join('\0'))
+    const env = gitEnv(indexFile)
+    const add = await runGit(
+      cwd,
+      ['--literal-pathspecs', ...git, 'add', `--pathspec-from-file=${list}`, '--pathspec-file-nul'],
+      env
+    )
+    if (add.code !== 0) return null
+    const tree = await runGit(cwd, [...git, 'write-tree'], env)
+    const treeSha = tree.stdout.trim()
+    if (tree.code !== 0 || !treeSha) return null
+    const commit = await runGit(cwd, [...git, 'commit-tree', treeSha, '-m', `workbench ${chatId} ${checkpointId}`], env)
+    const sha = commit.stdout.trim()
+    if (commit.code !== 0 || !sha) return null
+    const ref = await runGit(cwd, [...git, 'update-ref', `refs/workbench/${chatId}/${checkpointId}`, sha])
+    return ref.code === 0 ? sha : null
+  } finally {
+    await rm(list, { force: true })
+    await rm(indexFile, { force: true })
+  }
+}
+
 async function snapshotFile(root: string, rel: string, snapDir: string): Promise<void> {
   const abs = resolve(root, rel)
   const dest = join(snapDir, rel)
@@ -182,11 +273,18 @@ export async function startCheckpoint(input: {
   await mkdir(snapDir, { recursive: true })
 
   let gitSha: string | null = null
+  let kind: Checkpoint['kind'] = 'files'
   if (input.cwd) {
     try {
       const cwd = input.cwd
+      const inRepo = await insideGitWorkTree(cwd)
       // Under the repo lock, so a commit or checkout from the Git pane can't change files mid-snapshot.
-      gitSha = await withRepoLock(cwd, () => createGitCheckpoint(cwd, input.chat.id, checkpointId))
+      gitSha = await withRepoLock(cwd, () =>
+        inRepo
+          ? createGitCheckpoint(cwd, input.chat.id, checkpointId)
+          : createShadowCheckpoint(cwd, input.chat.id, checkpointId)
+      )
+      if (gitSha) kind = inRepo ? 'git' : 'shadow'
     } catch {
       gitSha = null
     }
@@ -197,7 +295,7 @@ export async function startCheckpoint(input: {
     chatId: input.chat.id,
     messageId: input.messageId,
     createdAt: now(),
-    kind: gitSha ? 'git' : 'files',
+    kind,
     gitSha,
     label: titleFromPrompt(input.label || 'Turn'),
     files: []
@@ -269,18 +367,23 @@ export async function finishCheckpoint(chatId: string, checkpointId: string): Pr
   return current.checkpoint
 }
 
-async function restoreGit(cwd: string, sha: string): Promise<void> {
-  const restore = await runGit(cwd, ['restore', '--source', sha, '--worktree', '--', '.'])
+/** Puts the folder back as commit `sha` holds it and removes files made since. `git` picks the repository. */
+async function restoreTree(cwd: string, sha: string, git: string[], shadow: boolean): Promise<void> {
+  const restore = await runGit(cwd, [...git, 'restore', '--source', sha, '--worktree', '--', '.'])
   if (restore.code !== 0) {
-    await runGit(cwd, ['checkout', sha, '--', '.'])
+    await runGit(cwd, [...git, 'checkout', sha, '--', '.'])
   }
 
-  const then = await runGit(cwd, ['ls-tree', '-r', '--name-only', sha])
-  const nowFiles = await runGit(cwd, ['ls-files', '-co', '--exclude-standard'])
-  const previous = new Set(then.stdout.split('\n').map((line) => line.trim()).filter(Boolean))
-  for (const file of nowFiles.stdout.split('\n').map((line) => line.trim()).filter(Boolean)) {
+  const then = await runGit(cwd, [...git, 'ls-tree', '-r', '-z', '--name-only', sha])
+  const nowFiles = await runGit(cwd, [...git, 'ls-files', '-co', '--exclude-standard', '-z'])
+  const previous = new Set(nulList(then.stdout))
+  for (const file of nulList(nowFiles.stdout)) {
     if (previous.has(file)) continue
-    await rm(resolve(cwd, file), { force: true })
+    const abs = resolve(cwd, file)
+    const info = await lstat(abs).catch(() => null)
+    // A folder here is a nested repository. The private copy skips some files, so they may predate the turn.
+    if (!info || info.isDirectory() || (shadow && !shadowHolds(info))) continue
+    await rm(abs, { force: true })
   }
 }
 
@@ -308,7 +411,8 @@ async function restoreSnapshots(root: string, snapDir: string, files: string[]):
 async function deleteCheckpointArtifacts(checkpoint: Checkpoint, cwd: string | null): Promise<void> {
   await rm(snapDirFor(checkpoint.chatId, checkpoint.id), { recursive: true, force: true })
   if (cwd && checkpoint.gitSha) {
-    await runGit(cwd, ['update-ref', '-d', `refs/workbench/${checkpoint.chatId}/${checkpoint.id}`])
+    const git = checkpoint.kind === 'shadow' ? shadowArgs(checkpoint.chatId, cwd) : []
+    await runGit(cwd, [...git, 'update-ref', '-d', `refs/workbench/${checkpoint.chatId}/${checkpoint.id}`])
   }
 }
 
@@ -328,12 +432,18 @@ export async function rewindTo(chatId: string, checkpointId: string, cwd: string
   if (index === -1) throw new Error('Checkpoint not found')
   const target = checkpoints[index]
 
+  if (cwd) {
+    // Every turn being undone, newest first, so each file ends at its oldest copy.
+    for (const item of checkpoints.slice(index).reverse()) {
+      await restoreSnapshots(cwd, snapDirFor(chatId, item.id), item.files)
+    }
+  }
+  // The whole-tree copy last: it was taken before the turn, while a file copy made after a tool already
+  // ran holds that tool's change.
   if (cwd && target.gitSha) {
     const sha = target.gitSha
-    await withRepoLock(cwd, () => restoreGit(cwd, sha))
-  }
-  if (cwd) {
-    await restoreSnapshots(cwd, snapDirFor(chatId, target.id), target.files)
+    const shadow = target.kind === 'shadow'
+    await withRepoLock(cwd, () => restoreTree(cwd, sha, shadow ? shadowArgs(chatId, cwd) : [], shadow))
   }
 
   let removed: Checkpoint[] = []

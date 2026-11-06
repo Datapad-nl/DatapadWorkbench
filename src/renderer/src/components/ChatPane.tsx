@@ -2352,7 +2352,7 @@ function RewindModal({
               const extra =
                 item.files.length > 0
                   ? `${item.files.length} file${item.files.length === 1 ? '' : 's'}`
-                  : item.kind === 'git'
+                  : item.kind !== 'files'
                     ? 'Full tree'
                     : 'Chat only'
               return (
@@ -2367,7 +2367,7 @@ function RewindModal({
                   <div className="min-w-0">
                     <div className="truncate text-[13px] text-ink">{item.label}</div>
                     <div className="mt-0.5 font-mono text-[10px] text-muted">
-                      {extra} · {item.kind === 'git' ? 'git' : 'files'}
+                      {extra} · {item.kind === 'git' ? 'git' : item.kind === 'shadow' ? 'snapshot' : 'files'}
                     </div>
                   </div>
                   <div className="shrink-0 font-mono text-[10px] text-muted">
