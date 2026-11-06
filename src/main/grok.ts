@@ -89,6 +89,10 @@ const PLAN_MODE_INSTRUCTION = [
 type SteerNote = {
   text: string
   attachments: Attachment[]
+  /** The steer's own message, taken out of the chat if the steer is dropped. */
+  messageId?: string
+  /** Said in a voice conversation, which drops it when the conversation ends. */
+  spoken: boolean
 }
 
 type FollowUp = {
@@ -1016,8 +1020,29 @@ function queueAsideSteer(chatId: string, note: SteerNote): void {
   const text = note.text.trim()
   if (!text && note.attachments.length === 0) return
   const list = asideSteers.get(chatId) ?? []
-  list.push({ text, attachments: note.attachments })
+  list.push({ ...note, text })
   asideSteers.set(chatId, list)
+}
+
+/** Ending a voice conversation takes back what was said in it and has not reached the agent. */
+export async function dropSpokenSteers(): Promise<void> {
+  for (const [chatId, list] of [...asideSteers]) {
+    const kept = list.filter((note) => !note.spoken)
+    if (kept.length === list.length) continue
+    // Taken out before the await, so a turn ending meanwhile does not send them.
+    if (kept.length > 0) asideSteers.set(chatId, kept)
+    else asideSteers.delete(chatId)
+    const dropped = new Set(list.flatMap((note) => (note.spoken && note.messageId ? [note.messageId] : [])))
+    if (dropped.size === 0) continue
+    try {
+      const chat = await mutateChat(chatId, (current) => {
+        current.messages = current.messages.filter((message) => !dropped.has(message.id))
+      })
+      emitLive({ type: 'chat', chatId, chat })
+    } catch {
+      // the chat was deleted
+    }
+  }
 }
 
 function takeAsideSteers(chatId: string): SteerNote[] {
@@ -1096,14 +1121,16 @@ async function startSteer(
   chatId: string,
   content: string,
   attachments: Attachment[],
-  mentions: FileMention[]
+  mentions: FileMention[],
+  spoken: boolean
 ): Promise<Chat> {
   const question = stripBtwPrefix(promptForMentions(content, mentions))
   if (!question && attachments.length === 0) throw new Error('Message is empty')
 
+  const messageId = id()
   const started = await mutateChat(chatId, (chat) => {
     chat.messages.push({
-      id: id(),
+      id: messageId,
       role: 'user',
       content: question || 'Screenshot',
       kind: 'steer',
@@ -1119,7 +1146,7 @@ async function startSteer(
     title: 'Steer',
     detail: question || 'Screenshot'
   })
-  queueAsideSteer(chatId, { text: question, attachments })
+  queueAsideSteer(chatId, { text: question, attachments, messageId, spoken })
   drainAsideSteers(chatId)
   return started
 }
@@ -1129,10 +1156,11 @@ export async function startAside(
   project: Project | undefined,
   content: string,
   attachments: Attachment[] = [],
-  mentions: FileMention[] = []
+  mentions: FileMention[] = [],
+  spoken = false
 ): Promise<Chat> {
   if (!content.trim().startsWith(BTW_PREFIX)) {
-    return startSteer(chatId, content, attachments, mentions)
+    return startSteer(chatId, content, attachments, mentions, spoken)
   }
   const question = stripBtwPrefix(promptForMentions(content, mentions))
   if (!question && attachments.length === 0) throw new Error('Message is empty')
@@ -1157,7 +1185,7 @@ export async function startAside(
     })
   })
   emitLive({ type: 'chat', chatId, chat: started })
-  void runAside(started, project, replyId, question, attachments)
+  void runAside(started, project, replyId, question, attachments, spoken)
   return started
 }
 
@@ -1166,7 +1194,8 @@ async function runAside(
   project: Project | undefined,
   replyId: string,
   question: string,
-  attachments: Attachment[]
+  attachments: Attachment[],
+  spoken: boolean
 ): Promise<void> {
   const chatId = started.id
   const agent = normalizeChatAgent(started.agent)
@@ -1232,7 +1261,8 @@ async function runAside(
     release()
   }
   if (steer && question.trim() && !abort.signal.aborted) {
-    queueAsideSteer(chatId, { text: question, attachments })
+    // The side question stays in the chat with its answer.
+    queueAsideSteer(chatId, { text: question, attachments, spoken })
     drainAsideSteers(chatId)
   }
 }

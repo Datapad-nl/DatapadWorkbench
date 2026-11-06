@@ -57,6 +57,7 @@ import { killProcessesUnder } from './worktreeProcs'
 import { deleteAllCheckpoints } from './checkpoints'
 import {
   chatCommands,
+  dropSpokenSteers,
   forgetChat,
   isStreaming,
   liveState,
@@ -417,6 +418,7 @@ export function registerIpc(): void {
         content: string
         attachments?: Array<{ id: string; mimeType: string; data: string }>
         mentions?: FileMention[]
+        spoken?: boolean
       }
     ) => {
     const projects = await listProjects()
@@ -428,7 +430,8 @@ export function registerIpc(): void {
         project,
         input.content,
         input.attachments ?? [],
-        input.mentions ?? []
+        input.mentions ?? [],
+        input.spoken === true
       )
       return started
     }
@@ -446,6 +449,8 @@ export function registerIpc(): void {
   ipcMain.handle('chat:stop', async (_event, chatId: string) => {
     return stopStream(chatId)
   })
+
+  ipcMain.handle('chat:dropSpokenSteers', async () => dropSpokenSteers())
 
   ipcMain.handle('chat:liveState', async () => liveState())
 

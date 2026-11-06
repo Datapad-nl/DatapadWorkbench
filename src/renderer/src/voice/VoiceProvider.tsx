@@ -184,6 +184,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
 
   const stopAll = useCallback(() => {
     micSession.current += 1
+    // A correction said during the conversation would otherwise go out once the running turn ends.
+    if (liveRef.current) void window.workbench.dropSpokenSteers()
     liveRef.current = false
     awaitingReply.current = false
     clipBusy.current = null
@@ -270,8 +272,12 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
           stopSpeaking()
           speakEpoch.current += 1
         }
-        const sent = await sendMessage(chatId, leftover)
-        if (stale()) return
+        const sent = await sendMessage(chatId, leftover, undefined, undefined, looping)
+        if (stale()) {
+          // The conversation ended while this was on its way, so it was queued after the drop.
+          if (looping && sent) void window.workbench.dropSpokenSteers()
+          return
+        }
         if (!looping) {
           setStatus('idle')
         } else if (!sent) {
@@ -396,7 +402,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
 
   const toggleConversation = useCallback(() => {
     if (liveRef.current) {
-      // Ending the conversation drops the clip in progress and any reply still playing.
+      // Ending the conversation drops the clip in progress, any reply still playing, and corrections not yet sent.
       stopAll()
       return
     }

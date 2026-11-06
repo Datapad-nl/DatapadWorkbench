@@ -145,7 +145,8 @@ type WorkspaceContextValue = {
     chatId: string,
     content: string,
     attachments?: Attachment[],
-    mentions?: FileMention[]
+    mentions?: FileMention[],
+    spoken?: boolean
   ) => Promise<boolean>
   stopChat: (chatId: string) => Promise<void>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
@@ -801,7 +802,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   }, [])
 
   const sendMessage = useCallback(
-    async (chatId: string, content: string, attachments?: Attachment[], mentions?: FileMention[]) => {
+    async (
+      chatId: string,
+      content: string,
+      attachments?: Attachment[],
+      mentions?: FileMention[],
+      spoken?: boolean
+    ) => {
       const atSend = turnsRef.current[chatId]
       const asAside = atSend?.live === true
       if (!asAside) {
@@ -813,7 +820,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         }))
       }
       try {
-        const chat = await window.workbench.sendMessage(chatId, content, attachments, mentions)
+        const chat = await window.workbench.sendMessage(chatId, content, attachments, mentions, spoken)
         // The turn's done can come before this reply; its chat is newer than this one.
         const now = turnsRef.current[chatId]
         if (!(now && !now.live && now !== atSend)) applyChat(chatId, chat)

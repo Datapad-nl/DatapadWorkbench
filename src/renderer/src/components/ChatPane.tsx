@@ -1577,6 +1577,8 @@ function Composer({
     replyMuted,
     muteReply
   } = useVoice()
+  // Without auto-send a finished clip goes into the box instead.
+  const voiceAutoSend = useWorkspace().settings?.voice.autoSend === true
   const voiceMode =
     voiceStatus === 'listening' || (voiceLive && userTalking)
       ? 'user'
@@ -1870,7 +1872,9 @@ function Composer({
                 ? 'Conversation on · starting…'
                 : `Conversation on · ${progress || 'working'}`
         : voiceStatus === 'listening'
-          ? 'Listening… click the mic or pause to send'
+          ? voiceAutoSend || voiceConversation
+            ? 'Listening… click the mic or pause to send'
+            : 'Listening… click the mic or pause when done'
           : voiceStatus === 'transcribing'
             ? 'Transcribing on this machine…'
             : voiceStatus === 'speaking'
