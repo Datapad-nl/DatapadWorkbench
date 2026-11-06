@@ -1,6 +1,6 @@
 # Datapad Workbench
 
-Unofficial desktop for [Grok Build](https://grok.com/build) and [Claude Code](https://claude.com/claude-code). Projects in a sidebar, multiple chats at once.
+An unofficial Agent Development Environment for [Grok Build](https://grok.com/build) and [Claude Code](https://claude.com/claude-code). Projects in a sidebar, multiple chats at once.
 Thought process window, Browser window, Git Window. Talk to your agent with local voice.
 
 Not affiliated with, endorsed by, or sponsored by SpaceXAI / xAI or Anthropic. “Grok” and “Grok Build” are their marks, as are “Claude” and “Claude Code”.
@@ -9,7 +9,7 @@ Not affiliated with, endorsed by, or sponsored by SpaceXAI / xAI or Anthropic. �
 
 ## Run
 
-Installers are on [GitHub Releases](https://github.com/Datapad-nl/DatapadWorkbench/releases): a `.dmg` for Apple silicon Macs, an `.exe` for Windows (x64) and an `.AppImage` for Linux (x64). Installed builds check for a new release on start, download it in the background and install it when you quit. The Windows installer is not signed, so SmartScreen asks before it runs. You still need an agent installed and signed in (step 3 below).
+Installers are on [GitHub Releases](https://github.com/Datapad-nl/DatapadWorkbench/releases): a `.dmg` for Apple silicon Macs, an `.exe` for Windows (x64) and an `.AppImage` for Linux (x64). Installed builds check for a new release on start, download it in the background and install it when you quit. Settings → Check for updates checks on demand and can restart to install right away. The Windows installer is not signed, so SmartScreen asks before it runs. You still need an agent installed and signed in (step 3 below).
 
 To run from source, `npm run dev` opens a development window:
 
@@ -90,7 +90,8 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 **Desktop**
 
 - Native window; size and pane layout persist
-- Projects in a sidebar, each with an optional local folder, color, and rename
+- Projects in a sidebar, each with an optional local folder, color, and rename. The folder picker can create a new folder
+- Chat worktrees fold under their parent project in the sidebar
 
 **Voice**
 
@@ -107,6 +108,7 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Search the sidebar by project name, chat title, or anything said in a chat
 - A notification and Dock badge when a chat finishes or needs your approval while Workbench is in the background
 - Ask / Auto / Plan permission modes, including plan cards you can approve, revise, or abandon
+- Questions from the agent (such as Claude's AskUserQuestion) show as cards with their options and a free-text answer
 - Isolated git worktrees so concurrent chats on the same repo do not clobber each other
 - Checkpoints and rewind of files plus later messages
 - First-run project briefing, Codegraph index status, and an orientation card
@@ -118,9 +120,20 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Git: branch, ahead/behind, commit graph, diffs, stage / unstage / discard, commit, checkout, new branch, merge a chat’s worktree branch back into the project
 - Knowledge: Obsidian-compatible `knowledge/` vault with a graph pane and generated maps
 
+**Agent tools**
+
+Every chat gets two built-in MCP servers, on Grok and Claude alike:
+
+- `browser`: drive the Browser pane — navigate, screenshot, snapshot, click, type, press, wait for, evaluate, and read the console
+- `workbench`:
+  - Show a visual: sandboxed HTML rendered inline in the chat
+  - Delegate a task to a child chat, optionally in its own worktree; list, read, and start other chats in the project
+  - Schedule a prompt once or on a cron; the sidebar shows the next run
+  - Link a GitHub PR: the chat header shows its checks and review state, and the chat wakes when checks finish or a review comes in
+
 **Composer**
 
-- Markdown replies, `@file` / folder mentions, pasted screenshots and attachments
+- Markdown replies with a copy button on code blocks, `@file` / folder mentions, pasted screenshots and attachments
 - Slash-command palette: `/new`, `/rewind`, `/plan`, `/ask`, `/always-approve`, `/commit`, `/review`, `/model`, `/settings`, `/usage`, `/transcribe`, `/btw`, `/export` (save the chat as Markdown), and more
 - The agent’s own commands and skills show in the same palette, such as `/compact` and `/context`. Grok chats also get `/imagine`
 - MCP servers for every chat: Settings → MCP (or `/mcps`) takes the usual `mcpServers` JSON, local commands or `http`/`sse` URLs. They load next to the built-in browser server and each agent’s own MCP config
@@ -132,7 +145,8 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Grok signs in with `grok login` (SuperGrok), with an optional API-key fallback. Claude uses your `claude auth login`
 - Model and effort picker: Grok 4.6 by default; Claude chats list the models and effort levels Claude Code offers
 - Appearance: built-in themes plus import and export of custom themes
-- Usage snapshot in the status bar
+- Usage snapshot and app version in the status bar
+- Check for updates on demand
 
 ## License
 
