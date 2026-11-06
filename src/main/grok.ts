@@ -131,6 +131,8 @@ type Turn = {
   flushTimer: ReturnType<typeof setTimeout> | null
   killTimer: ReturnType<typeof setTimeout> | null
   checkpointId: string | null
+  /** A plan card came up for approval during this turn. Only that card's early verdict is kept. */
+  planShown: boolean
   stopped: Promise<typeof STOP>
   signalStop: () => void
   /** Stop gave up on an agent that ignores the cancel and has other chats to answer. */
@@ -146,6 +148,8 @@ const DELTA_FLUSH_MS = 50
 
 const turns = new Map<string, Turn>()
 const sessionTurns = new Map<string, Turn>()
+/** Prompts of stopped turns that the agent did not cancel, by session, until they end. */
+const abandonedPrompts = new Map<string, Promise<void>>()
 const asideAborts = new Map<string, Set<AbortController>>()
 const asideSteers = new Map<string, SteerNote[]>()
 let nextGen = 1
@@ -275,6 +279,8 @@ async function hydrateExitPlan(chatId: string, sessionId: string, markdown = '')
     (live?.title && live.title !== 'Plan' && live.title !== 'No plan written yet' ? live.title : null) ||
     (disk?.title && disk.title !== 'No plan written yet' ? disk.title : null) ||
     (text.trim() ? text.match(/^#\s+(.+)$/m)?.[1]?.trim() || 'Plan' : 'Waiting for approval')
+  const turn = turns.get(chatId)
+  if (turn) turn.planShown = true
   await persistPlan(
     chatId,
     mergePlan(live ?? disk ?? undefined, {
@@ -411,7 +417,8 @@ function reserveTurn(chatId: string): Turn {
     pendingDelta: '',
     flushTimer: null,
     killTimer: null,
-    checkpointId: null
+    checkpointId: null,
+    planShown: false
   } as Omit<Turn, 'stopped' | 'signalStop' | 'abandoned' | 'signalAbandon' | 'ended' | 'signalEnd'> as Turn
   turn.stopped = new Promise((resolve) => {
     turn.signalStop = () => resolve(STOP)
@@ -612,11 +619,14 @@ export async function setChatMode(chatId: string, mode: PermissionMode): Promise
   const loaded = await getChat(chatId)
   const next = normalizePermissionMode(mode)
   attachSession(loaded, { silent: next !== 'plan' })
-  if (next !== 'plan') {
+  if (next === 'plan') {
+    // Back to planning: a verdict left from leaving plan earlier in this turn no longer holds.
+    clearQueuedExitPlanVerdict(chatId)
+  } else {
     const answered = resolveExitPlan(chatId, 'abandoned')
     // The plan card can show before the agent asks. Answer that ask when it comes, in this turn only.
     const awaiting = (livePlans.get(chatId) ?? loaded.plan)?.awaitingApproval
-    if (!answered && awaiting && isStreaming(chatId)) queueExitPlanVerdict(chatId, 'abandoned')
+    if (!answered && awaiting && turns.get(chatId)?.planShown) queueExitPlanVerdict(chatId, 'abandoned')
     resolveChatPlanApproval(chatId, 'deny')
   }
   let planChanged = false
@@ -649,8 +659,9 @@ export async function settleChatPlan(chatId: string, verdict: PlanVerdict): Prom
 
   attachSession(loaded, { silent: true })
   const continued = resolveExitPlan(chatId, outcome)
-  // Clicked before the agent asked: answer its ask when it comes, in this turn only.
-  if (!continued && live) queueExitPlanVerdict(chatId, outcome)
+  // Clicked before the agent asked: answer its ask when it comes, in this turn only. A card restored
+  // from an earlier turn does not answer a plan this turn has not shown yet.
+  if (!continued && turns.get(chatId)?.planShown) queueExitPlanVerdict(chatId, outcome)
   if (verdict === 'approve') resolveChatPlanApproval(chatId, 'allow')
   if (verdict === 'abandon') resolveChatPlanApproval(chatId, 'deny')
 
@@ -880,6 +891,9 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const resolved = await step(turn, resolveSession(chat, project))
   chat = resolved.chat
   const sessionId = resolved.sessionId
+  // A stopped turn the agent kept running. Prompting now would mix its reply into this one.
+  const running = abandonedPrompts.get(sessionId)
+  if (running) await step(turn, running)
   const mode = normalizePermissionMode(chat.mode)
   await step(turn, applyAcpMode(sessionId, mode))
 
@@ -926,7 +940,16 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const prompt = promptSession(sessionId, asGoal ? `/goal ${cued}` : cued, images)
   prompt.catch(() => {})
   const result = await Promise.race([prompt.then(() => null), turn.abandoned])
-  if (result === STOP) throw new TurnStopped()
+  if (result === STOP) {
+    // The agent is still answering. The session takes its next prompt once this one ends.
+    const running: Promise<void> = prompt
+      .then(() => undefined, () => undefined)
+      .finally(() => {
+        if (abandonedPrompts.get(sessionId) === running) abandonedPrompts.delete(sessionId)
+      })
+    abandonedPrompts.set(sessionId, running)
+    throw new TurnStopped()
+  }
 
   // Commands like /compact finish without writing anything.
   const draft = turn.draft.trim()

@@ -382,15 +382,18 @@ export function registerIpc(): void {
     const chat = await getChat(chatId).catch(() => null)
     const projects = await listProjects()
     const project = chat ? projects.find((item) => item.id === chat.projectId) : null
-    const cwd = chat && project ? chatWorkingDir(chat, project.path) : project?.path ?? null
-    await deleteAllCheckpoints(chatId, cwd)
+    let cwd = chat && project ? chatWorkingDir(chat, project.path) : project?.path ?? null
     if (chat?.worktreePath && project?.path) {
       const removed = await removeChatWorktree(project.path, chat.worktreePath)
       // Deleting the chat now would leave its worktree with nothing pointing at it.
       if (!removed) {
         throw new Error(`Could not remove the worktree at ${chat.worktreePath}, so the chat was kept. Close anything using it and try again.`)
       }
+      // A worktree shares its refs with the project's repo, so its checkpoints are deleted from there.
+      cwd = project.path
     }
+    // Only once the chat is sure to go: a chat that stays keeps its checkpoints.
+    await deleteAllCheckpoints(chatId, cwd)
     await deleteChat(chatId)
     forgetChat(chatId)
     return snapshot()
@@ -423,8 +426,9 @@ export function registerIpc(): void {
       }
     ) => {
     const conversation = typeof input.conversation === 'string' ? input.conversation : undefined
-    const projects = await listProjects()
+    // Nothing is awaited before a new turn is reserved, so a Stop sent right after this finds it.
     if (isStreaming(input.chatId)) {
+      const projects = await listProjects()
       const current = await getChat(input.chatId)
       const project = projects.find((item) => item.id === current.projectId)
       const started = await startAside(

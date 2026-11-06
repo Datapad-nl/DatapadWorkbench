@@ -1166,11 +1166,14 @@ export function agentGeneration(agent: ChatAgent): number {
   return conns[agent].generation
 }
 
-/** Whether another session on the same process is still waiting for its prompt to finish. */
+/**
+ * Whether the process is still answering anything not of this session: another chat's prompt, or a
+ * session it is opening or loading (a new session has no id yet).
+ */
 export function hasOtherActivePrompts(sessionId: string): boolean {
   const conn = connForSession(sessionId)
   for (const waiter of conn.pending.values()) {
-    if (waiter.method === 'session/prompt' && waiter.sessionId && waiter.sessionId !== sessionId) return true
+    if (waiter.sessionId !== sessionId) return true
   }
   return false
 }

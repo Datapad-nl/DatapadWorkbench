@@ -9,6 +9,7 @@ import {
   isPlanGateText,
   isSessionStopped,
   markSessionStopped,
+  outcomeFor,
   onPermissionSettled,
   pendingPermissionRequests,
   resolvePermission
@@ -43,6 +44,22 @@ describe('isPlanGateText', () => {
     for (const text of ['Explain the plan', 'planning exit strategy', 'exit planner', 'Edit plan.md']) {
       expect(isPlanGateText(text)).toBe(false)
     }
+  })
+})
+
+describe('outcomeFor', () => {
+  it('answers for this call only, so the agent asks again next time', () => {
+    const offered = [
+      { optionId: 'always', kind: 'allow_always' },
+      { optionId: 'once', kind: 'allow_once' },
+      { optionId: 'never', kind: 'reject_always' },
+      { optionId: 'not-now', kind: 'reject_once' }
+    ]
+    expect(outcomeFor(offered, 'allow')).toEqual({ outcome: { outcome: 'selected', optionId: 'once' } })
+    expect(outcomeFor(offered, 'deny')).toEqual({ outcome: { outcome: 'selected', optionId: 'not-now' } })
+    expect(outcomeFor([{ optionId: 'always', kind: 'allow_always' }], 'allow')).toEqual({
+      outcome: { outcome: 'selected', optionId: 'always' }
+    })
   })
 })
 

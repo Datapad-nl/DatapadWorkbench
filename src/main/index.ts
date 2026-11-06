@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, dialog, shell } from 'electron'
 import { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { startUpdater, stopUpdater } from './updater'
@@ -20,7 +20,13 @@ import { registerIpc } from './ipc'
 import { hasRunningTurns, stopAllTurnsAndWait } from './grok'
 import { startScheduler } from './chatTools'
 import { startPrWatcher } from './pullRequests'
-import { ensureStore, purgeUnsafeProjects, syncClaudeSessions, syncGrokSessions } from './store'
+import {
+  ensureStore,
+  purgeUnsafeProjects,
+  syncClaudeSessions,
+  syncGrokSessions,
+  unreadableProjectsMovedTo
+} from './store'
 import { applyWindowChrome, getThemeState } from './themes'
 import { attachMediaProtocol } from './media'
 import { attachVisualProtocol } from './visuals'
@@ -141,7 +147,8 @@ app.whenReady().then(async () => {
   attachVisualProtocol()
   void ensureMicAccess()
   await prepareBrowser()
-  await startBrowserAgentServer()
+  // The app still opens if the browser tools' server can't start. The next chat to start tries again.
+  await startBrowserAgentServer().catch((error) => console.error('Browser agent server did not start', error))
   registerIpc()
   startScheduler()
   startPrWatcher()
@@ -149,6 +156,8 @@ app.whenReady().then(async () => {
   void sweepWorktreeProcesses()
   startWorktreeReaper()
   createWindow()
+  const movedTo = unreadableProjectsMovedTo()
+  if (movedTo) void warnUnreadableProjects(movedTo)
   startUpdater()
   const { active } = await getThemeState()
   applyWindowChrome(active)
@@ -157,6 +166,22 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
+
+/** The project list starts empty after projects.json failed to parse. Say so, and where the old file went. */
+async function warnUnreadableProjects(movedTo: string): Promise<void> {
+  const { response } = await dialog.showMessageBox({
+    type: 'warning',
+    message: 'Your project list could not be read',
+    detail:
+      `projects.json did not parse, so it was moved to ${movedTo} and the list starts empty. ` +
+      'To get your projects back, quit, rename that file to projects.json, and open the app again. ' +
+      'Until the list has a project again, Grok sessions are not turned into new projects.',
+    buttons: ['Show the file', 'OK'],
+    defaultId: 1,
+    cancelId: 1
+  })
+  if (response === 0) shell.showItemInFolder(movedTo)
+}
 
 let turnsSaved = false
 

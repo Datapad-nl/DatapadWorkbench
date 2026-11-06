@@ -40,7 +40,7 @@ export async function writeFileAtomic(path: string, data: string): Promise<void>
  * `fallback` when the file doesn't exist. A file that doesn't parse is moved aside to
  * `<path>.corrupt-<ms>`, reported to `onCorrupt`, and also reads as `fallback`. Other read errors throw.
  */
-export async function readJsonFile<T>(path: string, fallback: T, onCorrupt?: () => void): Promise<T> {
+export async function readJsonFile<T>(path: string, fallback: T, onCorrupt?: (aside: string) => void): Promise<T> {
   let text: string
   try {
     text = await readFile(path, 'utf8')
@@ -54,7 +54,7 @@ export async function readJsonFile<T>(path: string, fallback: T, onCorrupt?: () 
     const aside = `${path}.corrupt-${Date.now()}`
     await rename(path, aside).catch(() => undefined)
     console.error(`Unreadable JSON moved to ${aside}`)
-    onCorrupt?.()
+    onCorrupt?.(aside)
     return fallback
   }
 }

@@ -340,6 +340,8 @@ export function GraphPane(): React.JSX.Element {
   projectIdRef.current = activeProjectId
   const project = projects.find((item) => item.id === activeProjectId) ?? null
   const otherPanes = showGit || showBrowser || showActivity
+  // Until the new project's graph arrives, the last project's must not show under its name.
+  const loading = Boolean(activeProjectId) && snapshot.projectId !== activeProjectId
 
   useEffect(() => {
     if (!showKnowledge) {
@@ -411,7 +413,7 @@ export function GraphPane(): React.JSX.Element {
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
             <h1 className="shrink-0 text-[13px] font-semibold text-ink">Knowledge</h1>
             <p className="no-drag min-w-0 truncate font-mono text-[11px] text-faint">
-              {snapshot.available
+              {snapshot.available && !loading
                 ? `${snapshot.nodes.length} notes · ${snapshot.edges.length} links`
                 : project?.name ?? 'No project'}
             </p>
@@ -438,9 +440,9 @@ export function GraphPane(): React.JSX.Element {
         </div>
       </header>
 
-      {!activeProjectId || !snapshot.available ? (
+      {!activeProjectId || loading || !snapshot.available ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-[12px] text-muted">
-          {reasonCopy(snapshot)}
+          {loading ? 'Loading…' : reasonCopy(snapshot)}
         </div>
       ) : (
         <div className="no-drag flex min-h-0 flex-1 flex-col">

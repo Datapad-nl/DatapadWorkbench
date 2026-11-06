@@ -55,11 +55,31 @@ type StoreData = {
 /** Chats deleted in this run. A late save from a stream that outlived its chat must not bring it back. */
 const deletedChats = new Set<string>()
 
-/** Set when projects.json didn't parse and was moved aside. No projects are imported on top of it until restart. */
-let projectsRecovered = false
+/** Where an unreadable projects.json was moved in this run, so the user can be told. */
+let projectsMovedTo: string | null = null
+let recoveryWrite: Promise<void> = Promise.resolve()
 
-function markProjectsRecovered(): void {
-  projectsRecovered = true
+/**
+ * projects.json didn't parse and was moved aside. A marker on disk keeps Grok sessions from creating
+ * projects on top of the empty list, across restarts, until the list has a project again.
+ */
+function markProjectsRecovered(aside: string): void {
+  projectsMovedTo = aside
+  recoveryWrite = writeJson(recoveryMarkerFile(), { movedTo: aside, at: now() }).catch(() => undefined)
+}
+
+export function unreadableProjectsMovedTo(): string | null {
+  return projectsMovedTo
+}
+
+/** Whether the list is still the empty one left by a recovery. A restored or added project ends it. */
+async function awaitingProjectsRestore(projects: Project[]): Promise<boolean> {
+  await recoveryWrite
+  const marker = await readJson<unknown>(recoveryMarkerFile(), null)
+  if (!marker) return false
+  if (projects.length === 0) return true
+  await rm(recoveryMarkerFile(), { force: true })
+  return false
 }
 
 function dataDir(): string {
@@ -72,6 +92,10 @@ function projectsPath(): string {
 
 function dismissedPathsFile(): string {
   return join(dataDir(), 'dismissed-paths.json')
+}
+
+function recoveryMarkerFile(): string {
+  return join(dataDir(), 'projects-recovered.json')
 }
 
 function normalizeProjectPath(value: string): string {
@@ -662,6 +686,7 @@ async function importGrokSessions(): Promise<void> {
   const chats = await listChats()
   const known = new Set(chats.map((chat) => chat.grokSessionId).filter(Boolean))
   const dismissed = await loadDismissedPaths()
+  const restoring = await awaitingProjectsRestore(projects)
 
   // Sessions Grok never titled read as their first prompt instead of "Grok session".
   for (const chat of chats) {
@@ -678,7 +703,7 @@ async function importGrokSessions(): Promise<void> {
     if (isUnsafeProjectPath(cwd)) continue
     let project = projects.find((item) => item.path && normalizeProjectPath(item.path) === cwd)
     if (!project) {
-      if (dismissed.has(cwd) || projectsRecovered) continue
+      if (dismissed.has(cwd) || restoring) continue
       const name = session.cwd.split(/[/\\]/).filter(Boolean).at(-1) || 'Project'
       project = await createProject(name, session.cwd)
       projects.unshift(project)
@@ -716,17 +741,6 @@ async function importClaudeSessions(): Promise<void> {
     })
     known.add(session.id)
   }
-}
-
-export async function saveChat(chat: Chat): Promise<Chat> {
-  const next = await withLock(chat.id, async () => {
-    if (deletedChats.has(chat.id)) throw new Error('Chat not found')
-    const next = { ...chat, updatedAt: now() }
-    await writeJson(chatPath(chat.id), next)
-    return next
-  })
-  await touchProject(next.projectId)
-  return next
 }
 
 export async function mutateChat(chatId: string, fn: (chat: Chat) => void): Promise<Chat> {

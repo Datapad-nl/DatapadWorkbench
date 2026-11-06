@@ -188,15 +188,20 @@ export function isMutatingTool(kind?: string, title?: string, name?: string): bo
   return DENY_NAME.test(`${title ?? ''} ${name ?? ''}`)
 }
 
+/**
+ * The option that gives this answer. A "once" option comes first, so the agent asks again for the next
+ * call: an "always" answer would let later edits run unasked, before their checkpoint copy is taken.
+ */
 export function pickOption(
   options: PermissionOption[],
   want: 'allow' | 'deny'
 ): PermissionOption | null {
-  const match = options.find((option) => {
+  const matches = options.filter((option) => {
     const kind = (option.kind ?? '').toLowerCase()
     if (want === 'allow') return kind.startsWith('allow')
     return kind.startsWith('reject') || kind.startsWith('deny')
   })
+  const match = matches.find((option) => (option.kind ?? '').toLowerCase().endsWith('_once')) ?? matches[0]
   if (match) return match
   return want === 'allow' ? (options[0] ?? null) : null
 }

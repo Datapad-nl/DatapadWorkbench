@@ -427,6 +427,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     return snapshot
   }, [])
 
+  /** The lists after a change main already made. A failed read is not a failed change; the next refresh catches up. */
+  const refreshAfterChange = useCallback(async () => {
+    try {
+      return await refresh()
+    } catch (error) {
+      console.error('Could not refresh the workspace', error)
+      return null
+    }
+  }, [refresh])
+
   useEffect(
     () => window.workbench.onBrowserRequestShow?.(() => setShowBrowser(true)),
     [setShowBrowser]
@@ -726,14 +736,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   const createProject = useCallback(
     async (name: string, path: string | null) => {
       const { project, chat } = await window.workbench.createProject({ name, path })
-      await refresh()
+      await refreshAfterChange()
       setActiveProjectId(project.id)
       setChatsById((current) => ({ ...current, [chat.id]: chat }))
       setOpenChatIds((current) => (current.includes(chat.id) ? current : [...current, chat.id]))
       setActiveChatId(chat.id)
       setShowNewProject(false)
     },
-    [refresh]
+    [refreshAfterChange]
   )
 
   const updateProject = useCallback(async (input: UpdateProjectInput) => {
@@ -759,24 +769,24 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       await window.workbench.deleteProject(projectId)
       setOpenChatIds((current) => current.filter((id) => !removed.includes(id)))
       forgetChats(removed)
-      const snapshot = await refresh()
-      const nextProject = snapshot.projects[0]?.id ?? null
+      const snapshot = await refreshAfterChange()
+      const nextProject = snapshot?.projects[0]?.id ?? null
       setActiveProjectId(nextProject)
       setActiveChatId((active) => (active && removed.includes(active) ? null : active))
     },
-    [chats, forgetChats, refresh]
+    [chats, forgetChats, refreshAfterChange]
   )
 
   const createChat = useCallback(
     async (projectId: string) => {
       const chat = await window.workbench.createChat(projectId)
-      await refresh()
+      await refreshAfterChange()
       setChatsById((current) => ({ ...current, [chat.id]: chat }))
       setOpenChatIds((current) => (current.includes(chat.id) ? current : [...current, chat.id]))
       setActiveChatId(chat.id)
       setActiveProjectId(projectId)
     },
-    [refresh]
+    [refreshAfterChange]
   )
 
   const deleteChat = useCallback(
@@ -784,9 +794,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       await window.workbench.deleteChat(chatId)
       closeTab(chatId)
       forgetChats([chatId])
-      await refresh()
+      await refreshAfterChange()
     },
-    [closeTab, forgetChats, refresh]
+    [closeTab, forgetChats, refreshAfterChange]
   )
 
   const renameChat = useCallback(async (chatId: string, title: string) => {
@@ -831,7 +841,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         // The turn's done can come before this reply; its chat is newer than this one.
         const now = turnsRef.current[chatId]
         if (!(now && !now.live && now !== atSend)) applyChat(chatId, chat)
-        if (!asAside) await refresh()
+        if (!asAside) await refreshAfterChange()
         return true
       } catch (error) {
         const raw = error instanceof Error ? error.message : 'Could not send'
@@ -852,7 +862,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         if (!asAside) sending.current.delete(chatId)
       }
     },
-    [applyChat, refresh]
+    [applyChat, refreshAfterChange]
   )
 
   const stopChat = useCallback(
@@ -937,9 +947,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         [chatId]: { ...emptyStream, turnId: current[chatId]?.turnId ?? null }
       }))
       await syncLive()
-      await refresh()
+      await refreshAfterChange()
     },
-    [refresh, syncLive]
+    [refreshAfterChange, syncLive]
   )
 
   const saveSettings = useCallback(

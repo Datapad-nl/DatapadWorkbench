@@ -71,15 +71,15 @@ describe('readJsonFile', () => {
   it('moves a file that does not parse aside and returns the fallback', async () => {
     const path = join(dir, 'broken.json')
     await writeFile(path, '{"projects": [', 'utf8')
-    let corrupt = false
-    const value = await readJsonFile(path, null, () => {
-      corrupt = true
+    let corrupt = ''
+    const value = await readJsonFile(path, null, (aside) => {
+      corrupt = aside
     })
     expect(value).toBeNull()
-    expect(corrupt).toBe(true)
     const files = await readdir(dir)
     expect(files).toHaveLength(1)
     expect(files[0]).toMatch(/^broken\.json\.corrupt-\d+$/)
+    expect(corrupt).toBe(join(dir, files[0]))
     expect(await readFile(join(dir, files[0]), 'utf8')).toBe('{"projects": [')
   })
 
