@@ -1,9 +1,6 @@
-import type { ChatAgent, Project, UserQuestion } from '../shared/types'
-import { promptIsolated } from './acp'
-import { getClaudeCliInfo } from './claudeCli'
+import type { Project, UserQuestion } from '../shared/types'
+import { askOnce } from './askOnce'
 import type { ProjectScan } from './projectScan'
-import { grokBuildSignedIn } from './sessions'
-import { getApiKey, getDefaultAgent, getModel } from './store'
 
 export type GeneratedIntake = {
   title: string
@@ -326,78 +323,12 @@ function generationPrompt(project: Project, scan: ProjectScan): string {
   ].join('\n')
 }
 
-async function generateViaApi(prompt: string): Promise<string | null> {
-  const key = await getApiKey()
-  if (!key) return null
-  const model = await getModel()
-  const abort = new AbortController()
-  const timer = setTimeout(() => abort.abort(), 20_000)
-  try {
-    const response = await fetch('https://api.x.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json'
-      },
-      signal: abort.signal,
-      body: JSON.stringify({
-        model,
-        temperature: 0.4,
-        messages: [
-          { role: 'system', content: 'Return JSON only. No markdown.' },
-          { role: 'user', content: prompt }
-        ]
-      })
-    })
-    if (!response.ok) return null
-    const body = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>
-    }
-    return body.choices?.[0]?.message?.content ?? null
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-/** The agent for new chats when it is signed in, else whichever one is. */
-async function intakeAgent(): Promise<ChatAgent | null> {
-  const signedIn: Record<ChatAgent, boolean> = {
-    grok: grokBuildSignedIn(),
-    claude: (await getClaudeCliInfo()).signedIn
-  }
-  const preferred = await getDefaultAgent()
-  if (signedIn[preferred]) return preferred
-  return signedIn.grok ? 'grok' : signedIn.claude ? 'claude' : null
-}
-
-async function generateViaAgent(
-  project: Project,
-  prompt: string,
-  agent: ChatAgent
-): Promise<string | null> {
-  if (!project.path) return null
-  try {
-    return await promptIsolated(project.path, prompt, [], undefined, undefined, {
-      agent,
-      timeoutMs: 75_000,
-      rules:
-        'Do not use tools. Do not read or edit files. The prompt already contains the project dossier. Reply with JSON only.'
-    })
-  } catch {
-    return null
-  }
-}
-
 export async function generateIntakeQuestions(
   project: Project,
   scan: ProjectScan
 ): Promise<GeneratedIntake> {
   const fallback = fallbackQuestions(project, scan)
-  const prompt = generationPrompt(project, scan)
-  const agent = await intakeAgent()
-  // The xAI key only stands in for Grok, so a Claude default goes straight to Claude.
-  const viaApi = agent === 'claude' ? null : await generateViaApi(prompt).catch(() => null)
-  const raw = viaApi ?? (agent ? await generateViaAgent(project, prompt, agent) : null)
+  const raw = await askOnce(project, generationPrompt(project, scan))
   if (!raw) return fallback
   return parseGenerated(raw) ?? fallback
 }

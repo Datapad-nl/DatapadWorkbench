@@ -10,7 +10,8 @@ const stub = vi.hoisted(() => ({
   send: vi.fn(),
   orientation: vi.fn(),
   sync: vi.fn(),
-  files: vi.fn()
+  files: vi.fn(),
+  ask: vi.fn()
 }))
 
 vi.mock('electron', () => ({
@@ -23,6 +24,7 @@ vi.mock('./codegraph', () => ({
   listIndexedFiles: stub.files
 }))
 vi.mock('./store', () => ({ listProjects: async () => stub.projects }))
+vi.mock('./askOnce', () => ({ askOnce: stub.ask }))
 
 let root = ''
 let project: Project
@@ -84,6 +86,7 @@ beforeEach(async () => {
   stub.orientation.mockReset().mockImplementation(async (target: Project) => card(target))
   stub.sync.mockReset().mockResolvedValue(undefined)
   stub.files.mockReset().mockResolvedValue(null)
+  stub.ask.mockReset().mockResolvedValue(null)
 })
 
 afterEach(async () => {
@@ -285,6 +288,95 @@ describe('the layout', () => {
     const snapshot = await knowledge.maintainVault(project)
     expect(snapshot.nodes.filter((node) => node.path.startsWith('generated/src/'))).toHaveLength(120)
     expect(await generated('src.md')).toMatch(/^- `m\d+\/`$/m)
+  })
+})
+
+describe('module descriptions', () => {
+  const reply = JSON.stringify({
+    modules: [
+      { path: 'src', about: 'Holds the app. It is split by process.', files: {} },
+      { path: 'src/main', about: 'Runs the main process. It reads the config.', files: { 'config.ts': 'Reads the config file.' } },
+      { path: 'src/shared', about: 'Types both processes share.', files: { 'types.ts': 'The shared types.' } }
+    ]
+  })
+  const describedMain = (): Promise<void> =>
+    vi.waitFor(async () => expect(await generated('src/main.md')).toContain('Runs the main process.'), {
+      timeout: 5_000,
+      interval: 50
+    })
+
+  it('come from the model while the Knowledge pane is open, for each module and the files in it', async () => {
+    await indexFiles({
+      'src/main/config.ts': "import type { T } from '../shared/types'\n/** Reads the config. */\nexport function readConfig(): T {\n}\n",
+      'src/shared/types.ts': 'export type T = 1\n'
+    })
+    stub.ask.mockResolvedValue(reply)
+    const knowledge = await load()
+    await knowledge.maintainVault(project)
+    expect(stub.ask).not.toHaveBeenCalled()
+
+    await knowledge.setKnowledgeActiveProject('p1')
+    await describedMain()
+    // Lets the run that wrote it finish.
+    await knowledge.maintainVault(project)
+    const main = await generated('src/main.md')
+    expect(main).toContain('- `config.ts`: Reads the config file.')
+    expect(main.indexOf('Runs the main process.')).toBeLessThan(main.indexOf('## In'))
+    expect(await generated('src/shared.md')).toContain('- `types.ts`: The shared types.')
+    expect(await generated('Architecture.md')).toContain('- [[generated/src.md|src]] — Holds the app.\n')
+    expect(stub.ask).toHaveBeenCalledTimes(1)
+    expect(stub.ask.mock.calls[0][1]).toContain(
+      '## Module src/main/\nUses: src/shared\n### config.ts\n// Reads the config.\nexport function readConfig(): T\n'
+    )
+    knowledge.stopKnowledgeWatchers()
+  })
+
+  it('are asked for again only for a module whose files changed, also after a restart', async () => {
+    await indexFiles({ 'src/main/config.ts': '', 'src/shared/types.ts': '' })
+    stub.ask.mockResolvedValue(reply)
+    let knowledge = await load()
+    await knowledge.setKnowledgeActiveProject('p1')
+    await describedMain()
+    await knowledge.maintainVault(project)
+    expect(stub.ask).toHaveBeenCalledTimes(1)
+    knowledge.stopKnowledgeWatchers()
+
+    knowledge = await load()
+    await knowledge.setKnowledgeActiveProject('p1')
+    await knowledge.maintainVault(project)
+    expect(stub.ask).toHaveBeenCalledTimes(1)
+
+    stub.ask.mockResolvedValue(
+      JSON.stringify({ modules: [{ path: 'src/main', about: 'Runs the main process.', files: { 'extra.ts': 'The extras.' } }] })
+    )
+    await indexFiles({ 'src/main/config.ts': '', 'src/main/extra.ts': '', 'src/shared/types.ts': '' })
+    await knowledge.maintainVault(project)
+    await vi.waitFor(async () => expect(await generated('src/main.md')).toContain('- `extra.ts`: The extras.'), {
+      timeout: 5_000,
+      interval: 50
+    })
+    await knowledge.maintainVault(project)
+    expect(stub.ask).toHaveBeenCalledTimes(2)
+    const prompt = stub.ask.mock.calls[1][1] as string
+    expect(prompt).toContain('## Module src/main/\n')
+    expect(prompt).not.toContain('## Module src/shared/\n')
+    expect(prompt).not.toContain('## Module src/\n')
+    // The other modules keep what was written about them.
+    expect(await generated('src/shared.md')).toContain('Types both processes share.')
+    knowledge.stopKnowledgeWatchers()
+  })
+
+  it('are not asked for again after a reply without them, until the module changes', async () => {
+    await indexFiles({ 'src/main/config.ts': '' })
+    stub.ask.mockResolvedValue('Sorry, no.')
+    const knowledge = await load()
+    await knowledge.setKnowledgeActiveProject('p1')
+    await vi.waitFor(() => expect(stub.ask).toHaveBeenCalledTimes(1))
+    await knowledge.maintainVault(project)
+    await knowledge.maintainVault(project)
+    expect(stub.ask).toHaveBeenCalledTimes(1)
+    expect(existsSync(join(root, 'knowledge', 'generated', '.summaries.json'))).toBe(false)
+    knowledge.stopKnowledgeWatchers()
   })
 })
 
