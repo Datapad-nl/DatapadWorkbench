@@ -125,6 +125,8 @@ type Turn = {
   /** The agent process this turn prompts. Stop kills only that one. */
   agentGeneration: number
   cancelled: boolean
+  /** Cancelled by a steer, which runs as soon as this turn ends. The session is kept. */
+  steered: boolean
   draft: string
   /** A tool ran since the last text, so the next text starts a new step. */
   stepBreak: boolean
@@ -416,6 +418,7 @@ function reserveTurn(chatId: string): Turn {
     agent: 'grok',
     agentGeneration: 0,
     cancelled: false,
+    steered: false,
     draft: '',
     stepBreak: false,
     pendingDelta: '',
@@ -484,7 +487,9 @@ export function stopStream(chatId: string): boolean {
   resolveExitPlan(chatId, 'abandoned')
   const turn = turns.get(chatId)
   if (!turn) return false
-  if (turn.cancelled) return true
+  // A steer's cancel has no kill timer. Stop still ends an agent that ignores it.
+  if (turn.cancelled && !turn.steered) return true
+  turn.steered = false
   turn.cancelled = true
   turn.signalStop()
   const sessionId = turn.sessionId
@@ -505,6 +510,27 @@ export function stopStream(chatId: string): boolean {
     else abortAgent(turn.agent, turn.agentGeneration)
   }, STOP_GRACE_MS)
   return true
+}
+
+/**
+ * Cancel the running prompt so a queued steer goes out as soon as the agent stops, instead of
+ * after the whole task. A turn still preparing is cancelled once its prompt is sent. If the agent
+ * ignores the cancel, the steer waits for the turn to end.
+ */
+function interruptForSteer(turn: Turn): void {
+  const sessionId = turn.sessionId
+  if (turn.cancelled || turn.phase !== 'streaming' || !sessionId) return
+  turn.cancelled = true
+  turn.steered = true
+  // The agent must not start new tool calls or wait on answers for the cancelled prompt.
+  markSessionStopped(sessionId)
+  cancelSessionPermissions(sessionId)
+  cancelSessionQuestions(sessionId)
+  try {
+    cancelSession(sessionId)
+  } catch {
+    // the agent is already gone; its exit ends the turn
+  }
 }
 
 /** Another chat's turn on the same agent, including one still preparing its prompt, that a kill would end. */
@@ -843,9 +869,13 @@ async function turnBody(turn: Turn, followUp?: FollowUp): Promise<Chat | null> {
   } catch (error) {
     if (isChatGone(error)) return null
     const draft = turn.draft.trim()
-    if (turn.cancelled || error instanceof TurnStopped || draft) return saveReply(turn, draft || '(stopped)')
+    if (turn.cancelled || error instanceof TurnStopped || draft) return saveReply(turn, draft || stoppedReply(turn))
     throw error
   }
+}
+
+function stoppedReply(turn: Turn): string {
+  return turn.steered ? '(interrupted to steer)' : '(stopped)'
 }
 
 async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null> {
@@ -936,6 +966,8 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   startTurn({ chatId: chat.id, chatTitle: chat.title, sessionId, prompt: opening })
   const prompt = promptSession(sessionId, cued, images)
   prompt.catch(() => {})
+  // A steer sent while the turn prepared. The prompt is in the session now, so the steer can follow it.
+  if (asideSteers.has(chat.id)) interruptForSteer(turn)
   const result = await Promise.race([prompt.then(() => null), turn.abandoned])
   if (result === STOP) {
     // The agent is still answering. The session takes its next prompt once this one ends.
@@ -953,7 +985,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const reply =
     draft ||
     (turn.cancelled
-      ? '(stopped)'
+      ? stoppedReply(turn)
       : isSlashCommand(userText)
         ? `Ran ${userText.trim().split(/\s/)[0]}`
         : '(empty response)')
@@ -963,7 +995,8 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
 async function saveReply(turn: Turn, content: string): Promise<Chat | null> {
   const sessionId = turn.sessionId
   // A stopped turn may finish after a rewind dropped its session. Keep it dropped.
-  const keepSession = !turn.cancelled && sessionId
+  // A steered turn keeps it: the steer continues in the same session.
+  const keepSession = (!turn.cancelled || turn.steered) && sessionId
   try {
     return await mutateChat(turn.chatId, (latest) => {
       const plan = livePlans.get(latest.id)
@@ -1094,7 +1127,7 @@ function steerPrompt(notes: SteerNote[]): string {
       ? line(notes[0])
       : notes.map((note, index) => `${index + 1}. ${line(note)}`).join('\n')
   return [
-    'The user sent this while you were working. Apply it to the current task. Do not restart from scratch unless they asked you to.',
+    'The user sent this while you were working. Apply it and carry on with the current task from where you were. Do not restart from scratch unless they asked you to.',
     '',
     body
   ].join('\n')
@@ -1139,9 +1172,13 @@ function asidePrompt(question: string, context: string): string {
   ].join('\n')
 }
 
-/** Run the steers queued while the turn ran, as one follow-up turn. */
+/** Run the queued steers as one follow-up turn. A running turn is interrupted first, and drains them when it ends. */
 function drainAsideSteers(chatId: string): void {
-  if (isStreaming(chatId)) return
+  const running = turns.get(chatId)
+  if (running) {
+    if (asideSteers.has(chatId)) interruptForSteer(running)
+    return
+  }
   const notes = takeAsideSteers(chatId)
   if (notes.length === 0) return
   const turn = reserveTurn(chatId)
