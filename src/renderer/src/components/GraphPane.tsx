@@ -42,9 +42,15 @@ function nodeColor(kind: KnowledgeNode['kind'], accent: string, note: string, in
   return note
 }
 
-function nodeRadius(kind: KnowledgeNode['kind']): number {
-  if (kind === 'home') return 9
-  if (kind === 'generated') return 5.5
+/** A feature note says what the project does, so its node is drawn larger and always named. */
+function isFeature(node: KnowledgeNode): boolean {
+  return node.kind === 'generated' && node.tags.includes('feature')
+}
+
+function nodeRadius(node: KnowledgeNode): number {
+  if (node.kind === 'home') return 9
+  if (isFeature(node)) return 7.5
+  if (node.kind === 'generated') return 5.5
   return 6.5
 }
 
@@ -135,7 +141,7 @@ function GraphCanvas({
       const nodes = simRef.current
       for (let i = nodes.length - 1; i >= 0; i--) {
         const node = nodes[i]
-        const r = nodeRadius(node.kind) + 4
+        const r = nodeRadius(node) + 4
         const dx = node.x - x
         const dy = node.y - y
         if (dx * dx + dy * dy <= r * r) return node
@@ -226,7 +232,7 @@ function GraphCanvas({
       }
       ctx!.globalAlpha = 1
       for (const node of nodes) {
-        const r = nodeRadius(node.kind)
+        const r = nodeRadius(node)
         const selected = node.id === selectedRef.current
         const hover = node.id === hoverRef.current
         ctx!.beginPath()
@@ -243,7 +249,8 @@ function GraphCanvas({
         (node) =>
           node.id === selectedRef.current ||
           node.id === hoverRef.current ||
-          node.kind === 'home'
+          node.kind === 'home' ||
+          isFeature(node)
       )
       ctx!.font = '11px "SF Pro Text", "Segoe UI", system-ui, sans-serif'
       ctx!.textAlign = 'center'
@@ -251,7 +258,14 @@ function GraphCanvas({
       for (const node of labeled) {
         const label = node.title.length > 28 ? `${node.title.slice(0, 27)}…` : node.title
         ctx!.fillStyle = palette.muted
-        ctx!.fillText(label, node.x, node.y + nodeRadius(node.kind) + 5)
+        // A node at the edge keeps its whole name in view: pulled in from the sides, and above the node at the bottom.
+        const half = ctx!.measureText(label).width / 2 + 4
+        const below = node.y + nodeRadius(node) + 5
+        ctx!.fillText(
+          label,
+          Math.min(width - half, Math.max(half, node.x)),
+          below + 14 > height ? node.y - nodeRadius(node) - 16 : below
+        )
       }
     }
 

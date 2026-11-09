@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { batches, outline, parseSummaries, readStored, storedText, type ModuleBrief } from './moduleSummaries'
+import {
+  batches,
+  featurePrompt,
+  featuresSignature,
+  outline,
+  parseFeatures,
+  parseSummaries,
+  readStored,
+  readStoredFeatures,
+  storedText,
+  type ModuleBrief,
+  type StoredSummary
+} from './moduleSummaries'
 
 const brief = (path: string, files: string[], line = 'export const x = 1'): ModuleBrief => ({
   path,
@@ -99,5 +111,57 @@ describe('stored summaries', () => {
     expect(readStored(storedText(summaries))).toEqual(summaries)
     expect(readStored('{not json').size).toBe(0)
     expect(readStored(null).size).toBe(0)
+  })
+})
+
+describe('features', () => {
+  const summaries = new Map<string, StoredSummary>([
+    ['src/main', { signature: 's1', about: 'Runs the main process.', files: { 'config.ts': 'Reads the config.' } }],
+    ['src/ui', { signature: 's2', about: 'Draws the window.', files: { 'App.tsx': 'The root component.' } }]
+  ])
+
+  it('are asked for with what is written about each module and its files', () => {
+    const prompt = featurePrompt('Demo', 'A test project.', summaries)
+    expect(prompt).toContain('The project: A test project.')
+    expect(prompt).toContain('## src/main/\nRuns the main process.\n- src/main/config.ts: Reads the config.\n')
+    expect(prompt).toContain('## src/ui/\nDraws the window.\n- src/ui/App.tsx: The root component.\n')
+  })
+
+  it('past the limit, are asked for with the later modules but not their files', () => {
+    const prompt = featurePrompt('Demo', null, summaries, 10)
+    expect(prompt).toContain('- src/main/config.ts: Reads the config.')
+    expect(prompt).toContain('## src/ui/\nDraws the window.\n')
+    expect(prompt).not.toContain('App.tsx')
+  })
+
+  it('are read from a reply with the files the project has, without the ones that name none', () => {
+    const known = new Set(['src/main/config.ts', 'src/ui/App.tsx'])
+    const raw = `Here: ${JSON.stringify({
+      features: [
+        { name: 'Settings [beta]', about: 'Keeps what you chose.', files: ['src/main/config.ts', 'src/gone.ts', 'src/main/config.ts'] },
+        { name: 'settings [beta]', about: 'The same again.', files: ['src/ui/App.tsx'] },
+        { name: 'Guess', about: 'Nothing behind it.', files: ['src/nowhere.ts'] },
+        { name: 'Window', files: ['src/ui/App.tsx'] }
+      ]
+    })}`
+    expect(parseFeatures(raw, known)).toEqual([
+      { name: 'Settings beta', about: 'Keeps what you chose.', files: ['src/main/config.ts'] }
+    ])
+    expect(parseFeatures('Sorry, no.', known)).toEqual([])
+  })
+
+  it('read back what was stored, next to the summaries', () => {
+    const features = { signature: 'f1', list: [{ name: 'Settings', about: 'Keeps what you chose.', files: ['src/main/config.ts'] }] }
+    const text = storedText(summaries, features)
+    expect(readStoredFeatures(text)).toEqual(features)
+    expect(readStored(text)).toEqual(summaries)
+    expect(readStoredFeatures(storedText(summaries))).toBeNull()
+    expect(readStoredFeatures(null)).toBeNull()
+  })
+
+  it('have a signature that changes when a module is described again', () => {
+    const again = new Map(summaries).set('src/ui', { ...summaries.get('src/ui')!, signature: 's3' })
+    expect(featuresSignature(new Map([...summaries].reverse()))).toBe(featuresSignature(summaries))
+    expect(featuresSignature(again)).not.toBe(featuresSignature(summaries))
   })
 })

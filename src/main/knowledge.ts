@@ -18,15 +18,21 @@ import { askOnce } from './askOnce'
 import { buildOrientation, listIndexedFiles, syncIndex, type IndexedFile } from './codegraph'
 import {
   batches,
+  featurePrompt,
+  featuresSignature,
   firstSentence,
   moduleSignature,
   outline,
+  parseFeatures,
   parseSummaries,
   readStored,
+  readStoredFeatures,
   storedText,
   summaryPrompt,
+  type Feature,
   type ModuleBrief,
   type ModuleSummary,
+  type StoredFeatures,
   type StoredSummary
 } from './moduleSummaries'
 import { listProjects } from './store'
@@ -97,13 +103,25 @@ let activeProjectId: string | null = null
 const freshSummaries = new Map<string, Map<string, StoredSummary>>()
 /** By project id, the signature each module was last sent to the model with, so each change is asked about once. */
 const askedSignatures = new Map<string, Map<string, string>>()
-/** Projects whose modules are being described. */
+/** The features the model wrote since the last run, by project id. The next run stores them in the vault. */
+const freshFeatures = new Map<string, StoredFeatures>()
+/** By project id, the signature the features were last asked for with, so each change is asked about once. */
+const askedFeatures = new Map<string, string>()
+/** Projects whose modules or features are being described. */
 const describing = new Set<string>()
 
 type Area = { name: string; children: string[] }
 type Folder = { folders: string[]; files: string[]; tests: string[] }
-/** The index's folders and files under the top-level areas, by project path. `noted` holds the folders with a note. */
-type Layout = { folders: Map<string, Folder>; files: Map<string, IndexedFile>; noted: Set<string> }
+/**
+ * The index's folders and files under the top-level areas, by project path. `noted` holds the folders with a note.
+ * `loose` holds the areas the index has nothing of, such as docs or images, with what is directly in each.
+ */
+type Layout = {
+  folders: Map<string, Folder>
+  files: Map<string, IndexedFile>
+  noted: Set<string>
+  loose: Map<string, string[]>
+}
 /** Imports between noted folders, by importing folder then imported one, and how many files import each file. */
 type ModuleLinks = { uses: Map<string, Map<string, number>>; importers: Map<string, number> }
 
@@ -510,7 +528,8 @@ function isTestFile(path: string): boolean {
   return /\.(test|spec)\.[^./]+$/.test(path) || path.split('/').includes('__tests__')
 }
 
-function buildLayout(indexed: IndexedFile[], areas: Set<string>): Layout {
+function buildLayout(indexed: IndexedFile[], listed: Area[]): Layout {
+  const areas = new Set(listed.map((area) => area.name))
   const folders = new Map<string, Folder>()
   const files = new Map<string, IndexedFile>()
   const folderAt = (path: string): Folder => {
@@ -545,7 +564,12 @@ function buildLayout(indexed: IndexedFile[], areas: Set<string>): Layout {
   // Past the budget, the deepest folders go without a note.
   const noted = new Set([...folders.keys()].filter((path) => !path.includes('/')))
   for (const path of nested.slice(0, LAYOUT_BUDGET)) noted.add(path)
-  return { folders, files, noted }
+  const loose = new Map(
+    listed
+      .filter((area) => !folders.has(area.name) && area.children.length > 0)
+      .map((area) => [area.name, area.children])
+  )
+  return { folders, files, noted, loose }
 }
 
 /** The noted folder a file counts toward: its own, or the nearest one above it. */
@@ -670,6 +694,8 @@ function moduleSections(
 }
 
 function signatureOf(path: string, layout: Layout): string {
+  const loose = layout.loose.get(path)
+  if (loose) return moduleSignature(path, loose, [])
   const folder = layout.folders.get(path)
   const name = (item: string): string => item.slice(path.length + 1)
   return moduleSignature(path, folder?.files.map(name) ?? [], folder?.folders.map(name) ?? [])
@@ -677,6 +703,19 @@ function signatureOf(path: string, layout: Layout): string {
 
 /** What the model is told about a module: the docs on it, what it holds and uses, and an outline of each file. */
 async function readBrief(root: string, path: string, layout: Layout, links: ModuleLinks, docs: string): Promise<ModuleBrief> {
+  const loose = layout.loose.get(path)
+  if (loose) {
+    // The index has no outline of these, so the model gets the names, and the first lines of what is written in prose.
+    const files = await Promise.all(
+      loose
+        .filter((name) => !name.endsWith('/'))
+        .map(async (name) => ({
+          name,
+          outline: /\.(?:md|txt)$/i.test(name) ? outline(await readFile(join(root, path, name), 'utf8').catch(() => '')) : []
+        }))
+    )
+    return { path, docs: describedIn(docs, path), folders: loose.filter((name) => name.endsWith('/')), uses: [], files }
+  }
   const folder = layout.folders.get(path) ?? { folders: [], files: [], tests: [] }
   const files = await Promise.all(
     folder.files.map(async (file) => ({
@@ -693,9 +732,44 @@ async function readBrief(root: string, path: string, layout: Layout, links: Modu
   }
 }
 
+/** Each file a feature can name, with the module whose note lists it. */
+function featureFiles(layout: Layout): Map<string, string> {
+  return new Map([
+    ...[...layout.files.keys()].map((file): [string, string] => [file, moduleOf(file, layout)]),
+    ...[...layout.loose].flatMap(([area, children]) => children.map((child): [string, string] => [`${area}/${child}`, area]))
+  ])
+}
+
 /**
- * Has the model describe the modules of the open Knowledge pane's project that changed since it last did.
- * Each batch it answers is stored by the run it starts.
+ * Has the model say what the project does, as features, from what is written about its modules.
+ * Asked again when a module is described again.
+ */
+function describeFeatures(
+  project: Project,
+  layout: Layout,
+  overview: string | null,
+  stored: Map<string, StoredSummary>,
+  features: StoredFeatures | null
+): void {
+  const signature = featuresSignature(stored)
+  if (stored.size === 0 || features?.signature === signature || askedFeatures.get(project.id) === signature) return
+  askedFeatures.set(project.id, signature)
+  describing.add(project.id)
+  const known = new Set(featureFiles(layout).keys())
+  void askOnce(project, featurePrompt(project.name, overview, stored), SUMMARY_TIMEOUTS)
+    .then((raw) => {
+      const list = raw ? parseFeatures(raw, known) : []
+      if (list.length === 0) return
+      freshFeatures.set(project.id, { signature, list })
+      void maintainVaultForProjectId(project.id)
+    })
+    .catch(() => undefined)
+    .finally(() => describing.delete(project.id))
+}
+
+/**
+ * Has the model describe the modules of the open Knowledge pane's project that changed since it last did, and
+ * once none is left, the project's features. Each batch it answers is stored by the run it starts.
  */
 function describeChanged(
   project: Project,
@@ -703,19 +777,23 @@ function describeChanged(
   links: ModuleLinks,
   docs: string,
   overview: string | null,
-  stored: Map<string, StoredSummary>
+  stored: Map<string, StoredSummary>,
+  features: StoredFeatures | null
 ): void {
   if (!project.path || stopping || describing.has(project.id)) return
   const root = project.path
   const asked = askedSignatures.get(project.id) ?? new Map<string, string>()
   askedSignatures.set(project.id, asked)
-  const signatures = new Map([...layout.noted].map((path) => [path, signatureOf(path, layout)]))
+  const signatures = new Map([...layout.noted, ...layout.loose.keys()].map((path) => [path, signatureOf(path, layout)]))
   // Asked once per change: a module the model skipped or failed on waits for its next change, or the next launch.
-  const changed = [...layout.noted].filter((path) => {
+  const changed = [...signatures.keys()].filter((path) => {
     const signature = signatures.get(path)
     return stored.get(path)?.signature !== signature && asked.get(path) !== signature
   })
-  if (changed.length === 0) return
+  if (changed.length === 0) {
+    describeFeatures(project, layout, overview, stored, features)
+    return
+  }
   for (const path of changed) asked.set(path, signatures.get(path) ?? '')
   describing.add(project.id)
   void (async () => {
@@ -737,6 +815,36 @@ function describeChanged(
   })()
     .catch(() => undefined)
     .finally(() => describing.delete(project.id))
+}
+
+/** Where a feature's note lives under `generated/`. */
+function featureFile(name: string): string {
+  return `features/${areaFileName(name)}.md`
+}
+
+/** What a feature's note says: what it does, then the files behind it under the module each is in. */
+function featureSections(feature: Feature, files: Map<string, string>, summaries: Map<string, StoredSummary>): string[] | null {
+  const byModule = new Map<string, string[]>()
+  for (const file of feature.files) {
+    const module = files.get(file)
+    // A file that has left the project since the feature was written.
+    if (module == null) continue
+    byModule.set(module, [...(byModule.get(module) ?? []), file.slice(module.length + 1)])
+  }
+  if (byModule.size === 0) return null
+  return [
+    feature.about,
+    '',
+    '## Where it lives',
+    '',
+    ...[...byModule].flatMap(([module, names]) => [
+      `- [[generated/${layoutFile(module)}|${module}]]`,
+      ...names.map((name) => {
+        const does = summaries.get(module)?.files[name]
+        return does ? `  - \`${name}\`: ${does}` : `  - \`${name}\``
+      })
+    ])
+  ]
 }
 
 async function listUserNotes(vault: string): Promise<string[]> {
@@ -944,7 +1052,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
       listUserNotes(vault),
       listIndexedFiles(project)
     ])
-    const layout = buildLayout(indexed ?? [], new Set(listing.areas.map((area) => area.name)))
+    const layout = buildLayout(indexed ?? [], listing.areas)
     const root = project.path
     const links = await readModuleLinks(root, layout)
     const docs = (
@@ -958,19 +1066,38 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
     const areaLinks: string[] = []
 
     const summariesPath = join(vault, 'generated', SUMMARIES_FILE)
-    const summaries = readStored(await readFile(summariesPath, 'utf8').catch(() => null))
+    const storedState = await readFile(summariesPath, 'utf8').catch(() => null)
+    const summaries = readStored(storedState)
+    let features = readStoredFeatures(storedState)
     const fresh = freshSummaries.get(project.id)
     for (const [path, summary] of fresh ?? []) summaries.set(path, summary)
     // Without the index there is no layout to tell a gone module from an unread one.
     if (indexed) {
-      for (const path of summaries.keys()) if (!layout.noted.has(path)) summaries.delete(path)
-      if (summaries.size > 0) await writeGenerated(vault, SUMMARIES_FILE, storedText(summaries))
+      for (const path of summaries.keys()) {
+        if (!layout.noted.has(path) && !layout.loose.has(path)) summaries.delete(path)
+      }
+      features = freshFeatures.get(project.id) ?? features
+      freshFeatures.delete(project.id)
+      if (summaries.size > 0) await writeGenerated(vault, SUMMARIES_FILE, storedText(summaries, features))
       else if (existsSync(summariesPath)) {
         claim(summariesPath, null)
         await rm(summariesPath, { force: true })
       }
       if (fresh) freshSummaries.delete(project.id)
-      if (activeProjectId === project.id) describeChanged(project, layout, links, docs, orientation.summary, summaries)
+      if (activeProjectId === project.id) {
+        describeChanged(project, layout, links, docs, orientation.summary, summaries, features)
+      }
+    }
+
+    const files = featureFiles(layout)
+    const featureLines: string[] = []
+    for (const feature of features?.list ?? []) {
+      const sections = featureSections(feature, files, summaries)
+      if (!sections) continue
+      const file = featureFile(feature.name)
+      await writeGenerated(vault, file, generatedNote(feature.name, ['feature'], sections.join('\n')))
+      keep.add(file)
+      featureLines.push(`- [[generated/${file}|${feature.name}]] — ${firstSentence(feature.about)}`)
     }
 
     const overviewBits = [
@@ -979,6 +1106,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
       orientation.languages.length ? `Languages: ${orientation.languages.join(', ')}.` : null,
       orientation.fileCount != null ? `${orientation.fileCount} indexed files.` : null,
       orientation.nodeCount != null ? `${orientation.nodeCount} symbols.` : null,
+      ...(featureLines.length > 0 ? ['', '## What it does', '', ...featureLines] : []),
       '',
       '## Map',
       '',
@@ -1004,16 +1132,18 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
       const sections = indexedFolder
         ? moduleSections(area.name, indexedFolder, layout, links, docs, summary)
         : [
+            ...(summary ? [summary.about, ''] : []),
             '## Contains',
             '',
             area.children.length > 0
-              ? area.children.map((child) => `- \`${area.name}/${child}\``).join('\n')
+              ? area.children
+                  .map((child) => {
+                    const does = summary?.files[child]
+                    return does ? `- \`${area.name}/${child}\`: ${does}` : `- \`${area.name}/${child}\``
+                  })
+                  .join('\n')
               : '_Empty or unread folder._'
           ]
-      const related = listing.areas
-        .filter((item) => item.name !== area.name)
-        .slice(0, 8)
-        .map((item) => `- ${layoutLink(item.name)}`)
       await writeGenerated(
         vault,
         file,
@@ -1028,8 +1158,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
             '## Related',
             '',
             `- ${wiki('Architecture')}`,
-            `- ${wiki('Overview')}`,
-            ...related
+            `- ${wiki('Overview')}`
           ].join('\n')
         )
       )
