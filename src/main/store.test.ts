@@ -21,10 +21,13 @@ function put(id: string, title: string, updatedAt: string, at: number): void {
   utimesSync(path, at, at)
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   stub.dir = mkdtempSync(join(tmpdir(), 'wb-store-'))
   chats = join(stub.dir, 'workbench', 'chats')
   mkdirSync(chats, { recursive: true })
+  // Listing the empty folder drops the summaries the test before left. Linux gives a new file the
+  // inode that was just freed, so a file with the same name, time and size would look unchanged.
+  await listChats()
 })
 
 afterEach(() => {
