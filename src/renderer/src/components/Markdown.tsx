@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'reac
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { isMediaSrc, isRemoteSrc, isVideoSrc, mediaUrl } from '../../../shared/media'
+import { NOTE_HREF } from '../noteLinks'
 import { Icon } from './icons'
 
 const PLUGINS = [remarkGfm]
@@ -152,14 +153,50 @@ function mediaComponents(chatId: string): Components {
   }
 }
 
+/** Links in a vault note: `#note:` links open that note, web links open in the browser. */
+function noteComponents(onNoteLink: (id: string) => void): Components {
+  return {
+    ...visualComponents,
+    a: ({ href, children }) => {
+      if (href?.startsWith(NOTE_HREF)) {
+        const id = decodeURIComponent(href.slice(NOTE_HREF.length))
+        return (
+          <a
+            href={href}
+            onClick={(event) => {
+              event.preventDefault()
+              onNoteLink(id)
+            }}
+          >
+            {children}
+          </a>
+        )
+      }
+      if (href && isRemoteSrc(href)) {
+        return (
+          <a href={href} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        )
+      }
+      return <>{children}</>
+    }
+  }
+}
+
 export const Markdown = memo(function Markdown({
   text,
-  chatId
+  chatId,
+  onNoteLink
 }: {
   text: string
   chatId?: string
+  onNoteLink?: (id: string) => void
 }): React.JSX.Element {
-  const components = useMemo(() => (chatId ? mediaComponents(chatId) : visualComponents), [chatId])
+  const components = useMemo(
+    () => (chatId ? mediaComponents(chatId) : onNoteLink ? noteComponents(onNoteLink) : visualComponents),
+    [chatId, onNoteLink]
+  )
   return (
     <div className="markdown text-[14.5px] leading-7 text-ink">
       <ReactMarkdown remarkPlugins={PLUGINS} components={components}>

@@ -273,25 +273,6 @@ function boundFields(sessionId: string | null): Pick<ActivityEvent, 'chatId' | '
   return { chatId: bound?.id ?? null, chatTitle: bound?.title ?? null }
 }
 
-export function emitGoal(input: {
-  chatId: string
-  chatTitle: string
-  sessionId: string | null
-  title: string
-  detail?: string | null
-}): void {
-  emitActivity({
-    kind: 'goal',
-    chatId: input.chatId,
-    chatTitle: input.chatTitle,
-    sessionId: input.sessionId,
-    title: input.title,
-    detail: input.detail ?? null,
-    status: 'running',
-    coalesceKey: `goal:${input.chatId}`
-  })
-}
-
 export function emitNotice(input: {
   chatId: string
   chatTitle: string
