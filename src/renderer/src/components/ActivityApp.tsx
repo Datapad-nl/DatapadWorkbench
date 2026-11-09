@@ -385,8 +385,9 @@ const FILTERS: { id: Filter; label: string }[] = [
 ]
 
 export function ActivityApp(): React.JSX.Element {
-  const { showBrowser, showGit, showKnowledge, setShowActivity, swapRightPanes } = useWorkspace()
-  const [events, setEvents] = useState<ActivityEvent[]>([])
+  const { activeChatId, showBrowser, showGit, showKnowledge, setShowActivity, swapRightPanes } =
+    useWorkspace()
+  const [allEvents, setEvents] = useState<ActivityEvent[]>([])
   const [filter, setFilter] = useState<Filter>('all')
   const [toggled, setToggled] = useState<Record<string, boolean>>({})
 
@@ -428,6 +429,11 @@ export function ActivityApp(): React.JSX.Element {
     }
   }, [])
 
+  // The pane follows the chat that is open: every chat's events are kept, only the active one's show.
+  const events = useMemo(
+    () => allEvents.filter((event) => event.chatId === activeChatId),
+    [allEvents, activeChatId]
+  )
   const groups = useMemo(() => groupTurns(events), [events])
   const counts = useMemo(() => {
     const result: Record<Filter, number> = { all: 0, tools: 0, edits: 0, replies: 0 }
@@ -486,7 +492,10 @@ export function ActivityApp(): React.JSX.Element {
           ))}
         </div>
       </div>
-      <div className="select-text min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div
+        key={activeChatId ?? ''}
+        className="select-text min-h-0 flex-1 overflow-y-auto px-3 py-3"
+      >
         {groups.length === 0 ? (
           <div className="pt-6 text-center">
             <div className="text-[13px] font-semibold text-ink-2">Waiting for a chat</div>
