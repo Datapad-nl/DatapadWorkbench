@@ -29,8 +29,9 @@ import {
   type MicInput
 } from '../voice/engine'
 import { useWorkspace } from '../workspace'
-import { type McpServers, parseMcpServers } from '../../../shared/mcp'
+import { McpSettings } from './McpSettings'
 import { ThemeEditor } from './ThemeEditor'
+import { Toggle } from './Toggle'
 
 function errorText(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : fallback
@@ -349,32 +350,6 @@ function voiceModelHint(voiceModel: VoiceModelStatus): string {
   if (voiceModel.state === 'ready') return 'Local speech model ready'
   if (voiceModel.error) return voiceModel.error
   return 'Will download local Whisper + TTS (~500MB) once, then stay offline'
-}
-
-function Toggle({
-  on,
-  onClick,
-  label
-}: {
-  on: boolean
-  onClick: () => void
-  label: string
-}): React.JSX.Element {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={onClick}
-      className={`relative h-5 w-9 shrink-0 rounded-full transition ${on ? 'bg-accent' : 'bg-line'}`}
-    >
-      <span
-        className="absolute top-0.5 h-4 w-4 rounded-full bg-accent-ink transition"
-        style={{ left: on ? 18 : 2 }}
-      />
-    </button>
-  )
 }
 
 /** Saves the speed once the slider rests, so a drag is not a save per step. */
@@ -975,108 +950,6 @@ export function SettingsModal(): React.JSX.Element | null {
         )}
       </div>
     </div>
-  )
-}
-
-const MCP_EXAMPLE = `{
-  "mcpServers": {
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "…" }
-    },
-    "linear": { "url": "https://mcp.linear.app/mcp" }
-  }
-}`
-
-function mcpText(servers: McpServers): string {
-  return Object.keys(servers).length ? JSON.stringify({ mcpServers: servers }, null, 2) : ''
-}
-
-function McpSettings({ onClose }: { onClose: () => void }): React.JSX.Element {
-  const [text, setText] = useState('')
-  const [saved, setSaved] = useState(false)
-  const [saveError, setSaveError] = useState<string | null>(null)
-
-  useEffect(() => {
-    void window.workbench.getMcpServers().then((servers) => setText(mcpText(servers)))
-  }, [])
-
-  let servers: McpServers = {}
-  let parseError: string | null = null
-  try {
-    servers = parseMcpServers(text)
-  } catch (error) {
-    parseError = error instanceof Error ? error.message : String(error)
-  }
-
-  async function save(): Promise<void> {
-    const result = await window.workbench.setMcpServers(text)
-    if ('error' in result) {
-      setSaveError(result.error)
-      return
-    }
-    setText(mcpText(result.servers))
-    setSaveError(null)
-    setSaved(true)
-  }
-
-  const error = parseError ?? saveError
-  return (
-    <>
-      <p className="mt-1 text-[12.5px] leading-5 text-muted">
-        Every Grok Build and Claude Code chat gets these servers, next to the built-in browser. Paste
-        the <code>mcpServers</code> JSON from a server&apos;s docs. Add <code>&quot;disabled&quot;: true</code>{' '}
-        to keep one without loading it. New chats pick up a change right away; chats already running
-        get it after a restart. Servers in each agent&apos;s own config still load as well.
-      </p>
-      <textarea
-        data-testid="settings-mcp-json"
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value)
-          setSaved(false)
-          setSaveError(null)
-        }}
-        placeholder={MCP_EXAMPLE}
-        spellCheck={false}
-        rows={14}
-        className="mt-4 w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[11.5px] leading-5 text-ink outline-none placeholder:text-muted/60 focus:border-accent/60"
-      />
-      {error ? (
-        <p className="mt-2 text-[11px] leading-4 text-red-400">{error}</p>
-      ) : (
-        <ul className="mt-2 space-y-1 text-[12px]">
-          <li className="flex items-baseline gap-2">
-            <span className="font-medium text-ink">browser</span>
-            <span className="text-[11px] text-muted">built in</span>
-          </li>
-          {Object.entries(servers).map(([name, entry]) => (
-            <li key={name} className="flex min-w-0 items-baseline gap-2">
-              <span className={`font-medium ${entry.disabled ? 'text-muted line-through' : 'text-ink'}`}>
-                {name}
-              </span>
-              <span className="truncate font-mono text-[11px] text-muted">
-                {'url' in entry ? `${entry.type} ${entry.url}` : [entry.command, ...(entry.args ?? [])].join(' ')}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="mt-5 flex justify-end gap-2">
-        <button className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink" onClick={onClose}>
-          Close
-        </button>
-        <button
-          data-testid="settings-mcp-save"
-          disabled={!!parseError}
-          className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-50"
-          onClick={() => void save()}
-        >
-          {saved ? 'Saved' : 'Save'}
-        </button>
-      </div>
-    </>
   )
 }
 

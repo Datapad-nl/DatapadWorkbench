@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { McpServers } from '../shared/mcp'
+import type { RegistrySearchResult } from '../shared/mcpRegistry'
 import type { ThemeFile, ThemeSummary } from '../shared/theme'
 import type { YoutubeTranscriptResult } from '../shared/youtube'
 import type {
@@ -53,6 +54,8 @@ const api = {
   getMcpServers: (): Promise<McpServers> => ipcRenderer.invoke('mcp:get'),
   setMcpServers: (text: string): Promise<{ servers: McpServers } | { error: string }> =>
     ipcRenderer.invoke('mcp:set', text),
+  searchMcpRegistry: (query: string, cursor?: string): Promise<RegistrySearchResult | { error: string }> =>
+    ipcRenderer.invoke('mcp:search', { query, cursor }),
   exportChatMarkdown: (title: string, markdown: string): Promise<string | null> =>
     ipcRenderer.invoke('chat:exportMarkdown', { title, markdown }),
   getChatCommands: (chatId: string) => ipcRenderer.invoke('chat:commands', chatId) as Promise<AgentCommand[]>,

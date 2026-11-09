@@ -38,6 +38,7 @@ import {
   stopBrowser
 } from './browser'
 import { openChatMedia } from './media'
+import { searchMcpRegistry } from './mcpRegistry'
 import { transcribeYoutube } from './youtube'
 import { buildOrientation, collectIndexes, onIndexChange, queueIndex } from './codegraph'
 import {
@@ -345,6 +346,13 @@ export function registerIpc(): void {
   ipcMain.handle('mcp:set', async (_event, text: string) => {
     try {
       return { servers: await setMcpServers(String(text ?? '')) }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('mcp:search', async (_event, input: { query?: string; cursor?: string }) => {
+    try {
+      return await searchMcpRegistry(String(input?.query ?? ''), input?.cursor ? String(input.cursor) : undefined)
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) }
     }
