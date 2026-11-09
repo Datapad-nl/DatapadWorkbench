@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import type { Attachment, BrowserAnnotationHit, BrowserState } from '../../../shared/types'
 import { parseYoutubeVideoId } from '../../../shared/youtube'
 import type { YoutubeTranscriptResult } from '../../../shared/youtube'
-import { useStreams, useWorkspace } from '../workspace'
+import { useStreamStatuses, useWorkspace } from '../workspace'
 import { Icon } from './icons'
 import { ReorderGrip } from './ReorderGrip'
 
@@ -61,7 +61,7 @@ export function BrowserPane(): React.JSX.Element {
     openChat,
     sendMessage
   } = useWorkspace()
-  const streams = useStreams()
+  const streams = useStreamStatuses()
   const hostRef = useRef<HTMLDivElement>(null)
   const noteRef = useRef<HTMLTextAreaElement>(null)
   const pickGen = useRef(0)

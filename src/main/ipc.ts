@@ -516,11 +516,6 @@ export function registerIpc(): void {
     return rewindChat(input.chatId, input.checkpointId, chatWorkingDir(chat, project?.path))
   })
 
-  ipcMain.handle('settings:get', async () => {
-    const { settings } = await snapshot()
-    return settings
-  })
-
   ipcMain.handle(
     'settings:set',
     async (

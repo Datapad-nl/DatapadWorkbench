@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readdir, rm } from 'fs/promises'
+import { mkdir, readdir, rm, stat } from 'fs/promises'
 import { join, normalize } from 'path'
 import { type McpServers, parseMcpServers } from '../shared/mcp'
 import { normalizeHexColor, pickProjectColor } from '../shared/projectColor'
@@ -606,28 +606,48 @@ export async function getChat(chatId: string): Promise<Chat> {
   }
 }
 
+// Each chat file's summary, kept until the file changes. A chat is saved by renaming a new file
+// over the old one, so a change shows as a new inode, time or size, and listing reads only those.
+const summaries = new Map<string, { ino: number; mtimeMs: number; size: number; summary: ChatSummary }>()
+
 export async function listChats(): Promise<ChatSummary[]> {
   await mkdir(chatsDir(), { recursive: true })
-  const files = await readdir(chatsDir())
+  const files = (await readdir(chatsDir())).filter((file) => file.endsWith('.json'))
+  const stats = await Promise.all(files.map((file) => stat(join(chatsDir(), file)).catch(() => null)))
   const chats: ChatSummary[] = []
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue
-    const chat = await readJson<Chat | null>(join(chatsDir(), file), null).catch(() => null)
-    if (!chat) continue
-    chats.push({
-      id: chat.id,
-      projectId: chat.projectId,
-      title: chat.title,
-      agent: normalizeChatAgent(chat.agent),
-      grokSessionId: chat.grokSessionId ?? null,
-      createdAt: chat.createdAt,
-      updatedAt: chat.updatedAt,
-      messageCount: chat.messages.length,
-      worktreePath: chat.worktreePath ?? null,
-      worktreeBranch: chat.worktreeBranch ?? null,
-      schedule: chat.schedule ?? null,
-      pr: chat.pr ?? null
-    })
+  for (const [index, file] of files.entries()) {
+    const info = stats[index]
+    if (!info) continue
+    let entry = summaries.get(file)
+    if (!entry || entry.ino !== info.ino || entry.mtimeMs !== info.mtimeMs || entry.size !== info.size) {
+      const chat = await readJson<Chat | null>(join(chatsDir(), file), null).catch(() => null)
+      if (!chat) continue
+      entry = {
+        ino: info.ino,
+        mtimeMs: info.mtimeMs,
+        size: info.size,
+        summary: {
+          id: chat.id,
+          projectId: chat.projectId,
+          title: chat.title,
+          agent: normalizeChatAgent(chat.agent),
+          grokSessionId: chat.grokSessionId ?? null,
+          createdAt: chat.createdAt,
+          updatedAt: chat.updatedAt,
+          messageCount: chat.messages.length,
+          worktreePath: chat.worktreePath ?? null,
+          worktreeBranch: chat.worktreeBranch ?? null,
+          schedule: chat.schedule ?? null,
+          pr: chat.pr ?? null
+        }
+      }
+      summaries.set(file, entry)
+    }
+    chats.push(entry.summary)
+  }
+  const present = new Set(files)
+  for (const file of summaries.keys()) {
+    if (!present.has(file)) summaries.delete(file)
   }
   return chats.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 }

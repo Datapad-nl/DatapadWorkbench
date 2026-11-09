@@ -136,7 +136,13 @@ export function useChatProgress(chatId: string | null, streaming: boolean): Prog
     let reset = false
     // The snapshot and the live feed fill one list, so both pick the cue the same way.
     let events: ActivityEvent[] = []
-    const show = (): void => setNow(progressNow(latestRunning(events, chatId)))
+    const show = (): void => {
+      const next = progressNow(latestRunning(events, chatId))
+      // A reply arrives as many events with the same cue. Keeping the object skips a render for each.
+      setNow((prev) =>
+        prev.key === next.key && prev.label === next.label && prev.speech === next.speech ? prev : next
+      )
+    }
     void window.workbench.getActivity().then((snapshot) => {
       if (cancel || reset) return
       // Upserts that arrived first are at least as new as the snapshot, so they stay.

@@ -67,16 +67,6 @@ function withTts<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-export async function loadAsr(): Promise<void> {
-  await withOnnx(async () => {
-    await getAsr()
-  })
-}
-
-export async function loadTts(): Promise<void> {
-  await withOnnx(getTts)
-}
-
 async function getTts(): Promise<void> {
   const ready = await window.workbench.ensureVoiceModel()
   if (ready.state !== 'ready') throw new Error(ready.error || 'Speech model is not ready')
@@ -1250,7 +1240,6 @@ export async function startRecorder(handlers: {
   stream?: MediaStream
   idleStop?: boolean
   onLevel: (rms: number, silentFor: number, heardSpeech: boolean) => void
-  onBands?: (bands: number[]) => void
   onAutoStop: (clip: PcmClip) => void
 }): Promise<Recorder> {
   const stream = handlers.stream ?? (await openLiveMicStream(handlers.deviceId))
@@ -1301,7 +1290,6 @@ export async function startRecorder(handlers: {
       for (let j = start; j < end; j++) band += (input[j] ?? 0) * (input[j] ?? 0)
       bands[i] = Math.min(1, Math.sqrt(band / Math.max(1, end - start)) * 120 + voice * 0.35)
     }
-    handlers.onBands?.(bands)
     voiceMotion = { bands, level: voice }
     if (handlers.idleStop === false) return
     if (now - started > MAX_MS || (heard && silentMs >= SILENCE_MS)) {

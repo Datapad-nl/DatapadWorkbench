@@ -14,12 +14,6 @@ export type SlashDef = {
   agents?: ChatAgent[]
 }
 
-export type ParsedSlash = {
-  id: string
-  args: string
-  def: SlashDef
-}
-
 // `agents: ['grok']` marks Grok Build features and its terminal-only commands. Claude chats
 // get Claude Code's own commands instead, from what it announces.
 export const SLASH_COMMANDS: SlashDef[] = [

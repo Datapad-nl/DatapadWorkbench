@@ -77,7 +77,6 @@ type Pkg = {
   bin?: unknown
   main?: string
   exports?: unknown
-  workspaces?: unknown
   scripts?: Record<string, string>
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>

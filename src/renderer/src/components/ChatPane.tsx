@@ -40,7 +40,7 @@ import {
 import { useChatProgress } from '../progress'
 import { VoiceBlob } from '../voice/VoiceBlob'
 import { useVoice } from '../voice/VoiceProvider'
-import { useStreams, useWorkspace, type RightPaneId } from '../workspace'
+import { useStreamStatuses, useStreams, useWorkspace, type RightPaneId } from '../workspace'
 import { AgentReply } from './AgentReply'
 import { AgentGlyph, Icon, IconButton, type IconName } from './icons'
 import { Markdown } from './Markdown'
@@ -252,7 +252,7 @@ export function ChatPane(): React.JSX.Element {
     gitSummaries
   } = useWorkspace()
   const { stopAll } = useVoice()
-  const streams = useStreams()
+  const streams = useStreamStatuses()
   const [rewind, setRewind] = useState<{ chatId: string; selected: string | null } | null>(null)
   const [rewindBusy, setRewindBusy] = useState(false)
   const [rewindError, setRewindError] = useState<string | null>(null)
@@ -344,7 +344,6 @@ export function ChatPane(): React.JSX.Element {
             projectId={activeChat.projectId}
             projectName={activeProject?.name ?? 'this project'}
             index={indexes[activeChat.projectId]}
-            draft={streamingNow ? stream?.draft ?? '' : ''}
             streaming={Boolean(streamingNow)}
             progress={progress.label}
             error={stream?.error ?? null}
@@ -830,7 +829,6 @@ function MessageList({
   projectId,
   projectName,
   index,
-  draft,
   streaming,
   progress,
   error,
@@ -847,7 +845,6 @@ function MessageList({
   projectId: string
   projectName: string
   index: ProjectIndex | undefined
-  draft: string
   streaming: boolean
   progress: string
   error: string | null
@@ -861,11 +858,10 @@ function MessageList({
   const bottom = useRef<HTMLDivElement>(null)
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
-  }, [chat.messages, draft, plan, progress, streaming])
+  }, [chat.messages, plan, progress, streaming])
 
   const empty =
     chat.messages.length === 0 &&
-    !draft &&
     !streaming &&
     !(plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()))
 
@@ -977,27 +973,7 @@ function MessageList({
               </div>
             )
           })}
-          {(draft || streaming) && (
-            <article className="flex gap-3">
-              <AgentTile agent={agent} />
-              <div className="min-w-0 flex-1">
-                <AssistantHeader agent={agent} />
-                <div className="mt-1 text-[14.5px] leading-[1.65]">
-                  {draft ? <AgentReply text={draft} chatId={chatId} live /> : null}
-                </div>
-                {streaming && (
-                  <div
-                    data-testid="chat-progress"
-                    className={`flex items-start gap-2 ${draft ? 'mt-3' : 'mt-1'}`}
-                  >
-                    <span className="streaming-dot mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                    <div className="text-[13px] leading-6 text-muted">{progress}</div>
-                  </div>
-                )}
-                {draft ? <span className="cursor" /> : null}
-              </div>
-            </article>
-          )}
+          {streaming && <LiveReply chatId={chatId} agent={agent} progress={progress} bottom={bottom} />}
           {error && <div className="text-[13px] text-danger">{error}</div>}
           {plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()) && (
             <PlanCard key={chatId} plan={plan} chatId={chatId} canApprove={canApprove} onApprove={onApprove} />
@@ -1006,6 +982,41 @@ function MessageList({
       )}
       <div ref={bottom} />
     </div>
+  )
+}
+
+/** The reply as it arrives. Only this renders again for each piece of text, not the whole list. */
+function LiveReply({
+  chatId,
+  agent,
+  progress,
+  bottom
+}: {
+  chatId: string
+  agent: ChatAgent
+  progress: string
+  bottom: React.RefObject<HTMLDivElement | null>
+}): React.JSX.Element {
+  const draft = useStreams()[chatId]?.draft ?? ''
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: 'end' })
+  }, [bottom, draft])
+
+  return (
+    <article className="flex gap-3">
+      <AgentTile agent={agent} />
+      <div className="min-w-0 flex-1">
+        <AssistantHeader agent={agent} />
+        <div className="mt-1 text-[14.5px] leading-[1.65]">
+          {draft ? <AgentReply text={draft} chatId={chatId} live /> : null}
+        </div>
+        <div data-testid="chat-progress" className={`flex items-start gap-2 ${draft ? 'mt-3' : 'mt-1'}`}>
+          <span className="streaming-dot mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+          <div className="text-[13px] leading-6 text-muted">{progress}</div>
+        </div>
+        {draft ? <span className="cursor" /> : null}
+      </div>
+    </article>
   )
 }
 

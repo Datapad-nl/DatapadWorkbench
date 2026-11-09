@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PROJECT_COLORS, resolveProjectColor } from '../../../shared/projectColor'
 import type { ChatSummary, Project } from '../../../shared/types'
-import { useStreams, useWorkspace } from '../workspace'
+import { useStreamStatuses, useWorkspace } from '../workspace'
 import wordmark from '../assets/wordmark.png'
 import { Icon, IconButton } from './icons'
 import { IndexStatus } from './OrientationCard'
@@ -478,8 +478,7 @@ function ChatRow({
   worktreeBranch?: string | null
 }): React.JSX.Element {
   const { activeChatId, openChat, deleteChat } = useWorkspace()
-  const streams = useStreams()
-  const streaming = streams[chat.id]?.status === 'streaming'
+  const streaming = useStreamStatuses()[chat.id]?.status === 'streaming'
   const active = activeChatId === chat.id
   const branch = chat.worktreeBranch ?? worktreeBranch ?? null
   return (

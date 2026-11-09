@@ -31,6 +31,7 @@ import type {
   WorkspaceSnapshot
 } from '../../shared/types'
 import { normalizePermissionMode } from '../../shared/types'
+import { streamStatuses, type StreamStatus } from './streamStatus'
 
 type StreamState = {
   status: 'idle' | 'streaming' | 'error'
@@ -99,7 +100,6 @@ function keepAsideText(prev: Chat | undefined, next: Chat, live: Set<string>): C
 }
 
 type WorkspaceContextValue = {
-  ready: boolean
   projects: Project[]
   chats: ChatSummary[]
   settings: PublicSettings | null
@@ -167,11 +167,11 @@ type WorkspaceContextValue = {
     defaultAgent?: ChatAgent
     claudeModel?: string
   }) => Promise<void>
-  refresh: () => Promise<WorkspaceSnapshot>
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null)
 const StreamContext = createContext<Record<string, StreamState> | null>(null)
+const StreamStatusContext = createContext<Record<string, StreamStatus> | null>(null)
 
 const emptyStream: StreamState = { status: 'idle', draft: '', error: null, turnId: null }
 
@@ -253,6 +253,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   const openChatIdsRef = useRef(openChatIds)
   openChatIdsRef.current = openChatIds
   const [streams, setStreams] = useState<Record<string, StreamState>>({})
+  // Follows `streams`, but stays the same object while only reply text arrives.
+  const [statuses, setStatuses] = useState<Record<string, StreamStatus>>({})
+  const nextStatuses = streamStatuses(statuses, streams)
+  if (nextStatuses !== statuses) setStatuses(nextStatuses)
   const sending = useRef(new Set<string>())
   const approving = useRef(new Set<string>())
   const openChatRef = useRef<((chatId: string) => Promise<void>) | null>(null)
@@ -984,7 +988,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({
-      ready,
       projects,
       chats,
       settings,
@@ -1034,11 +1037,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       rewindChat,
       permissions,
       questions,
-      saveSettings,
-      refresh
+      saveSettings
     }),
     [
-      ready,
       projects,
       chats,
       settings,
@@ -1085,14 +1086,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       rewindChat,
       permissions,
       questions,
-      saveSettings,
-      refresh
+      saveSettings
     ]
   )
 
   return (
     <WorkspaceContext.Provider value={value}>
-      <StreamContext.Provider value={streams}>{children}</StreamContext.Provider>
+      <StreamStatusContext.Provider value={statuses}>
+        <StreamContext.Provider value={streams}>{children}</StreamContext.Provider>
+      </StreamStatusContext.Provider>
     </WorkspaceContext.Provider>
   )
 }
@@ -1103,8 +1105,16 @@ export function useWorkspace(): WorkspaceContextValue {
   return value
 }
 
+/** Every chat's stream with its reply text. Changes many times a second while a reply arrives. */
 export function useStreams(): Record<string, StreamState> {
   const value = useContext(StreamContext)
   if (!value) throw new Error('useStreams must be used inside WorkspaceProvider')
+  return value
+}
+
+/** Which chats are streaming or failed. Changes only when one of them starts, stops or fails. */
+export function useStreamStatuses(): Record<string, StreamStatus> {
+  const value = useContext(StreamStatusContext)
+  if (!value) throw new Error('useStreamStatuses must be used inside WorkspaceProvider')
   return value
 }

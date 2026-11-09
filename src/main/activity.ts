@@ -22,7 +22,6 @@ type BoundChat = {
 let started = false
 const events: ActivityEvent[] = []
 const sessions = new Map<string, BoundChat>()
-const listeners = new Set<(feed: ActivityFeed) => void>()
 
 /** How long a running turn can sit without a new event before we say so. */
 const QUIET_MS = 60_000
@@ -166,15 +165,7 @@ export function lookupSession(sessionId: string): BoundChat | null {
   return sessions.get(sessionId) ?? null
 }
 
-export function onActivityFeed(listener: (feed: ActivityFeed) => void): () => void {
-  listeners.add(listener)
-  return () => {
-    listeners.delete(listener)
-  }
-}
-
 function broadcast(feed: ActivityFeed): void {
-  for (const listener of listeners) listener(feed)
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send('activity:event', feed)
   }

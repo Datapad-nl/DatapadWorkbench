@@ -47,8 +47,6 @@ type VoiceContextValue = {
   conversation: boolean
   live: boolean
   userTalking: boolean
-  level: number
-  bands: number[]
   status: VoiceUiStatus
   error: string | null
   model: VoiceModelStatus
@@ -86,15 +84,13 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   const [caption, setCaption] = useState('')
   const [live, setLive] = useState(false)
   const [userTalking, setUserTalking] = useState(false)
-  const [level, setLevel] = useState(0)
-  const [bands, setBands] = useState<number[]>(() => [0, 0, 0, 0, 0, 0, 0])
   const [replyMuted, setReplyMuted] = useState(false)
   const recorder = useRef<Recorder | null>(null)
   const liveRef = useRef(false)
   /** The running conversation, so main can drop what was said in it once it ends. */
   const conversationId = useRef<string | null>(null)
   const levelFrame = useRef(0)
-  const pendingLevel = useRef({ rms: 0, heard: false, silentFor: 0 })
+  const pendingLevel = useRef({ heard: false, silentFor: 0 })
   const primedChats = useRef(new Set<string>())
   const clipBusy = useRef<object | null>(null)
   const listenLock = useRef<object | null>(null)
@@ -199,8 +195,6 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     setCaption('')
     setLive(false)
     setUserTalking(false)
-    setLevel(0)
-    setBands([0, 0, 0, 0, 0, 0, 0])
     resetVoiceMotion()
     speakEpoch.current += 1
     stopAside()
@@ -232,8 +226,6 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     cancelAnimationFrame(levelFrame.current)
     levelFrame.current = 0
     setUserTalking(false)
-    setLevel(0)
-    setBands([0, 0, 0, 0, 0, 0, 0])
     const looping = liveRef.current
     const talking = isSpeaking() || statusRef.current === 'speaking' || awaitingReply.current
     try {
@@ -332,19 +324,14 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
         context: opts?.context,
         stream: opts?.stream,
         deviceId: voiceRef.current.micDeviceId || undefined,
-        onLevel: (rms, silentFor, heard) => {
-          pendingLevel.current = { rms, heard, silentFor }
+        onLevel: (_rms, silentFor, heard) => {
+          pendingLevel.current = { heard, silentFor }
           if (levelFrame.current) return
           levelFrame.current = requestAnimationFrame(() => {
             levelFrame.current = 0
             const next = pendingLevel.current
-            const mapped = Math.min(1, Math.max(0, next.rms / 0.04))
-            setLevel(mapped)
             setUserTalking(next.heard && next.silentFor < 320)
           })
-        },
-        onBands: (next) => {
-          setBands(next)
         },
         idleStop: true,
         onAutoStop: (clip) => {
@@ -696,8 +683,6 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       conversation: voice.conversation,
       live,
       userTalking,
-      level,
-      bands,
       status,
       error,
       model,
@@ -716,9 +701,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       activeStreaming,
       caption,
       consumeTranscript,
-      bands,
       error,
-      level,
       live,
       model,
       muteReply,
@@ -803,8 +786,6 @@ export function useVoice(): VoiceContextValue {
       conversation: false,
       live: false,
       userTalking: false,
-      level: 0,
-      bands: [0, 0, 0, 0, 0, 0, 0],
       status: 'idle',
       error: null,
       model: emptyModel,

@@ -9,11 +9,9 @@ export type ThemeState = {
 }
 
 type ThemeContextValue = {
-  ready: boolean
   active: ThemeFile
   themes: ThemeSummary[]
   activeId: string
-  refreshThemes: () => Promise<ThemeState>
   activateTheme: (id: string) => Promise<ThemeState>
   saveTheme: (theme: ThemeFile) => Promise<ThemeState>
   deleteTheme: (id: string) => Promise<ThemeState>
@@ -37,7 +35,6 @@ function applyState(
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.Element {
-  const [ready, setReady] = useState(false)
   const [active, setActive] = useState<ThemeFile>(GRAPHITE_THEME)
   const [themes, setThemes] = useState<ThemeSummary[]>([])
   const [activeId, setActiveId] = useState(GRAPHITE_THEME.id)
@@ -51,9 +48,7 @@ export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.
   }, [])
 
   useEffect(() => {
-    void refreshThemes()
-      .catch(() => undefined)
-      .finally(() => setReady(true))
+    void refreshThemes().catch(() => undefined)
   }, [refreshThemes])
 
   // Main sends each change, from any window, before the reply to the call that made it.
@@ -98,11 +93,9 @@ export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.
 
   const value = useMemo<ThemeContextValue>(
     () => ({
-      ready,
       active,
       themes,
       activeId,
-      refreshThemes,
       activateTheme,
       saveTheme,
       deleteTheme,
@@ -110,11 +103,9 @@ export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.
       exportTheme
     }),
     [
-      ready,
       active,
       themes,
       activeId,
-      refreshThemes,
       activateTheme,
       saveTheme,
       deleteTheme,

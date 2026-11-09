@@ -90,7 +90,6 @@ const api = {
     ipcRenderer.invoke('chat:resolvePlanApproval', { chatId, decision }) as Promise<boolean>,
   rewindChat: (chatId: string, checkpointId: string) =>
     ipcRenderer.invoke('chat:rewind', { chatId, checkpointId }),
-  getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (input: {
     apiKey?: string
     model?: string
