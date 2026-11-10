@@ -101,9 +101,14 @@ function CodeBlock({ children }: { children: ReactNode }): React.JSX.Element {
         title={copied ? 'Copied' : 'Copy'}
         aria-label={copied ? 'Copied' : 'Copy code'}
         onClick={copy}
-        className="absolute top-2 right-2 flex h-[26px] w-[26px] items-center justify-center rounded-[7px] border border-line bg-code-block text-muted transition-colors hover:bg-hover hover:text-ink"
+        className={`absolute top-2 right-2 flex h-[26px] items-center justify-center gap-1 rounded-[7px] border bg-code-block text-[11.5px] transition-colors ${
+          copied
+            ? 'border-ok px-2 text-ok'
+            : 'w-[26px] border-line text-muted hover:bg-hover hover:text-ink'
+        }`}
       >
         <Icon name={copied ? 'check' : 'copy'} size={13} />
+        {copied ? 'Copied' : null}
       </button>
     </div>
   )

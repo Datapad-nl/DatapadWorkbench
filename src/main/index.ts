@@ -72,12 +72,17 @@ function createWindow(): void {
     return permission === 'media' || permission === 'audioCapture' || permission === 'microphone'
   }
 
+  /** The copy buttons write with `navigator.clipboard.writeText`, which asks for this. */
+  function isClipboardWrite(permission: string): boolean {
+    return permission === 'clipboard-sanitized-write'
+  }
+
   mainWindow.webContents.session.setPermissionCheckHandler((_contents, permission) => {
-    return isMicPermission(permission)
+    return isMicPermission(permission) || isClipboardWrite(permission)
   })
   mainWindow.webContents.session.setPermissionRequestHandler((_contents, permission, callback) => {
     const mic = isMicPermission(permission)
-    callback(mic)
+    callback(mic || isClipboardWrite(permission))
     if (mic && getMicAccess() !== 'granted') void ensureMicAccess()
   })
 
