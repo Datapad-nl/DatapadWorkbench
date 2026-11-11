@@ -33,3 +33,13 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  # electron-builder leaves the release a draft, and the app only finds a published one.
+  # All three installers must be up first: an update feed without its file would break that platform.
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

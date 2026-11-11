@@ -25,7 +25,7 @@ publish:
   provider: github
   owner: Datapad-nl
   repo: DatapadWorkbench
-  # The three platform jobs upload into one draft. Publish it to ship the update.
+  # The three platform jobs upload into one draft. The release workflow publishes it once all three are up.
   releaseType: draft
 
 mac:
