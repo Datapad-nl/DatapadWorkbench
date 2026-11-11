@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Chat, ChatSummary, Message } from '../../../shared/types'
 import { replySteps } from '../../../shared/steps'
 import { useChatsProgress } from '../progress'
@@ -14,13 +14,148 @@ function clip(text: string, max: number): string {
 
 function StateMark({ state }: { state: WorkerState }): React.JSX.Element {
   if (state === 'reported') return <Icon name="check" size={12} className="text-ok" />
-  const tone =
-    state === 'working'
-      ? 'streaming-dot bg-accent'
-      : state === 'waiting'
-        ? 'bg-faint'
-        : 'bg-danger'
+  const tone = state === 'working' ? 'streaming-dot bg-accent' : state === 'waiting' ? 'bg-faint' : 'bg-danger'
   return <span className={`m-[3px] h-1.5 w-1.5 shrink-0 rounded-full ${tone}`} />
+}
+
+const NODE_TONE: Record<WorkerState, string> = {
+  working: 'streaming-dot bg-accent',
+  'needs-you': 'bg-danger',
+  error: 'bg-danger',
+  reported: 'bg-ok',
+  waiting: 'bg-faint'
+}
+
+/** Where the links leave the orchestrator and where they reach the subagents, in pixels from the top. */
+const LINK_TOP = 26
+const LINK_BOTTOM = 70
+
+type Pulse = { id: number; workerId: string; back: boolean }
+
+/**
+ * The orchestrator above its subagents, with a link to each. A dot runs down a link when
+ * the orchestrator hands out a task or a nudge, and back up when the subagent reports.
+ * The link of a working subagent keeps flowing.
+ */
+function LinkMap({
+  workers,
+  states,
+  orchestrating
+}: {
+  workers: ChatSummary[]
+  states: WorkerState[]
+  orchestrating: boolean
+}): React.JSX.Element {
+  const box = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    const el = box.current
+    if (!el) return
+    const observer = new ResizeObserver(() => setWidth(el.clientWidth))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  // A change of state is a message: compare with the states of the render before.
+  const key = workers.map((worker, index) => `${worker.id}:${states[index]}`).join(',')
+  const [seen, setSeen] = useState<{
+    key: string
+    states: Record<string, WorkerState>
+    count: number
+  } | null>(null)
+  const [pulses, setPulses] = useState<Pulse[]>([])
+  if (seen?.key !== key) {
+    const now: Record<string, WorkerState> = {}
+    const fresh: Pulse[] = []
+    let count = seen?.count ?? 0
+    workers.forEach((worker, index) => {
+      const state = states[index]
+      now[worker.id] = state
+      // Nothing moves for what was already there when the chat was opened.
+      if (!seen) return
+      const before = seen.states[worker.id]
+      if (before === state) return
+      if (state === 'working' && before !== 'needs-you') fresh.push({ id: count++, workerId: worker.id, back: false })
+      else if (state === 'reported' && before) fresh.push({ id: count++, workerId: worker.id, back: true })
+    })
+    setSeen({ key, states: now, count })
+    if (fresh.length > 0) setPulses((current) => [...current, ...fresh])
+  }
+
+  const paths: Record<string, string> = {}
+  workers.forEach((worker, index) => {
+    const x = ((index + 0.5) / workers.length) * width
+    const bend = (LINK_BOTTOM - LINK_TOP) / 2
+    paths[worker.id] =
+      `M ${width / 2} ${LINK_TOP} C ${width / 2} ${LINK_TOP + bend}, ${x} ${LINK_BOTTOM - bend}, ${x} ${LINK_BOTTOM}`
+  })
+
+  return (
+    <div ref={box} className="relative pb-2 pt-0.5" data-testid="subagents-map">
+      <div className="flex justify-center">
+        <span className="flex h-6 items-center gap-1.5 rounded-full border border-accent-line bg-accent-soft px-2.5 text-[11.5px] font-medium text-ink">
+          <span className={`h-1.5 w-1.5 rounded-full bg-accent ${orchestrating ? 'streaming-dot' : ''}`} />
+          Orchestrator
+        </span>
+      </div>
+      {width > 0 ? (
+        <svg
+          className="pointer-events-none absolute left-0 top-0 overflow-visible"
+          width={width}
+          height={LINK_BOTTOM}
+          fill="none"
+          aria-hidden="true"
+        >
+          {workers.map((worker, index) => {
+            const state = states[index]
+            const alarm = state === 'needs-you' || state === 'error'
+            return (
+              <g key={worker.id}>
+                <path
+                  d={paths[worker.id]}
+                  strokeWidth={1}
+                  className={alarm ? 'stroke-danger/60' : state === 'reported' ? 'stroke-ok/40' : 'stroke-line-strong'}
+                />
+                {state === 'working' ? (
+                  <path
+                    d={paths[worker.id]}
+                    strokeWidth={1.5}
+                    strokeLinecap="round"
+                    className="subagent-flow stroke-accent"
+                  />
+                ) : null}
+              </g>
+            )
+          })}
+          {pulses.map((pulse) =>
+            paths[pulse.workerId] ? (
+              <circle
+                key={pulse.id}
+                r={3.5}
+                className={`subagent-pulse ${pulse.back ? 'subagent-pulse-back fill-ok text-ok' : 'fill-accent text-accent'}`}
+                style={{ offsetPath: `path('${paths[pulse.workerId]}')` }}
+                onAnimationEnd={() => setPulses((current) => current.filter((item) => item.id !== pulse.id))}
+              />
+            ) : null
+          )}
+        </svg>
+      ) : null}
+      <div
+        className="grid"
+        style={{
+          marginTop: LINK_BOTTOM - LINK_TOP,
+          gridTemplateColumns: `repeat(${workers.length}, minmax(0, 1fr))`
+        }}
+      >
+        {workers.map((worker, index) => (
+          <div key={worker.id} className="flex min-w-0 flex-col items-center gap-1 px-1" title={worker.title}>
+            <span className={`h-2 w-2 rounded-full ${NODE_TONE[states[index]]}`} />
+            <span className="max-w-full truncate text-[11px] text-muted">{worker.title}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 /** The worker's chat with its messages: from the workspace when it is loaded, read once otherwise. */
@@ -212,17 +347,20 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
           <span className="truncate text-[12.5px] text-muted">{workersSummary(states)}</span>
         </button>
         {open ? (
-          <ul className="max-h-[38vh] overflow-y-auto border-t border-line px-3">
-            {workers.map((worker, index) => (
-              <WorkerRow
-                key={worker.id}
-                worker={worker}
-                state={states[index]}
-                doing={doing[worker.id] ?? ''}
-                error={statuses[worker.id]?.error ?? null}
-              />
-            ))}
-          </ul>
+          <div className="max-h-[42vh] overflow-y-auto border-t border-line px-3">
+            <LinkMap workers={workers} states={states} orchestrating={statuses[chatId]?.status === 'streaming'} />
+            <ul className="border-t border-line">
+              {workers.map((worker, index) => (
+                <WorkerRow
+                  key={worker.id}
+                  worker={worker}
+                  state={states[index]}
+                  doing={doing[worker.id] ?? ''}
+                  error={statuses[worker.id]?.error ?? null}
+                />
+              ))}
+            </ul>
+          </div>
         ) : null}
       </div>
     </div>

@@ -235,3 +235,34 @@ textarea {
 .streaming-dot {
   animation: pulse-dot 1.2s ease-in-out infinite;
 }
+
+/* The link between an orchestrator and a subagent that is working. */
+@keyframes subagent-flow {
+  to { stroke-dashoffset: -20; }
+}
+
+.subagent-flow {
+  stroke-dasharray: 3 7;
+  animation: subagent-flow 0.9s linear infinite;
+}
+
+/* A message on its way along that link: down for a task, back up for a report. */
+@keyframes subagent-travel {
+  0% { offset-distance: 0%; opacity: 0; }
+  12%, 88% { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+.subagent-pulse {
+  filter: drop-shadow(0 0 4px currentColor);
+  animation: subagent-travel 1.1s ease-in-out both;
+}
+
+.subagent-pulse-back {
+  animation-direction: reverse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-flow { animation: none; }
+  .subagent-pulse { animation-duration: 1ms; }
+}
