@@ -21,6 +21,7 @@ import {
 } from './browserDrive'
 import { transcribeYoutube } from './youtube'
 import {
+  agentHook,
   cancelProjectSchedule,
   delegateTask,
   listProjectChats,
@@ -188,6 +189,11 @@ async function handle(
     return
   }
 
+  if (method === 'POST' && path === '/hooks/agent') {
+    json(res, 200, await agentHook(url.searchParams.get('chat') ?? '', await readJson(req)))
+    return
+  }
+
   const drive = method === 'POST' ? DRIVE[path] : undefined
   if (drive) {
     let body: Record<string, unknown>
@@ -249,6 +255,17 @@ export function startBrowserAgentServer(): Promise<{ url: string; token: string 
     if (started === starting) started = null
   })
   return starting
+}
+
+/** Claude Code settings that ask the app before each Agent tool call of `chatId`, so Settings holds for its own agents too. */
+export async function agentHookSettings(chatId: string): Promise<Record<string, unknown>> {
+  const { url, token } = await startBrowserAgentServer()
+  const hook = {
+    type: 'http',
+    url: `${url}/hooks/agent?chat=${encodeURIComponent(chatId)}`,
+    headers: { Authorization: `Bearer ${token}` }
+  }
+  return { hooks: { PreToolUse: [{ matcher: 'Agent|Task', hooks: [hook] }] } }
 }
 
 /** The `browser` server, and the `workbench` chat tools (visuals, delegate, other chats) for `chatId`. */

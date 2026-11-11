@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { conductorPrompt, normalizeMaxSubagents } from './conductor'
+import { agentToolRule, conductorPrompt, normalizeMaxSubagents } from './conductor'
 
 describe('conductorPrompt', () => {
   it('lets the conductor pick a model per worker when Settings fixes none', () => {
@@ -27,5 +27,20 @@ describe('normalizeMaxSubagents', () => {
     expect(normalizeMaxSubagents(99)).toBe(10)
     expect(normalizeMaxSubagents(undefined)).toBe(4)
     expect(normalizeMaxSubagents('3')).toBe(4)
+  })
+})
+
+describe('agentToolRule', () => {
+  it('has Claude Code pick a model per agent when Settings fixes none', () => {
+    const rule = agentToolRule('', 3)
+    expect(rule).toContain('`haiku` when a small, fast model is enough')
+    expect(rule).toContain('At most 3 of your agents run at the same time')
+  })
+
+  it('names the model Settings fixes for every agent', () => {
+    const rule = agentToolRule('claude-haiku-4-5', 1)
+    expect(rule).toContain('run on claude-haiku-4-5')
+    expect(rule).not.toContain('`sonnet`')
+    expect(rule).toContain('At most 1 of your agents runs at the same time')
   })
 })

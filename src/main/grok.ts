@@ -41,6 +41,7 @@ import {
   type SessionUpdate
 } from './acp'
 import { emitNotice, finishTurn, startTurn } from './activity'
+import { endForegroundAgents } from './builtinAgents'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
 import { id, now, titleFromPrompt } from './ids'
@@ -964,6 +965,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   sessionChats.set(sessionId, chat.id)
   bindPermissionSession(sessionId, chat.id, mode)
   startTurn({ chatId: chat.id, chatTitle: chat.title, sessionId, prompt: opening })
+  endForegroundAgents(chat.id)
   const prompt = promptSession(sessionId, cued, images)
   prompt.catch(() => {})
   // A steer sent while the turn prepared. The prompt is in the session now, so the steer can follow it.

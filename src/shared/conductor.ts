@@ -32,3 +32,14 @@ export function conductorPrompt(job: string, workerModel: string, maxWorkers: nu
     `The job:\n${job.trim()}`
   ].join('\n\n')
 }
+
+/**
+ * What a Claude Code session is told about the agents it starts itself with its Agent tool:
+ * the model they run on, as `conductorPrompt` says for workers, and how many run at once.
+ */
+export function agentToolRule(agentModel: string, maxAgents: number): string {
+  const model = agentModel
+    ? `Agents you start with your own Agent tool run on ${agentModel}, as set in Settings.`
+    : 'When you start an agent with your own Agent tool, pick its model with `model`: `haiku` when a small, fast model is enough for the task, `sonnet` for routine work, and `opus` for work that needs judgement. Leave `model` out only when the task needs the model you run on.'
+  return `${model} At most ${maxAgents} ${maxAgents === 1 ? 'of your agents runs' : 'of your agents run'} at the same time, as set in Settings; a start past that is refused. When there is more work than that, start the next agent when one reports back.`
+}

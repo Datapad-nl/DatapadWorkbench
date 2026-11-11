@@ -198,7 +198,7 @@ export function registerIpc(): void {
   setMergeGuard((_projectId, chatId) =>
     isStreaming(chatId) ? 'This chat is still working. Merge once it finishes.' : null
   )
-  registerChatTools({ send: sendTurn, emit, isStreaming })
+  registerChatTools({ send: sendTurn, emit, isStreaming, builtinAgents: getBuiltinAgents })
   startActivityBridge()
   startBuiltinAgentsBridge()
   watchAttention()

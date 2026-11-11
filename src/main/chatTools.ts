@@ -1,4 +1,5 @@
 import type { Chat, ChatAgent, ChatEvent } from "../shared/types";
+import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
 import { nextCronRun } from "../shared/cron";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
@@ -28,17 +29,21 @@ type SendTurn = (
 let sendTurn: SendTurn | null = null;
 let emit: ((event: ChatEvent) => void) | null = null;
 let streaming: (chatId: string) => boolean = () => false;
+let builtinAgents: (chatId: string) => BuiltinAgent[] = () => [];
 
 // The streaming check is handed over too: importing grok.ts here would close an import cycle
 // through acp.ts and browserAgent.ts, and grok.ts would then run before acp.ts is ready.
+// Claude Code's own agents come the same way, for the same reason.
 export function registerChatTools(input: {
   send: SendTurn;
   emit: (event: ChatEvent) => void;
   isStreaming: (chatId: string) => boolean;
+  builtinAgents?: (chatId: string) => BuiltinAgent[];
 }): void {
   sendTurn = input.send;
   emit = input.emit;
   streaming = input.isStreaming;
+  if (input.builtinAgents) builtinAgents = input.builtinAgents;
 }
 
 /** Whether a chat's turn is running. */
@@ -275,6 +280,61 @@ type DelegateInput = {
   worktree?: unknown;
 };
 
+/** The Agent tool calls let through per chat, by id, with when. */
+const admittedAgents = new Map<string, Map<string, number>>();
+
+function admittedOf(chatId: string): Map<string, number> {
+  let admitted = admittedAgents.get(chatId);
+  if (!admitted) admittedAgents.set(chatId, (admitted = new Map()));
+  return admitted;
+}
+
+/** How many subagents of a chat run now: its workers and the agents Claude Code started in it. */
+async function runningSubagents(chatId: string): Promise<number> {
+  const workers = (await listChats()).filter(
+    (item) => item.parentChatId === chatId && chatRunning(item.id),
+  ).length;
+  return (
+    workers +
+    runningAdmitted(builtinAgents(chatId), admittedOf(chatId), Date.now())
+  );
+}
+
+/**
+ * Answers Claude Code's question before an Agent tool call of `chatId`: refuses the call past
+ * the limit in Settings, and drops the model it asked for when Settings fixes one for every subagent.
+ */
+export async function agentHook(
+  chatId: string,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const callId = typeof body.tool_use_id === "string" ? body.tool_use_id : "";
+  // An agent of an agent is not in the chat's list, so nothing would say when it ends.
+  if (!chatId || !callId || body.agent_id) return {};
+  const most = await getMaxSubagents();
+  const running = await runningSubagents(chatId);
+  if (running >= most) {
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `${running} of your subagents are running, and Settings allows ${most} at the same time. Wait for one to report back, then start this agent again.`,
+      },
+    };
+  }
+  admittedOf(chatId).set(callId, Date.now());
+  const input =
+    body.tool_input && typeof body.tool_input === "object"
+      ? (body.tool_input as Record<string, unknown>)
+      : {};
+  // The model the call names wins over CLAUDE_CODE_SUBAGENT_MODEL, so the one from Settings needs it gone.
+  if (!("model" in input) || !(await getSubagentModel())) return {};
+  const { model: _asked, ...rest } = input;
+  return {
+    hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: rest },
+  };
+}
+
 // Tasks handed out in the same turn start one after another, so each counts the ones before it.
 let delegating: Promise<unknown> = Promise.resolve();
 
@@ -289,9 +349,7 @@ async function startWorker(input: DelegateInput): Promise<unknown> {
   const brief = typeof input.brief === "string" ? input.brief.trim() : "";
   if (!brief) throw new Error("Pass the brief for the other agent.");
   const most = await getMaxSubagents();
-  const running = (await listChats()).filter(
-    (item) => item.parentChatId === caller.id && chatRunning(item.id),
-  ).length;
+  const running = await runningSubagents(caller.id);
   if (running >= most) {
     throw new Error(
       `${running} of your subagents are running, and Settings allows ${most} at the same time. Wait for one to report back, then delegate this task again.`,

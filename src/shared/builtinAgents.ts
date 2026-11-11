@@ -114,3 +114,26 @@ export function applyTaskNotification(agents: BuiltinAgent[], message: unknown):
   const status = notice.status === 'completed' ? 'done' : notice.status === 'failed' ? 'error' : 'stopped'
   return agents.map((agent) => (agent.id === id ? { ...agent, status, report: text(notice.summary) } : agent))
 }
+
+/** A foreground agent lives inside the turn that started it. Marks the ones still running as stopped. */
+export function endForegroundAgents(agents: BuiltinAgent[]): BuiltinAgent[] {
+  const ended = (agent: BuiltinAgent): boolean => agent.status === 'running' && !agent.background
+  if (!agents.some(ended)) return agents
+  return agents.map((agent) => (ended(agent) ? { ...agent, status: 'stopped' } : agent))
+}
+
+/** How long an Agent call that was let through counts while the chat's stream does not show it. */
+const ADMITTED_KEEP_MS = 60_000
+
+/**
+ * How many of the Agent calls that were let through still run. `admitted` holds each call's id
+ * and when it was let through, and loses the ones that ended. The stream shows a call before it
+ * is let through, so only these count, not every agent the stream calls running.
+ */
+export function runningAdmitted(agents: BuiltinAgent[], admitted: Map<string, number>, now: number): number {
+  for (const [id, at] of admitted) {
+    const agent = agents.find((item) => item.id === id)
+    if (agent ? agent.status !== 'running' : now - at > ADMITTED_KEEP_MS) admitted.delete(id)
+  }
+  return admitted.size
+}

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_BUILTIN_AGENTS, applyTaskNotification, applyToolUpdate, type BuiltinAgent } from './builtinAgents'
+import {
+  MAX_BUILTIN_AGENTS,
+  applyTaskNotification,
+  applyToolUpdate,
+  endForegroundAgents,
+  runningAdmitted,
+  type BuiltinAgent
+} from './builtinAgents'
 
 const NOW = '2026-11-11T12:00:00.000Z'
 
@@ -124,5 +131,37 @@ describe('applyTaskNotification', () => {
 
   it('ignores a notice about an unknown task', () => {
     expect(applyTaskNotification(running, { tool_use_id: 'zz', status: 'completed' })).toBe(running)
+  })
+})
+
+describe('endForegroundAgents', () => {
+  const agent = (id: string, extra: Partial<BuiltinAgent>): BuiltinAgent => ({ id, ...extra }) as BuiltinAgent
+
+  it('stops the foreground agents that still run, and leaves the rest', () => {
+    const agents = [
+      agent('fore', { status: 'running', background: false }),
+      agent('back', { status: 'running', background: true }),
+      agent('done', { status: 'done', background: false })
+    ]
+    expect(endForegroundAgents(agents).map((item) => item.status)).toEqual(['stopped', 'running', 'done'])
+    const settled = agents.slice(1)
+    expect(endForegroundAgents(settled)).toBe(settled)
+  })
+})
+
+describe('runningAdmitted', () => {
+  const agent = (id: string, status: BuiltinAgent['status']): BuiltinAgent => ({ id, status }) as BuiltinAgent
+
+  it('counts the calls let through that still run, not the ones the stream only shows', () => {
+    const admitted = new Map([['a1', 0], ['a2', 0]])
+    const agents = [agent('a1', 'running'), agent('a2', 'done'), agent('a3', 'running')]
+    expect(runningAdmitted(agents, admitted, 1_000)).toBe(1)
+    expect([...admitted.keys()]).toEqual(['a1'])
+  })
+
+  it('counts a call the stream does not show for a minute, then forgets it', () => {
+    const admitted = new Map([['gone', 0]])
+    expect(runningAdmitted([], admitted, 59_000)).toBe(1)
+    expect(runningAdmitted([], admitted, 61_000)).toBe(0)
   })
 })

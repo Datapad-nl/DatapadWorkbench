@@ -1,7 +1,8 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'child_process'
 import readline from 'readline'
 import { toAcpMcpServers } from '../shared/mcp'
-import { BROWSER_SESSION_RULE, browserMcpServers } from './browserAgent'
+import { agentToolRule } from '../shared/conductor'
+import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
 import { claudeAcpCommand } from './claudeCli'
 import { grokBinary } from './grokCli'
 import { snapshotBeforeTool } from './checkpoints'
@@ -43,7 +44,16 @@ import {
   type UsagePeriodKind,
   type UsageSnapshot
 } from '../shared/types'
-import { claudeModelFor, getApiKey, getClaudeModel, getEffort, getMcpServers, skipNewSession } from './store'
+import {
+  claudeModelFor,
+  getApiKey,
+  getClaudeModel,
+  getEffort,
+  getMaxSubagents,
+  getMcpServers,
+  getSubagentModel,
+  skipNewSession
+} from './store'
 import { readGrokPlan } from './sessions'
 
 type JsonRpc = {
@@ -907,10 +917,24 @@ async function sessionConfig(
   const rules = extraRules?.trim()
     ? `${BROWSER_SESSION_RULE}\n\n${extraRules.trim()}`
     : BROWSER_SESSION_RULE
+  const config = { cwd, mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(await getMcpServers())] }
+  if (agent !== 'claude' || !chatId) return { ...config, ...sessionRules(agent, rules) }
+  // Claude Code starts agents of its own with its Agent tool. Settings holds for those too.
+  const subagentModel = await getSubagentModel()
+  const session = sessionRules(agent, `${rules}\n\n${agentToolRule(subagentModel, await getMaxSubagents())}`)
+  const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
   return {
-    cwd,
-    mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(await getMcpServers())],
-    ...sessionRules(agent, rules)
+    ...config,
+    ...session,
+    _meta: {
+      claudeCode: {
+        ...meta,
+        options: {
+          settings: await agentHookSettings(chatId),
+          ...(subagentModel ? { env: { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } } : {})
+        }
+      }
+    }
   }
 }
 

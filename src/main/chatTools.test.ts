@@ -17,7 +17,8 @@ vi.mock('./store', () => ({
   }
 }))
 
-import { delegateTask, nudgeWorker, registerChatTools, startScheduler, waitForDelegate } from './chatTools'
+import { agentHook, delegateTask, nudgeWorker, registerChatTools, startScheduler, waitForDelegate } from './chatTools'
+import type { BuiltinAgent } from '../shared/builtinAgents'
 import { createChat } from './store'
 
 afterEach(() => {
@@ -122,6 +123,70 @@ describe('workers', () => {
     running = false
     expect(await delegated({})).toMatchObject({ parentChatId: 'boss' })
     stub.maxSubagents = 4
+  })
+
+  describe("Claude Code's own agents", () => {
+    const DENIED = { hookSpecificOutput: { permissionDecision: 'deny' } }
+    let agents: BuiltinAgent[] = []
+    const agent = (id: string, status: BuiltinAgent['status']): BuiltinAgent =>
+      ({ id, status, background: false }) as BuiltinAgent
+
+    function own(workerRunning = false): void {
+      agents = []
+      registerChatTools({
+        send: async (chatId) => ({ chat: stub.chats.get(chatId)!, done: Promise.resolve(stub.chats.get(chatId)!) }),
+        emit: () => undefined,
+        isStreaming: (chatId) => workerRunning && chatId === 'first',
+        builtinAgents: () => agents
+      })
+      stub.subagentModel = ''
+      stub.maxSubagents = 2
+    }
+
+    afterEach(() => {
+      stub.subagentModel = ''
+      stub.maxSubagents = 4
+    })
+
+    it('refuses an Agent call past the limit in Settings, until an agent has ended', async () => {
+      own()
+      // The stream shows every call of the turn as running before any of them is asked about.
+      agents = [agent('a1', 'running'), agent('a2', 'running'), agent('a3', 'running')]
+      expect(await agentHook('solo', { tool_use_id: 'a1' })).toEqual({})
+      expect(await agentHook('solo', { tool_use_id: 'a2' })).toEqual({})
+      expect(await agentHook('solo', { tool_use_id: 'a3' })).toMatchObject({
+        hookSpecificOutput: { permissionDecisionReason: expect.stringContaining('Settings allows 2 at the same time') }
+      })
+      agents = [agent('a1', 'done'), agent('a2', 'running'), agent('a3', 'error')]
+      expect(await agentHook('solo', { tool_use_id: 'a4' })).toEqual({})
+      expect(await agentHook('solo', { tool_use_id: 'a5' })).toMatchObject(DENIED)
+    })
+
+    it('counts the workers of the chat too, and delegate counts the agents', async () => {
+      own(true)
+      chat('boss')
+      chat('first', { parentChatId: 'boss' })
+      expect(await agentHook('boss', { tool_use_id: 'b1' })).toEqual({})
+      expect(await agentHook('boss', { tool_use_id: 'b2' })).toMatchObject(DENIED)
+      await expect(delegated({})).rejects.toThrow('Settings allows 2 at the same time')
+    })
+
+    it('lets through a call made by an agent, which no list follows', async () => {
+      own()
+      stub.maxSubagents = 1
+      expect(await agentHook('nested', { tool_use_id: 'n1' })).toEqual({})
+      expect(await agentHook('nested', { tool_use_id: 'n2', agent_id: 'inner' })).toEqual({})
+    })
+
+    it('drops the model a call asks for when Settings fixes one, and keeps it otherwise', async () => {
+      own()
+      const call = { tool_input: { prompt: 'rename the flag', model: 'opus' } }
+      expect(await agentHook('picks', { tool_use_id: 'm1', ...call })).toEqual({})
+      stub.subagentModel = 'claude-haiku-4-5'
+      expect(await agentHook('picks', { tool_use_id: 'm2', ...call })).toEqual({
+        hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { prompt: 'rename the flag' } }
+      })
+    })
   })
 
   it('nudges only a worker of the calling chat', async () => {
