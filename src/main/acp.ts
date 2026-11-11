@@ -43,7 +43,7 @@ import {
   type UsagePeriodKind,
   type UsageSnapshot
 } from '../shared/types'
-import { getApiKey, getClaudeModel, getEffort, getMcpServers, skipNewSession } from './store'
+import { claudeModelFor, getApiKey, getClaudeModel, getEffort, getMcpServers, skipNewSession } from './store'
 import { readGrokPlan } from './sessions'
 
 type JsonRpc = {
@@ -170,6 +170,8 @@ function makeConn(agent: ChatAgent): Conn {
 
 const conns: Record<ChatAgent, Conn> = { grok: makeConn('grok'), claude: makeConn('claude') }
 const sessionAgents = new Map<string, ChatAgent>()
+/** The chat of each session, for the model that chat runs on. */
+const sessionChatIds = new Map<string, string>()
 
 /** Claude Code's ExitPlanMode arrives as a permission request with these option ids. */
 const CLAUDE_EXIT_PLAN_OPTION = 'exit-plan-'
@@ -775,7 +777,10 @@ function releaseAgentState(conn: Conn, reason: string): void {
   for (const sessionId of sessions) {
     acpSessionModes.delete(sessionId)
     acpSessionCommands.delete(sessionId)
-    if (sessionAgents.get(sessionId) === conn.agent) sessionAgents.delete(sessionId)
+    if (sessionAgents.get(sessionId) === conn.agent) {
+      sessionAgents.delete(sessionId)
+      sessionChatIds.delete(sessionId)
+    }
   }
 }
 
@@ -1009,18 +1014,25 @@ export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
   return next
 }
 
-export async function applyClaudeModelToLiveSessions(model: string): Promise<void> {
+/** Put every live Claude chat on its model again, after a setting or a chat's role changed. */
+export async function applyClaudeModelToLiveSessions(): Promise<void> {
   const conn = conns.claude
   if (!conn.proc) return
   const call = connCall(conn)
-  // Back to "default" when the setting is cleared, so live chats follow it too.
-  await Promise.all([...conn.liveSessions].map((sessionId) => applyClaudeModel(call, sessionId, model || 'default')))
+  await Promise.all(
+    [...conn.liveSessions].map(async (sessionId) => {
+      // Back to "default" when the setting is cleared, so live chats follow it too.
+      const model = await claudeModelFor(sessionChatIds.get(sessionId)).catch(() => '')
+      await applyClaudeModel(call, sessionId, model || 'default')
+    })
+  )
 }
 
-async function applySessionSettings(agent: ChatAgent, sessionId: string): Promise<void> {
+async function applySessionSettings(agent: ChatAgent, sessionId: string, chatId?: string): Promise<void> {
   await applySessionEffort(sessionId, await getEffort())
   if (agent !== 'claude') return
-  await applyClaudeModel(connCall(conns.claude), sessionId, await getClaudeModel())
+  if (chatId) sessionChatIds.set(sessionId, chatId)
+  await applyClaudeModel(connCall(conns.claude), sessionId, await claudeModelFor(chatId))
 }
 
 export async function newSession(
@@ -1038,7 +1050,7 @@ export async function newSession(
   sessionAgents.set(result.sessionId, agent)
   rememberModes(result.sessionId, result)
   conn.liveSessions.add(result.sessionId)
-  await applySessionSettings(agent, result.sessionId)
+  await applySessionSettings(agent, result.sessionId, chatId)
   return result.sessionId
 }
 
@@ -1060,7 +1072,7 @@ export async function loadSession(
   )
   rememberModes(sessionId, result)
   conn.liveSessions.add(sessionId)
-  await applySessionSettings(agent, sessionId)
+  await applySessionSettings(agent, sessionId, chatId)
 }
 
 export function hasLiveSession(sessionId: string): boolean {

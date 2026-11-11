@@ -7,13 +7,14 @@ import { id, now } from "./ids";
 import {
   createChat,
   getChat,
+  getSubagentModel,
   listChats,
   listProjects,
   mutateChat,
 } from "./store";
 
 /**
- * The `workbench` MCP tools that reach other chats: delegate, list_chats,
+ * The `workbench` MCP tools that reach other chats: delegate, nudge, list_chats,
  * read_chat, start_chat and the scheduled tasks. Turns run through the same path as a send from
  * the chat box, which ipc.ts hands over with `registerChatTools`.
  */
@@ -90,6 +91,7 @@ async function openChat(
   from: Chat,
   input: { agent?: unknown; title?: unknown },
   fallbackTitle: string,
+  worker?: { agent?: ChatAgent; model: string },
 ): Promise<Chat> {
   const title =
     typeof input.title === "string" && input.title.trim()
@@ -97,7 +99,8 @@ async function openChat(
       : fallbackTitle;
   const chat = await createChat(from.projectId, {
     title,
-    agent: agentOf(input.agent),
+    agent: worker?.agent ?? agentOf(input.agent),
+    ...(worker ? { model: worker.model, parentChatId: from.id } : {}),
   });
   emit?.({ type: "chat", chatId: chat.id, chat });
   return chat;
@@ -121,6 +124,8 @@ export async function listProjectChats(from: unknown): Promise<unknown> {
       id: chat.id,
       title: chat.title,
       agent: chatAgentLabel(normalizeChatAgent(chat.agent)),
+      model: chat.model,
+      workerOf: chat.parentChatId,
       messages: chat.messageCount,
       running: chatRunning(chat.id),
       updatedAt: chat.updatedAt,
@@ -195,40 +200,34 @@ export async function startProjectChat(input: {
   };
 }
 
-export async function delegateTask(input: {
-  from?: unknown;
-  brief?: unknown;
+/**
+ * The agent and Claude Code model of a worker. The model in Settings wins over the one the caller
+ * asked for. Only Claude Code picks a model per chat, so a worker with a model runs there.
+ */
+async function workerSetup(input: {
   agent?: unknown;
-  title?: unknown;
-  worktree?: unknown;
-}): Promise<unknown> {
-  const caller = await callerChat(input.from);
-  const brief = typeof input.brief === "string" ? input.brief.trim() : "";
-  if (!brief) throw new Error("Pass the brief for the other agent.");
-  let chat = await openChat(
-    caller,
-    input,
-    `Delegated: ${clip(brief.split("\n")[0], 60)}`,
-  );
-  const project = (await listProjects()).find(
-    (item) => item.id === chat.projectId,
-  );
-  if (input.worktree === true && project?.path) {
-    const worktree = await addChatWorktree(project.path, chat.id);
-    chat = await mutateChat(chat.id, (latest) => {
-      latest.worktreePath = worktree.path;
-      latest.worktreeBranch = worktree.branch;
-    });
-    emit?.({ type: "chat", chatId: chat.id, chat });
-  }
+  model?: unknown;
+}): Promise<{ agent?: ChatAgent; model: string }> {
+  const agent = agentOf(input.agent);
+  if (agent === "grok") return { agent, model: "" };
+  const asked = typeof input.model === "string" ? input.model.trim() : "";
+  const model = (await getSubagentModel()) || asked;
+  return { agent: model ? "claude" : agent, model };
+}
 
+/** Send `content` to a worker chat and keep its answer for `waitForDelegate`. */
+async function startRun(
+  chat: Chat,
+  projectPath: string | null | undefined,
+  content: string,
+): Promise<void> {
   const run: Run = {
     done: Promise.resolve(),
     answer: "",
     error: null,
     finishedAt: null,
   };
-  const { done: finished } = await send(chat.id, brief);
+  const { done: finished } = await send(chat.id, content);
   run.done = finished
     .then((done) => {
       const reply = done?.messages.at(-1);
@@ -240,11 +239,11 @@ export async function delegateTask(input: {
     })
     .then(async () => {
       const latest = await getChat(chat.id);
-      if (!project?.path || !latest.worktreePath || !latest.worktreeBranch)
+      if (!projectPath || !latest.worktreePath || !latest.worktreeBranch)
         return;
       if (
         await dropWorktreeIfUnchanged(
-          project.path,
+          projectPath,
           latest.worktreePath,
           latest.worktreeBranch,
         )
@@ -264,7 +263,61 @@ export async function delegateTask(input: {
     });
   pruneRuns();
   runs.set(chat.id, run);
-  return { chatId: chat.id, title: chat.title };
+}
+
+export async function delegateTask(input: {
+  from?: unknown;
+  brief?: unknown;
+  agent?: unknown;
+  model?: unknown;
+  title?: unknown;
+  worktree?: unknown;
+}): Promise<unknown> {
+  const caller = await callerChat(input.from);
+  const brief = typeof input.brief === "string" ? input.brief.trim() : "";
+  if (!brief) throw new Error("Pass the brief for the other agent.");
+  let chat = await openChat(
+    caller,
+    input,
+    `Delegated: ${clip(brief.split("\n")[0], 60)}`,
+    await workerSetup(input),
+  );
+  const project = (await listProjects()).find(
+    (item) => item.id === chat.projectId,
+  );
+  if (input.worktree === true && project?.path) {
+    const worktree = await addChatWorktree(project.path, chat.id);
+    chat = await mutateChat(chat.id, (latest) => {
+      latest.worktreePath = worktree.path;
+      latest.worktreeBranch = worktree.branch;
+    });
+    emit?.({ type: "chat", chatId: chat.id, chat });
+  }
+  await startRun(chat, project?.path, brief);
+  return { chatId: chat.id, title: chat.title, model: chat.model };
+}
+
+/** Send a worker the caller delegated to back to its task. It keeps what it knows. */
+export async function nudgeWorker(input: {
+  from?: unknown;
+  chat?: unknown;
+  message?: unknown;
+}): Promise<unknown> {
+  const caller = await callerChat(input.from);
+  const message = typeof input.message === "string" ? input.message.trim() : "";
+  if (!message) throw new Error("Pass the message for the worker.");
+  const chat = await findProjectChat(caller, input.chat);
+  if (chat.parentChatId !== caller.id)
+    throw new Error(
+      `“${chat.title}” is not a worker of this chat. Only a chat you started with delegate can be nudged.`,
+    );
+  if (chatRunning(chat.id))
+    throw new Error(`“${chat.title}” is still working. Wait for its answer first.`);
+  const project = (await listProjects()).find(
+    (item) => item.id === chat.projectId,
+  );
+  await startRun(chat, project?.path, message);
+  return { chatId: chat.id, title: chat.title, model: chat.model };
 }
 
 /** Wait up to `ms` for a delegated chat; the MCP side polls so no request runs for long. */

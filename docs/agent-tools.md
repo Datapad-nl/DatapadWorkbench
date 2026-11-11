@@ -31,6 +31,12 @@ calling chat.
 - [x] `delegate`: start a child chat on Grok Build or Claude Code with a brief, wait for
       it, and return its final answer.
 - [x] Optional separate git worktree for the child, removed when it is unchanged.
+- [x] `delegate` takes a `model` for the child, so a small, fast model can do a simple job.
+      Settings can fix one model for every child ("Subagent model").
+- [x] `nudge`: send a child back to its task with a follow-up message and wait again.
+- [x] `/conduct <job>`: the chat becomes the conductor. It plans, gives each task to its own
+      child, checks what comes back, and runs on the "Orchestrator model" from Settings.
+      Models are per chat on Claude Code only; Grok Build takes its model per process.
 
 ## 4. Other chats
 

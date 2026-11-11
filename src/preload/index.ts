@@ -63,6 +63,7 @@ const api = {
   stopSchedule: (chatId: string) => ipcRenderer.invoke('chat:stopSchedule', chatId) as Promise<Chat>,
   unlinkPr: (chatId: string) => ipcRenderer.invoke('chat:unlinkPr', chatId) as Promise<Chat>,
   renameChat: (id: string, title: string) => ipcRenderer.invoke('chat:rename', { id, title }),
+  conductChat: (chatId: string) => ipcRenderer.invoke('chat:conduct', chatId) as Promise<Chat>,
   setChatAgent: (id: string, agent: ChatAgent) =>
     ipcRenderer.invoke('chat:setAgent', { id, agent }) as Promise<Chat>,
   sendMessage: (
@@ -100,6 +101,8 @@ const api = {
     voice?: Partial<VoiceSettings>
     defaultAgent?: ChatAgent
     claudeModel?: string
+    orchestratorModel?: string
+    subagentModel?: string
   }) =>
     ipcRenderer.invoke('settings:set', input),
   getVoiceModelStatus: () => ipcRenderer.invoke('voice:modelStatus') as Promise<VoiceModelStatus>,

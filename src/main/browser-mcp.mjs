@@ -214,6 +214,11 @@ const WORKBENCH_TOOLS = [
       properties: {
         brief: { type: 'string', description: 'The full task for the other agent' },
         agent: AGENT,
+        model: {
+          type: 'string',
+          description:
+            'Claude Code model for the child, which then runs on Claude Code: opus for work that needs judgement, sonnet for routine work, haiku when a small, fast model is enough. Leave out for the model set in Settings. Settings can fix one model for every child; that one then wins.'
+        },
         title: { type: 'string', description: 'Sidebar title for the child chat' },
         worktree: {
           type: 'boolean',
@@ -222,6 +227,20 @@ const WORKBENCH_TOOLS = [
         }
       },
       required: ['brief'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'nudge',
+    description:
+      'Send a follow-up message to a chat you started with delegate, wait for it to finish, and return its answer. The child keeps its context. Use it when the child stopped before its task was done, or its work did not pass your check.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat: { type: 'string', description: 'Chat id of the child, as delegate returned it' },
+        message: { type: 'string', description: 'What is still missing or wrong, and what to do next' }
+      },
+      required: ['chat', 'message'],
       additionalProperties: false
     }
   },
@@ -348,13 +367,13 @@ async function callApi(method, path, body, signal) {
 const running = new Map()
 const cancelled = new Set()
 
-async function delegate(args, requestId) {
-  const started = await callApi('POST', '/chats/delegate', { ...args, from: CHAT_ID })
+async function delegate(path, args, requestId) {
+  const started = await callApi('POST', path, { ...args, from: CHAT_ID })
   // A cancel ends the wait in progress rather than after it.
   const signal = running.get(requestId)?.signal
   while (!cancelled.has(requestId)) {
     const result = await callApi('POST', '/chats/wait', { chatId: started.chatId, ms: 60_000 }, signal)
-    if (result.done) return { ...result, chatId: started.chatId, title: started.title }
+    if (result.done) return { ...result, chatId: started.chatId, title: started.title, model: started.model }
   }
   throw new Error('Cancelled')
 }
@@ -365,7 +384,8 @@ async function handleWorkbenchTool(name, args, requestId) {
     if (!String(args?.html ?? '').trim()) throw new Error('Pass the HTML to show.')
     return { shown: true }
   }
-  if (name === 'delegate') return delegate(args, requestId)
+  if (name === 'delegate') return delegate('/chats/delegate', args, requestId)
+  if (name === 'nudge') return delegate('/chats/nudge', args, requestId)
   if (name === 'list_chats') return callApi('POST', '/chats/list', { from: CHAT_ID })
   if (name === 'read_chat') return callApi('POST', '/chats/read', { ...args, from: CHAT_ID })
   if (name === 'start_chat') return callApi('POST', '/chats/start', { ...args, from: CHAT_ID })
@@ -419,8 +439,8 @@ function toContent(name, data) {
   }
   if (name === 'snapshot') return [{ type: 'text', text: snapshotText(data) }]
   if (name === 'show_visual') return [{ type: 'text', text: 'Shown in the chat.' }]
-  if (name === 'delegate') {
-    const head = `${data.title} (${data.chatId})${data.worktreeBranch ? ` on branch ${data.worktreeBranch}` : ''}`
+  if (name === 'delegate' || name === 'nudge') {
+    const head = `${data.title} (${data.chatId})${data.model ? ` on ${data.model}` : ''}${data.worktreeBranch ? ` on branch ${data.worktreeBranch}` : ''}`
     if (data.error) return [{ type: 'text', text: `${head} stopped: ${data.error}\n\n${data.answer ?? ''}`.trim() }]
     return [{ type: 'text', text: `${head} finished.\n\n${data.answer || '(no answer)'}` }]
   }

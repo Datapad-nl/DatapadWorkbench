@@ -413,6 +413,14 @@ export function registerIpc(): void {
     return renameChat(input.id, input.title)
   })
 
+  ipcMain.handle('chat:conduct', async (_event, chatId: string) => {
+    const chat = await mutateChat(chatId, (latest) => {
+      latest.conductor = true
+    })
+    await applyClaudeModelToLiveSessions()
+    return chat
+  })
+
   ipcMain.handle('chat:setAgent', async (_event, input: { id: string; agent: ChatAgent }) => {
     return mutateChat(input.id, (chat) => {
       // A started chat belongs to its agent's session. Only a fresh chat can switch.
@@ -535,11 +543,15 @@ export function registerIpc(): void {
         voice?: Partial<VoiceSettings>
         defaultAgent?: ChatAgent
         claudeModel?: string
+        orchestratorModel?: string
+        subagentModel?: string
       }
     ) => {
       const settings = await updateSettings(input)
       if (input.effort !== undefined) await applyEffortToLiveSessions(settings.effort)
-      if (input.claudeModel !== undefined) await applyClaudeModelToLiveSessions(settings.claudeModel)
+      if (input.claudeModel !== undefined || input.orchestratorModel !== undefined) {
+        await applyClaudeModelToLiveSessions()
+      }
       return settings
     }
   )

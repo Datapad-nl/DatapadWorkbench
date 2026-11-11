@@ -39,6 +39,10 @@ type SettingsFile = {
   defaultAgent?: ChatAgent
   /** Claude Code model alias. Empty means its default. */
   claudeModel?: string
+  /** Claude Code model of a conductor chat. Empty means `claudeModel`. */
+  orchestratorModel?: string
+  /** Claude Code model of every worker. Empty lets the conductor pick one per task. */
+  subagentModel?: string
   apiKey: string
   model: string
   effort: ReasoningEffort | ''
@@ -251,6 +255,8 @@ async function loadSettingsFile(): Promise<SettingsFile> {
   return {
     defaultAgent: normalizeChatAgent(file.defaultAgent),
     claudeModel: file.claudeModel?.trim() ?? '',
+    orchestratorModel: file.orchestratorModel?.trim() ?? '',
+    subagentModel: file.subagentModel?.trim() ?? '',
     apiKey: file.apiKey ?? '',
     model: file.model || DEFAULT_MODEL,
     effort: normalizeReasoningEffort(file.effort) ?? '',
@@ -344,6 +350,8 @@ export async function getPublicSettings(): Promise<PublicSettings> {
     defaultAgent: normalizeChatAgent(file.defaultAgent),
     claude,
     claudeModel: file.claudeModel ?? '',
+    orchestratorModel: file.orchestratorModel ?? '',
+    subagentModel: file.subagentModel ?? '',
     cliChecking
   }
   if (signedIn) {
@@ -420,6 +428,18 @@ export async function getClaudeModel(): Promise<string> {
   return file.claudeModel ?? ''
 }
 
+/** The Claude Code model a chat runs on: its own, the orchestrator's for a conductor, else the setting. */
+export async function claudeModelFor(chatId: string | undefined): Promise<string> {
+  const file = await loadSettingsFile()
+  const chat = chatId ? await readChat(chatId) : null
+  return chat?.model || (chat?.conductor && file.orchestratorModel) || file.claudeModel || ''
+}
+
+export async function getSubagentModel(): Promise<string> {
+  const file = await loadSettingsFile()
+  return file.subagentModel ?? ''
+}
+
 export async function getEffort(): Promise<ReasoningEffort | null> {
   const file = await loadSettingsFile()
   return file.effort || null
@@ -432,6 +452,8 @@ export async function updateSettings(input: {
   voice?: Partial<VoiceSettings>
   defaultAgent?: ChatAgent
   claudeModel?: string
+  orchestratorModel?: string
+  subagentModel?: string
 }): Promise<PublicSettings> {
   await withLock(settingsPath(), async () => {
     const current = await loadSettingsFile()
@@ -439,6 +461,9 @@ export async function updateSettings(input: {
       defaultAgent:
         input.defaultAgent !== undefined ? normalizeChatAgent(input.defaultAgent) : current.defaultAgent,
       claudeModel: input.claudeModel !== undefined ? input.claudeModel.trim() : current.claudeModel,
+      orchestratorModel:
+        input.orchestratorModel !== undefined ? input.orchestratorModel.trim() : current.orchestratorModel,
+      subagentModel: input.subagentModel !== undefined ? input.subagentModel.trim() : current.subagentModel,
       apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
       model: input.model?.trim() || current.model || DEFAULT_MODEL,
       effort:
@@ -685,6 +710,8 @@ export async function createChat(
     id?: string
     title?: string
     agent?: ChatAgent
+    model?: string
+    parentChatId?: string
     grokSessionId?: string | null
     messages?: Chat['messages']
   }
@@ -700,6 +727,8 @@ export async function createChat(
     projectId,
     title: input?.title ?? 'New chat',
     agent: input?.agent ?? (await getDefaultAgent()),
+    model: input?.model || undefined,
+    parentChatId: input?.parentChatId,
     grokSessionId: input?.grokSessionId ?? null,
     createdAt: timestamp,
     updatedAt: timestamp,

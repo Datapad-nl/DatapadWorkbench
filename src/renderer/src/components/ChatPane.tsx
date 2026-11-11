@@ -26,6 +26,7 @@ import {
   slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
+import { conductorPrompt } from '../../../shared/conductor'
 import { plainReply } from '../../../shared/steps'
 import {
   chatAgentLabel,
@@ -64,6 +65,8 @@ type SlashRun = {
   chatId: string
   projectId: string
   agent: ChatAgent
+  /** The model Settings fixes for every subagent. Empty lets the conductor pick. */
+  workerModel: string
   title: string
   sessionHint: string | null
   messages: Message[]
@@ -165,6 +168,11 @@ async function runSlash(input: SlashRun): Promise<string | null> {
     case 'delete':
       if (!confirm(`Delete “${input.title}”?`)) return null
       await input.deleteChat(input.chatId)
+      return null
+    case 'conduct':
+      if (!args) return 'Usage: /conduct <the job>'
+      await window.workbench.conductChat(input.chatId)
+      await sendSlash(input, conductorPrompt(args, input.workerModel))
       return null
     case 'model':
       if (!args) {
@@ -380,6 +388,7 @@ export function ChatPane(): React.JSX.Element {
                 chatId: activeChat.id,
                 projectId: activeChat.projectId,
                 agent: normalizeChatAgent(activeChat.agent),
+                workerModel: settings?.subagentModel ?? '',
                 title: activeChat.title,
                 sessionHint: settings
                   ? (normalizeChatAgent(activeChat.agent) === 'claude'

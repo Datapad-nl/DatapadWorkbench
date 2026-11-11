@@ -80,6 +80,7 @@ export const SLASH_COMMANDS: SlashDef[] = [
       'Run or manage this workflow:', agents: ['grok'] },
   { id: 'workflows', hint: 'List workflow runs', kind: 'prompt', prompt:
       'List active and recent workflow runs and their status.', agents: ['grok'] },
+  { id: 'conduct', aliases: ['orchestrate'], hint: 'Plan a large task and hand the work to subagents', kind: 'local', needsArgs: true },
   { id: 'btw', hint: 'Ask a side question without steering the task', kind: 'prompt', needsArgs: true, prompt:
       'Side question — answer this without dropping the main task:' },
   { id: 'feedback', hint: 'Send feedback', kind: 'prompt', prompt: 'User feedback about Datapad Workbench / Grok Build:', agents: ['grok'] },

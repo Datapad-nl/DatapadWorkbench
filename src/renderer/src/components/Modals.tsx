@@ -560,7 +560,8 @@ export function SettingsModal(): React.JSX.Element | null {
   }, [showSettings, settings?.model, settings?.effort, settings?.claudeModel])
 
   // Claude Code names the models this plan offers, and each model has its own effort levels.
-  const askClaude = showSettings && settings?.defaultAgent === 'claude'
+  // The subagent models are Claude Code's too, whichever agent new chats run on.
+  const askClaude = showSettings && (settings?.defaultAgent === 'claude' || settings?.claude.signedIn)
   useEffect(() => {
     if (!askClaude) return
     let cancelled = false
@@ -754,6 +755,44 @@ export function SettingsModal(): React.JSX.Element | null {
                   />
                 </>
               )}
+            </div>
+            <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
+              <div className="text-[12px] font-medium text-ink">Subagents</div>
+              <p className="mt-1 text-[12px] leading-5 text-muted">
+                Type /conduct and a job to make a chat the conductor: it plans, gives each task to a subagent in
+                its own chat, and checks what comes back. These are Claude Code models, and a subagent with a
+                model runs on Claude Code.
+              </p>
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                {(
+                  [
+                    ['orchestratorModel', 'Orchestrator model', 'Same as the chat'],
+                    ['subagentModel', 'Subagent model', 'Auto: the orchestrator picks']
+                  ] as const
+                ).map(([key, label, unset]) => (
+                  <div key={key} className="min-w-0">
+                    <label className="block text-[12px] text-muted">{label}</label>
+                    <select
+                      data-testid={`settings-${key}`}
+                      value={settings[key]}
+                      onChange={(event) => save({ [key]: event.target.value })}
+                      className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
+                    >
+                      <option value="">{unset}</option>
+                      {settings[key] && !claudeModels.some((option) => option.value === settings[key]) ? (
+                        <option value={settings[key]}>{settings[key]}</option>
+                      ) : null}
+                      {claudeModels
+                        .filter((option) => option.value)
+                        .map((option) => (
+                          <option key={option.value} value={option.value} title={option.description}>
+                            {option.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
             </div>
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="flex items-center justify-between gap-3">

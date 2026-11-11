@@ -131,6 +131,12 @@ export type Chat = {
   title: string
   /** Which coding agent runs this chat. Missing means Grok. */
   agent?: ChatAgent
+  /** Claude Code model of this chat. Missing means the one in Settings. */
+  model?: string
+  /** Set by /conduct: the chat plans and hands the work to workers, on the orchestrator model. */
+  conductor?: boolean
+  /** The chat that started this one with `delegate`. */
+  parentChatId?: string
   /** ACP session id of the chat's agent (Grok or Claude). */
   grokSessionId: string | null
   createdAt: string
@@ -288,6 +294,10 @@ export type PublicSettings = {
   defaultAgent: ChatAgent
   claude: ClaudeCliInfo
   claudeModel: string
+  /** Claude Code model of a conductor chat. Empty means `claudeModel`. */
+  orchestratorModel: string
+  /** Claude Code model of every worker. Empty lets the conductor pick one per task. */
+  subagentModel: string
   hasKey: boolean
   keyPreview: string | null
   model: string

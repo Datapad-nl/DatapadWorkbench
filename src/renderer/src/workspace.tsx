@@ -166,6 +166,8 @@ type WorkspaceContextValue = {
     voice?: Partial<VoiceSettings>
     defaultAgent?: ChatAgent
     claudeModel?: string
+    orchestratorModel?: string
+    subagentModel?: string
   }) => Promise<void>
 }
 
@@ -975,6 +977,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       voice?: Partial<VoiceSettings>
       defaultAgent?: ChatAgent
       claudeModel?: string
+      orchestratorModel?: string
+      subagentModel?: string
     }) => {
       const next = await window.workbench.setSettings(input)
       setSettings(
