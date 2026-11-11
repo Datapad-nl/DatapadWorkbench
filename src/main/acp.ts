@@ -101,6 +101,7 @@ export type SessionUpdate = {
     entries?: Array<{ content?: string; status?: string; priority?: string }>
     rawInput?: unknown
     rawOutput?: unknown
+    _meta?: unknown
     name?: string
     currentModeId?: string
     modeId?: string
@@ -131,6 +132,7 @@ export function contentText(content: unknown): string | null {
 }
 
 const UPDATE_LISTENERS = new Set<(update: SessionUpdate) => void>()
+const TASK_LISTENERS = new Set<(sessionId: string, message: unknown) => void>()
 const EXIT_PLAN_LISTENERS = new Set<(input: { chatId: string; sessionId: string; markdown: string }) => void>()
 const acpSessionModes = new Map<string, { current: string; available: SessionMode[] }>()
 const acpSessionCommands = new Map<string, AgentCommand[]>()
@@ -635,6 +637,15 @@ function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
     return true
   }
 
+  // Claude Code's notice that a background agent ended, asked for in `sessionRules`.
+  if (message.method === '_claude/sdkMessage') {
+    const params = message.params as { sessionId?: string; message?: { subtype?: string } } | undefined
+    if (params?.sessionId && params.message?.subtype === 'task_notification') {
+      for (const listener of TASK_LISTENERS) listener(params.sessionId, params.message)
+    }
+    return true
+  }
+
   if (message.method === 'session/request_permission') {
     void settlePermission(conn, message).catch(() => {})
     return true
@@ -839,6 +850,13 @@ export function onSessionUpdate(listener: (update: SessionUpdate) => void): () =
   }
 }
 
+export function onTaskNotification(listener: (sessionId: string, message: unknown) => void): () => void {
+  TASK_LISTENERS.add(listener)
+  return () => {
+    TASK_LISTENERS.delete(listener)
+  }
+}
+
 export async function ensureAgent(agent: ChatAgent = 'grok'): Promise<void> {
   const conn = conns[agent]
   if (conn.ready) return conn.ready
@@ -871,7 +889,11 @@ export async function ensureAgent(agent: ChatAgent = 'grok'): Promise<void> {
 /** Session rules: Grok reads `_meta.rules`, Claude Code appends a system prompt. */
 function sessionRules(agent: ChatAgent, rules: string): Record<string, unknown> {
   if (agent === 'claude') {
-    return { systemPrompt: { mode: 'append', content: [{ type: 'text', text: rules }] } }
+    return {
+      systemPrompt: { mode: 'append', content: [{ type: 'text', text: rules }] },
+      // Without this nothing says when a background agent ends.
+      _meta: { claudeCode: { emitRawSDKMessages: [{ type: 'system', subtype: 'task_notification' }] } }
+    }
   }
   return { _meta: { rules } }
 }

@@ -1,4 +1,6 @@
-export type WorkerState = 'needs-you' | 'working' | 'error' | 'reported' | 'waiting'
+import type { BuiltinAgent } from '../../shared/builtinAgents'
+
+export type WorkerState = 'needs-you' | 'working' | 'error' | 'reported' | 'stopped' | 'waiting'
 
 /** Where a subagent stands, as its orchestrator's chat shows it. */
 export function workerState(input: {
@@ -14,11 +16,24 @@ export function workerState(input: {
   return input.messageCount >= 2 ? 'reported' : 'waiting'
 }
 
+/** Where one of Claude Code's own agents stands. `chatRunning` is whether the chat that started it has a turn running. */
+export function builtinAgentState(
+  agent: Pick<BuiltinAgent, 'status' | 'background'>,
+  chatRunning: boolean
+): WorkerState {
+  if (agent.status === 'done') return 'reported'
+  if (agent.status === 'error') return 'error'
+  if (agent.status === 'stopped') return 'stopped'
+  // A foreground agent lives inside the turn that started it, so it ended with that turn.
+  return agent.background || chatRunning ? 'working' : 'stopped'
+}
+
 export const WORKER_STATE_LABEL: Record<WorkerState, string> = {
   'needs-you': 'Needs you',
   working: 'Working',
   error: 'Failed',
   reported: 'Reported back',
+  stopped: 'Stopped',
   waiting: 'Not started'
 }
 
@@ -27,6 +42,7 @@ const SUMMARY_ORDER: { state: WorkerState; word: string }[] = [
   { state: 'working', word: 'working' },
   { state: 'error', word: 'failed' },
   { state: 'reported', word: 'reported back' },
+  { state: 'stopped', word: 'stopped' },
   { state: 'waiting', word: 'not started' }
 ]
 

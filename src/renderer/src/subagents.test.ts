@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { workerState, workersSummary } from './subagents'
+import { builtinAgentState, workerState, workersSummary } from './subagents'
 
 describe('workerState', () => {
   it('puts a waiting question before the running turn', () => {
@@ -21,6 +21,23 @@ describe('workerState', () => {
 
   it('has not started without an answer', () => {
     expect(workerState({ status: undefined, needsUser: false, messageCount: 0 })).toBe('waiting')
+  })
+})
+
+describe('builtinAgentState', () => {
+  it('follows the status of the agent', () => {
+    expect(builtinAgentState({ status: 'done', background: false }, true)).toBe('reported')
+    expect(builtinAgentState({ status: 'error', background: true }, false)).toBe('error')
+    expect(builtinAgentState({ status: 'stopped', background: true }, false)).toBe('stopped')
+  })
+
+  it('keeps a background agent working after the turn that started it', () => {
+    expect(builtinAgentState({ status: 'running', background: true }, false)).toBe('working')
+  })
+
+  it('stops a foreground agent with the turn that started it', () => {
+    expect(builtinAgentState({ status: 'running', background: false }, true)).toBe('working')
+    expect(builtinAgentState({ status: 'running', background: false }, false)).toBe('stopped')
   })
 })
 

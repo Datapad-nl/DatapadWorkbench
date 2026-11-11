@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { chatAgentLabel, normalizeChatAgent, type Chat, type ChatSummary, type Message } from '../../../shared/types'
+import type { BuiltinAgent } from '../../../shared/builtinAgents'
 import { replySteps } from '../../../shared/steps'
 import { useChatsProgress } from '../progress'
-import { WORKER_STATE_LABEL, workerState, workersSummary, type WorkerState } from '../subagents'
+import { WORKER_STATE_LABEL, builtinAgentState, workerState, workersSummary, type WorkerState } from '../subagents'
 import { useStreamStatuses, useStreams, useWorkspace } from '../workspace'
 import { AgentReply } from './AgentReply'
 import { Icon } from './icons'
@@ -14,7 +15,12 @@ function clip(text: string, max: number): string {
 
 function StateMark({ state }: { state: WorkerState }): React.JSX.Element {
   if (state === 'reported') return <Icon name="check" size={12} className="text-ok" />
-  const tone = state === 'working' ? 'streaming-dot bg-accent' : state === 'waiting' ? 'bg-faint' : 'bg-danger'
+  const tone =
+    state === 'working'
+      ? 'streaming-dot bg-accent'
+      : state === 'waiting' || state === 'stopped'
+        ? 'bg-faint'
+        : 'bg-danger'
   return <span className={`m-[3px] h-1.5 w-1.5 shrink-0 rounded-full ${tone}`} />
 }
 
@@ -23,6 +29,7 @@ const NODE_TONE: Record<WorkerState, string> = {
   'needs-you': 'bg-danger',
   error: 'bg-danger',
   reported: 'bg-ok',
+  stopped: 'bg-faint',
   waiting: 'bg-faint'
 }
 
@@ -31,6 +38,9 @@ const LINK_TOP = 26
 const LINK_BOTTOM = 70
 
 type Pulse = { id: number; workerId: string; back: boolean }
+
+/** A subagent as the map draws it: a chat of its own, or one of Claude Code's own agents. */
+type MapNode = { id: string; title: string; model: string }
 
 /**
  * The orchestrator above its subagents, with a link to each. A dot runs down a link when
@@ -43,7 +53,7 @@ function LinkMap({
   orchestrating,
   orchestratorModel
 }: {
-  workers: ChatSummary[]
+  workers: MapNode[]
   states: WorkerState[]
   orchestrating: boolean
   orchestratorModel: string
@@ -154,9 +164,7 @@ function LinkMap({
           <div key={worker.id} className="flex min-w-0 flex-col items-center gap-1 px-1" title={worker.title}>
             <span className={`h-2 w-2 rounded-full ${NODE_TONE[states[index]]}`} />
             <span className="max-w-full truncate text-[11px] text-muted">{worker.title}</span>
-            <span className="-mt-1 max-w-full truncate text-[10.5px] text-faint">
-              {worker.model || chatAgentLabel(normalizeChatAgent(worker.agent))}
-            </span>
+            <span className="-mt-1 max-w-full truncate text-[10.5px] text-faint">{worker.model}</span>
           </div>
         ))}
       </div>
@@ -316,6 +324,83 @@ function WorkerRow({
   )
 }
 
+/** Claude Code's own agents in this chat, kept up to date. */
+function useBuiltinAgents(chatId: string): BuiltinAgent[] {
+  const [found, setFound] = useState<{ chatId: string; agents: BuiltinAgent[] }>({ chatId, agents: [] })
+  useEffect(() => {
+    let cancel = false
+    let live = false
+    void window.workbench.getBuiltinAgents(chatId).then((agents) => {
+      if (!cancel && !live) setFound({ chatId, agents })
+    })
+    const off = window.workbench.onBuiltinAgents((feed) => {
+      if (feed.chatId !== chatId) return
+      live = true
+      setFound(feed)
+    })
+    return () => {
+      cancel = true
+      off()
+    }
+  }, [chatId])
+  return found.chatId === chatId ? found.agents : []
+}
+
+/** One of Claude Code's own agents. It has no chat: the task and the report are all it said. */
+function BuiltinAgentRow({ agent, state }: { agent: BuiltinAgent; state: WorkerState }): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const line =
+    state === 'working'
+      ? agent.doing || 'Working'
+      : agent.report
+        ? clip(replySteps(agent.report).at(-1) ?? '', 160)
+        : WORKER_STATE_LABEL[state]
+  return (
+    <li className="border-t border-line py-2 first:border-t-0" data-testid="subagent-row">
+      <button
+        type="button"
+        aria-expanded={open}
+        className="flex w-full min-w-0 items-start gap-2 text-left"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon name={open ? 'chevronDown' : 'chevron'} size={12} className="mt-1 text-faint" />
+        <span className="mt-1 flex h-3 w-3 shrink-0 items-center justify-center">
+          <StateMark state={state} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="truncate text-[13px] font-medium text-ink">{agent.title}</span>
+            {agent.model ? (
+              <span className="shrink-0 rounded-full border border-line px-1.5 text-[10.5px] leading-4 text-muted">
+                {agent.model}
+              </span>
+            ) : null}
+          </span>
+          <span
+            className={`block truncate text-[12.5px] leading-5 ${state === 'error' ? 'text-danger' : 'text-muted'}`}
+          >
+            {line}
+          </span>
+        </span>
+      </button>
+      {open ? (
+        <ol className="mt-2 flex flex-col gap-3 border-l border-line pl-3" data-testid="subagent-thread">
+          {agent.task ? (
+            <ThreadEntry who="Orchestrator" what="Task" fromOrchestrator>
+              <div className="whitespace-pre-wrap break-words">{agent.task}</div>
+            </ThreadEntry>
+          ) : null}
+          {agent.report ? (
+            <ThreadEntry who="Subagent" what={state === 'error' ? 'Error' : 'Report'}>
+              <AgentReply text={agent.report} chatId={agent.id} />
+            </ThreadEntry>
+          ) : null}
+        </ol>
+      ) : null}
+    </li>
+  )
+}
+
 /**
  * The subagents of an orchestrator chat: how many there are, what each is doing now,
  * and, opened, what it and the orchestrator said to each other.
@@ -341,7 +426,20 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
     })
   )
   const doing = useChatsProgress(workers.filter((_, index) => states[index] === 'working').map((worker) => worker.id))
-  if (workers.length === 0) return null
+  const orchestrating = statuses[chatId]?.status === 'streaming'
+  const agents = useBuiltinAgents(chatId)
+  const agentStates = agents.map((agent) => builtinAgentState(agent, orchestrating))
+  const count = workers.length + agents.length
+  if (count === 0) return null
+  const allStates = [...states, ...agentStates]
+  const nodes = [
+    ...workers.map((worker) => ({
+      id: worker.id,
+      title: worker.title,
+      model: worker.model || chatAgentLabel(normalizeChatAgent(worker.agent))
+    })),
+    ...agents.map((agent) => ({ id: agent.id, title: agent.title, model: agent.model ?? '' }))
+  ]
 
   return (
     <div className="mx-auto mb-2 w-[min(720px,100%-40px)] shrink-0" data-testid="subagents-panel">
@@ -354,16 +452,16 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
         >
           <Icon name={open ? 'chevronDown' : 'chevron'} size={12} className="text-faint" />
           <span className="text-[12.5px] font-semibold text-ink">
-            {workers.length} {workers.length === 1 ? 'subagent' : 'subagents'}
+            {count} {count === 1 ? 'subagent' : 'subagents'}
           </span>
-          <span className="truncate text-[12.5px] text-muted">{workersSummary(states)}</span>
+          <span className="truncate text-[12.5px] text-muted">{workersSummary(allStates)}</span>
         </button>
         {open ? (
           <div className="max-h-[42vh] overflow-y-auto border-t border-line px-3">
             <LinkMap
-              workers={workers}
-              states={states}
-              orchestrating={statuses[chatId]?.status === 'streaming'}
+              workers={nodes}
+              states={allStates}
+              orchestrating={orchestrating}
               orchestratorModel={orchestratorModel}
             />
             <ul className="border-t border-line">
@@ -375,6 +473,9 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
                   doing={doing[worker.id] ?? ''}
                   error={statuses[worker.id]?.error ?? null}
                 />
+              ))}
+              {agents.map((agent, index) => (
+                <BuiltinAgentRow key={agent.id} agent={agent} state={agentStates[index]} />
               ))}
             </ul>
           </div>

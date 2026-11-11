@@ -7,6 +7,9 @@ import { ORCHESTRATOR, change, reset } from './workspace'
 // The panel asks the app for the activity feed. Here the script is the feed.
 const feed = new Set<(update: unknown) => void>()
 const steps = new Map<string, unknown>()
+// One of the four is Claude Code's own agent, which has no chat.
+const builtin = new Map<string, Record<string, unknown>>()
+const builtinFeed = new Set<(update: unknown) => void>()
 Object.assign(window, {
   workbench: {
     getActivity: async () => ({ events: [...steps.values()] }),
@@ -15,6 +18,11 @@ Object.assign(window, {
       return () => feed.delete(listener)
     },
     getChat: async () => null,
+    getBuiltinAgents: async () => [...builtin.values()],
+    onBuiltinAgents: (listener: (update: unknown) => void) => {
+      builtinFeed.add(listener)
+      return () => builtinFeed.delete(listener)
+    },
     openMedia: async () => {}
   }
 })
@@ -45,6 +53,12 @@ function say(chatId: string, role: 'user' | 'assistant', content: string): void 
         : worker
     )
   }))
+}
+
+/** Claude Code's own agent starts, moves on or reports. */
+function agent(id: string, patch: Record<string, unknown>): void {
+  builtin.set(id, { id, model: null, task: '', background: true, status: 'running', doing: '', report: '', ...builtin.get(id), ...patch })
+  builtinFeed.forEach((listener) => listener({ chatId: ORCHESTRATOR, agents: [...builtin.values()] }))
 }
 
 /** The orchestrator hands a task to a new subagent. */
@@ -84,7 +98,10 @@ const SCRIPT: [number, () => void][] = [
   [2600, () => doing('b', 'Read src/renderer/src/subagents.ts')],
   [3300, () => delegate('c', 'Rename the settings keys', 'haiku', 'Rename subagentModel to workerModel in the docs only. Do not touch code. Report the files you changed.')],
   [3500, () => doing('c', 'Search "subagentModel" in docs/')],
+  [3900, () => agent('d', { title: 'Find the draft releases', model: 'claude-haiku-5-5', task: 'List the releases that are still drafts with gh and report their tags.' })],
   [4200, () => stream(ORCHESTRATOR, 'idle')],
+  [5000, () => agent('d', { doing: 'gh release list --limit 20' })],
+  [7800, () => agent('d', { status: 'done', report: 'No release is a draft now. The last one that was, `v0.1.15`, is published.' })],
   [4600, () => doing('a', 'Read electron-builder.yml')],
   [5200, () => doing('b', 'Write src/renderer/src/subagents.test.ts')],
   [5800, () => doing('c', 'Edit docs/agent-tools.md')],
@@ -113,6 +130,8 @@ function Preview(): React.JSX.Element {
   const [run, setRun] = useState(0)
   useEffect(() => {
     reset()
+    builtin.clear()
+    builtinFeed.forEach((listener) => listener({ chatId: ORCHESTRATOR, agents: [] }))
     const timers = SCRIPT.map(([delay, step]) => window.setTimeout(step, delay))
     timers.push(window.setTimeout(() => setRun((value) => value + 1), LENGTH))
     return () => timers.forEach((timer) => window.clearTimeout(timer))
@@ -121,7 +140,7 @@ function Preview(): React.JSX.Element {
   return (
     <div className="flex h-full select-text flex-col overflow-hidden bg-canvas">
       <div className="mx-auto flex w-[min(720px,100%-40px)] items-center justify-between py-3 text-[12px] text-faint">
-        <span>Preview: a scripted job with three subagents. It repeats.</span>
+        <span>Preview: a scripted job with four subagents, the last one Claude Code's own agent. It repeats.</span>
         <button
           type="button"
           className="rounded-[8px] px-2 py-1 text-muted hover:bg-hover hover:text-ink"

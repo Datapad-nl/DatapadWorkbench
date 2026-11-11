@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { BuiltinAgent, BuiltinAgentsFeed } from '../shared/builtinAgents'
 import type { McpServers } from '../shared/mcp'
 import type { RegistrySearchResult } from '../shared/mcpRegistry'
 import type { ThemeFile, ThemeSummary } from '../shared/theme'
@@ -185,6 +186,14 @@ const api = {
     ipcRenderer.on('index:event', wrapped)
     return () => {
       ipcRenderer.removeListener('index:event', wrapped)
+    }
+  },
+  getBuiltinAgents: (chatId: string) => ipcRenderer.invoke('builtinAgents:get', chatId) as Promise<BuiltinAgent[]>,
+  onBuiltinAgents: (listener: (feed: BuiltinAgentsFeed) => void) => {
+    const wrapped = (_event: unknown, payload: BuiltinAgentsFeed): void => listener(payload)
+    ipcRenderer.on('builtinAgents:event', wrapped)
+    return () => {
+      ipcRenderer.removeListener('builtinAgents:event', wrapped)
     }
   },
   getActivity: () => ipcRenderer.invoke('activity:get') as Promise<ActivitySnapshot>,

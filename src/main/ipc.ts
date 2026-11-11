@@ -23,6 +23,7 @@ import {
   getActivitySnapshot,
   startActivityBridge
 } from './activity'
+import { getBuiltinAgents, startBuiltinAgentsBridge } from './builtinAgents'
 import {
   cancelBrowserAnnotate,
   clearBrowserData,
@@ -199,6 +200,7 @@ export function registerIpc(): void {
   )
   registerChatTools({ send: sendTurn, emit, isStreaming })
   startActivityBridge()
+  startBuiltinAgentsBridge()
   watchAttention()
   onIndexChange((index) => {
     emitIndex({ type: 'status', projectId: index.projectId, index })
@@ -629,6 +631,8 @@ export function registerIpc(): void {
   ipcMain.handle('activity:get', async () => {
     return getActivitySnapshot()
   })
+
+  ipcMain.handle('builtinAgents:get', (_event, chatId: string) => getBuiltinAgents(String(chatId ?? '')))
 
   ipcMain.handle('activity:clear', async () => {
     return clearActivity()
