@@ -33,6 +33,8 @@ calling chat.
 - [x] Optional separate git worktree for the child, removed when it is unchanged.
 - [x] `delegate` takes a `model` for the child, so a small, fast model can do a simple job.
       Settings can fix one model for every child ("Subagent model").
+- [x] Settings caps how many children of one chat run at the same time ("Most subagents at
+      once", 4 unless changed). `delegate` refuses the next one until a child reports back.
 - [x] `nudge`: send a child back to its task with a follow-up message and wait again.
 - [x] `/conduct <job>`: the chat becomes the conductor. It plans, gives each task to its own
       child, checks what comes back, and runs on the "Orchestrator model" from Settings.

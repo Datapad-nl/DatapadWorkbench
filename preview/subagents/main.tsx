@@ -51,7 +51,7 @@ function say(chatId: string, role: 'user' | 'assistant', content: string): void 
 function delegate(id: string, title: string, model: string, task: string): void {
   change((current) => ({
     ...current,
-    workers: [...current.workers, { id, title, model, createdAt: at(), updatedAt: at(), messages: [] }]
+    workers: [...current.workers, { id, title, model, agent: 'claude', createdAt: at(), updatedAt: at(), messages: [] }]
   }))
   say(id, 'user', task)
   stream(id, 'streaming')

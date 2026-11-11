@@ -26,7 +26,7 @@ import {
   slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
-import { conductorPrompt } from '../../../shared/conductor'
+import { DEFAULT_MAX_SUBAGENTS, conductorPrompt } from '../../../shared/conductor'
 import { plainReply } from '../../../shared/steps'
 import {
   chatAgentLabel,
@@ -68,6 +68,7 @@ type SlashRun = {
   agent: ChatAgent
   /** The model Settings fixes for every subagent. Empty lets the conductor pick. */
   workerModel: string
+  maxWorkers: number
   title: string
   sessionHint: string | null
   messages: Message[]
@@ -173,7 +174,7 @@ async function runSlash(input: SlashRun): Promise<string | null> {
     case 'conduct':
       if (!args) return 'Usage: /conduct <the job>'
       await window.workbench.conductChat(input.chatId)
-      await sendSlash(input, conductorPrompt(args, input.workerModel))
+      await sendSlash(input, conductorPrompt(args, input.workerModel, input.maxWorkers))
       return null
     case 'model':
       if (!args) {
@@ -391,6 +392,7 @@ export function ChatPane(): React.JSX.Element {
                 projectId: activeChat.projectId,
                 agent: normalizeChatAgent(activeChat.agent),
                 workerModel: settings?.subagentModel ?? '',
+                maxWorkers: settings?.maxSubagents ?? DEFAULT_MAX_SUBAGENTS,
                 title: activeChat.title,
                 sessionHint: settings
                   ? (normalizeChatAgent(activeChat.agent) === 'claude'

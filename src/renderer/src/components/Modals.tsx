@@ -18,6 +18,7 @@ import {
   type VoiceModelStatus,
   VOICE_LANGUAGES
 } from '../../../shared/types'
+import { MAX_SUBAGENTS_CHOICES } from '../../../shared/conductor'
 import { useVoice } from '../voice/VoiceProvider'
 import {
   isSpeaking,
@@ -792,6 +793,24 @@ export function SettingsModal(): React.JSX.Element | null {
                     </select>
                   </div>
                 ))}
+                <div className="min-w-0">
+                  <label className="block text-[12px] text-muted">Most subagents at once</label>
+                  <select
+                    data-testid="settings-maxSubagents"
+                    value={settings.maxSubagents}
+                    onChange={(event) => save({ maxSubagents: Number(event.target.value) })}
+                    className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
+                  >
+                    {MAX_SUBAGENTS_CHOICES.map((count) => (
+                      <option key={count} value={count}>
+                        {count}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <p className="min-w-0 self-end pb-2 text-[12px] leading-5 text-muted">
+                  A chat that reaches this waits for a subagent to report back before it starts the next.
+                </p>
               </div>
             </div>
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { Chat, ChatSummary, Message } from '../../../shared/types'
+import { chatAgentLabel, normalizeChatAgent, type Chat, type ChatSummary, type Message } from '../../../shared/types'
 import { replySteps } from '../../../shared/steps'
 import { useChatsProgress } from '../progress'
 import { WORKER_STATE_LABEL, workerState, workersSummary, type WorkerState } from '../subagents'
@@ -40,11 +40,13 @@ type Pulse = { id: number; workerId: string; back: boolean }
 function LinkMap({
   workers,
   states,
-  orchestrating
+  orchestrating,
+  orchestratorModel
 }: {
   workers: ChatSummary[]
   states: WorkerState[]
   orchestrating: boolean
+  orchestratorModel: string
 }): React.JSX.Element {
   const box = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
@@ -96,6 +98,7 @@ function LinkMap({
         <span className="flex h-6 items-center gap-1.5 rounded-full border border-accent-line bg-accent-soft px-2.5 text-[11.5px] font-medium text-ink">
           <span className={`h-1.5 w-1.5 rounded-full bg-accent ${orchestrating ? 'streaming-dot' : ''}`} />
           Orchestrator
+          <span className="font-normal text-muted">{orchestratorModel}</span>
         </span>
       </div>
       {width > 0 ? (
@@ -151,6 +154,9 @@ function LinkMap({
           <div key={worker.id} className="flex min-w-0 flex-col items-center gap-1 px-1" title={worker.title}>
             <span className={`h-2 w-2 rounded-full ${NODE_TONE[states[index]]}`} />
             <span className="max-w-full truncate text-[11px] text-muted">{worker.title}</span>
+            <span className="-mt-1 max-w-full truncate text-[10.5px] text-faint">
+              {worker.model || chatAgentLabel(normalizeChatAgent(worker.agent))}
+            </span>
           </div>
         ))}
       </div>
@@ -315,7 +321,13 @@ function WorkerRow({
  * and, opened, what it and the orchestrator said to each other.
  */
 export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Element | null {
-  const { chats, permissions, questions } = useWorkspace()
+  const { chats, chatsById, permissions, questions, settings } = useWorkspace()
+  const self = chatsById[chatId]
+  // The same order the app picks the model in: the chat's own, the orchestrator model, the default.
+  const orchestratorModel =
+    normalizeChatAgent(self?.agent) === 'claude'
+      ? self?.model || (self?.conductor && settings?.orchestratorModel) || settings?.claudeModel || 'Claude'
+      : 'Grok'
   const statuses = useStreamStatuses()
   const [open, setOpen] = useState(true)
   const workers = chats
@@ -348,7 +360,12 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
         </button>
         {open ? (
           <div className="max-h-[42vh] overflow-y-auto border-t border-line px-3">
-            <LinkMap workers={workers} states={states} orchestrating={statuses[chatId]?.status === 'streaming'} />
+            <LinkMap
+              workers={workers}
+              states={states}
+              orchestrating={statuses[chatId]?.status === 'streaming'}
+              orchestratorModel={orchestratorModel}
+            />
             <ul className="border-t border-line">
               {workers.map((worker, index) => (
                 <WorkerRow

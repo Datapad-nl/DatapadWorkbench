@@ -298,6 +298,8 @@ export type PublicSettings = {
   orchestratorModel: string
   /** Claude Code model of every worker. Empty lets the conductor pick one per task. */
   subagentModel: string
+  /** How many workers of one chat run at the same time. */
+  maxSubagents: number
   hasKey: boolean
   keyPreview: string | null
   model: string

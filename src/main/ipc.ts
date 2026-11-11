@@ -545,6 +545,7 @@ export function registerIpc(): void {
         claudeModel?: string
         orchestratorModel?: string
         subagentModel?: string
+        maxSubagents?: number
       }
     ) => {
       const settings = await updateSettings(input)

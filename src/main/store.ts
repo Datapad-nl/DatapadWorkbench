@@ -1,3 +1,4 @@
+import { normalizeMaxSubagents } from '../shared/conductor'
 import { app } from 'electron'
 import { mkdir, readdir, rm, stat } from 'fs/promises'
 import { join, normalize } from 'path'
@@ -43,6 +44,8 @@ type SettingsFile = {
   orchestratorModel?: string
   /** Claude Code model of every worker. Empty lets the conductor pick one per task. */
   subagentModel?: string
+  /** How many workers of one chat run at the same time. */
+  maxSubagents?: number
   apiKey: string
   model: string
   effort: ReasoningEffort | ''
@@ -257,6 +260,7 @@ async function loadSettingsFile(): Promise<SettingsFile> {
     claudeModel: file.claudeModel?.trim() ?? '',
     orchestratorModel: file.orchestratorModel?.trim() ?? '',
     subagentModel: file.subagentModel?.trim() ?? '',
+    maxSubagents: normalizeMaxSubagents(file.maxSubagents),
     apiKey: file.apiKey ?? '',
     model: file.model || DEFAULT_MODEL,
     effort: normalizeReasoningEffort(file.effort) ?? '',
@@ -352,6 +356,7 @@ export async function getPublicSettings(): Promise<PublicSettings> {
     claudeModel: file.claudeModel ?? '',
     orchestratorModel: file.orchestratorModel ?? '',
     subagentModel: file.subagentModel ?? '',
+    maxSubagents: normalizeMaxSubagents(file.maxSubagents),
     cliChecking
   }
   if (signedIn) {
@@ -440,6 +445,11 @@ export async function getSubagentModel(): Promise<string> {
   return file.subagentModel ?? ''
 }
 
+export async function getMaxSubagents(): Promise<number> {
+  const file = await loadSettingsFile()
+  return normalizeMaxSubagents(file.maxSubagents)
+}
+
 export async function getEffort(): Promise<ReasoningEffort | null> {
   const file = await loadSettingsFile()
   return file.effort || null
@@ -454,6 +464,7 @@ export async function updateSettings(input: {
   claudeModel?: string
   orchestratorModel?: string
   subagentModel?: string
+  maxSubagents?: number
 }): Promise<PublicSettings> {
   await withLock(settingsPath(), async () => {
     const current = await loadSettingsFile()
@@ -464,6 +475,8 @@ export async function updateSettings(input: {
       orchestratorModel:
         input.orchestratorModel !== undefined ? input.orchestratorModel.trim() : current.orchestratorModel,
       subagentModel: input.subagentModel !== undefined ? input.subagentModel.trim() : current.subagentModel,
+      maxSubagents:
+        input.maxSubagents !== undefined ? normalizeMaxSubagents(input.maxSubagents) : current.maxSubagents,
       apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
       model: input.model?.trim() || current.model || DEFAULT_MODEL,
       effort:

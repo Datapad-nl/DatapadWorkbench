@@ -168,6 +168,7 @@ type WorkspaceContextValue = {
     claudeModel?: string
     orchestratorModel?: string
     subagentModel?: string
+    maxSubagents?: number
   }) => Promise<void>
 }
 
@@ -979,6 +980,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       claudeModel?: string
       orchestratorModel?: string
       subagentModel?: string
+      maxSubagents?: number
     }) => {
       const next = await window.workbench.setSettings(input)
       setSettings(

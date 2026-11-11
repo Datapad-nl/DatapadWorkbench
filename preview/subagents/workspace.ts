@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
 type Message = { id: string; role: 'user' | 'assistant'; content: string; createdAt: string }
-type Worker = { id: string; title: string; model: string; createdAt: string; updatedAt: string; messages: Message[] }
+type Worker = { id: string; title: string; model: string; agent: 'claude'; createdAt: string; updatedAt: string; messages: Message[] }
 type Stream = { status: 'idle' | 'streaming' | 'error'; draft: string; error: string | null }
 
 export const ORCHESTRATOR = 'orchestrator'
@@ -44,7 +44,11 @@ export function useWorkspace(): unknown {
       parentChatId: ORCHESTRATOR,
       messageCount: worker.messages.length
     })),
-    chatsById: Object.fromEntries(workers.map((worker) => [worker.id, worker])),
+    chatsById: {
+      ...Object.fromEntries(workers.map((worker) => [worker.id, worker])),
+      [ORCHESTRATOR]: { id: ORCHESTRATOR, agent: 'claude', conductor: true, messages: [] }
+    },
+    settings: { orchestratorModel: 'opus', claudeModel: '' },
     permissions,
     questions: {},
     openChat: () => {}

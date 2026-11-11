@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Chat } from '../shared/types'
 
-const stub = vi.hoisted(() => ({ chats: new Map<string, Chat>(), subagentModel: '' }))
+const stub = vi.hoisted(() => ({ chats: new Map<string, Chat>(), subagentModel: '', maxSubagents: 4 }))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
 vi.mock('./store', () => ({
   createChat: vi.fn(),
   getChat: async (chatId: string) => structuredClone(stub.chats.get(chatId)!),
+  getMaxSubagents: async () => stub.maxSubagents,
   getSubagentModel: async () => stub.subagentModel,
   listProjects: async () => [],
   listChats: async () => [...stub.chats.values()].map((chat) => ({ ...chat, messageCount: chat.messages.length })),
@@ -102,6 +103,25 @@ describe('workers', () => {
     stub.subagentModel = 'opus'
     expect(await delegated({ model: 'haiku' })).toMatchObject({ agent: 'claude', model: 'opus' })
     expect(await delegated({ agent: 'grok' })).toMatchObject({ agent: 'grok', model: '' })
+  })
+
+  it('refuses a worker past the limit in Settings, until one has reported back', async () => {
+    let running = true
+    registerChatTools({
+      send: async (chatId) => ({ chat: stub.chats.get(chatId)!, done: Promise.resolve(stub.chats.get(chatId)!) }),
+      emit: () => undefined,
+      isStreaming: (chatId) => running && chatId !== 'boss'
+    })
+    chat('boss')
+    chat('first', { parentChatId: 'boss' })
+    chat('second', { parentChatId: 'boss' })
+    chat('elsewhere', { parentChatId: 'other' })
+    stub.subagentModel = ''
+    stub.maxSubagents = 2
+    await expect(delegated({})).rejects.toThrow('Settings allows 2 at the same time')
+    running = false
+    expect(await delegated({})).toMatchObject({ parentChatId: 'boss' })
+    stub.maxSubagents = 4
   })
 
   it('nudges only a worker of the calling chat', async () => {

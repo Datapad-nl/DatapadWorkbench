@@ -7,6 +7,7 @@ import { id, now } from "./ids";
 import {
   createChat,
   getChat,
+  getMaxSubagents,
   getSubagentModel,
   listChats,
   listProjects,
@@ -265,17 +266,37 @@ async function startRun(
   runs.set(chat.id, run);
 }
 
-export async function delegateTask(input: {
+type DelegateInput = {
   from?: unknown;
   brief?: unknown;
   agent?: unknown;
   model?: unknown;
   title?: unknown;
   worktree?: unknown;
-}): Promise<unknown> {
+};
+
+// Tasks handed out in the same turn start one after another, so each counts the ones before it.
+let delegating: Promise<unknown> = Promise.resolve();
+
+export function delegateTask(input: DelegateInput): Promise<unknown> {
+  const started = delegating.then(() => startWorker(input));
+  delegating = started.catch(() => undefined);
+  return started;
+}
+
+async function startWorker(input: DelegateInput): Promise<unknown> {
   const caller = await callerChat(input.from);
   const brief = typeof input.brief === "string" ? input.brief.trim() : "";
   if (!brief) throw new Error("Pass the brief for the other agent.");
+  const most = await getMaxSubagents();
+  const running = (await listChats()).filter(
+    (item) => item.parentChatId === caller.id && chatRunning(item.id),
+  ).length;
+  if (running >= most) {
+    throw new Error(
+      `${running} of your subagents are running, and Settings allows ${most} at the same time. Wait for one to report back, then delegate this task again.`,
+    );
+  }
   let chat = await openChat(
     caller,
     input,

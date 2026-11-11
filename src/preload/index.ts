@@ -103,6 +103,7 @@ const api = {
     claudeModel?: string
     orchestratorModel?: string
     subagentModel?: string
+    maxSubagents?: number
   }) =>
     ipcRenderer.invoke('settings:set', input),
   getVoiceModelStatus: () => ipcRenderer.invoke('voice:modelStatus') as Promise<VoiceModelStatus>,
