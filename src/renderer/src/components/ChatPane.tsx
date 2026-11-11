@@ -46,6 +46,7 @@ import { AgentReply } from './AgentReply'
 import { AgentGlyph, Icon, IconButton, type IconName } from './icons'
 import { Markdown } from './Markdown'
 import { ProjectOrientation } from './OrientationCard'
+import { SubagentsPanel } from './SubagentsPanel'
 import wordmark from '../assets/wordmark.png'
 
 const MAX_IMAGES = 6
@@ -362,6 +363,7 @@ export function ChatPane(): React.JSX.Element {
             onRewind={(checkpointId) => openRewind(activeChat.id, checkpointId)}
             onSuggest={(text) => void sendMessage(activeChat.id, text)}
           />
+          <SubagentsPanel chatId={activeChat.id} />
           <Composer
             key={activeChat.id}
             streaming={Boolean(streamingNow)}

@@ -171,3 +171,50 @@ export function useChatProgress(chatId: string | null, streaming: boolean): Prog
 
   return streaming ? now : IDLE
 }
+
+/** What each of these running chats is doing now, by chat ID. Pass only the chats that are running. */
+export function useChatsProgress(chatIds: string[]): Record<string, string> {
+  const key = chatIds.join(',')
+  const [labels, setLabels] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    if (!key) return
+    const ids = key.split(',')
+    let cancel = false
+    let reset = false
+    let events: ActivityEvent[] = []
+    const show = (): void => {
+      const next: Record<string, string> = {}
+      for (const id of ids) {
+        const running = latestRunning(events, id)
+        next[id] = running ? progressNow(running).label : 'Working'
+      }
+      setLabels((prev) => (ids.every((id) => prev[id] === next[id]) ? prev : next))
+    }
+    void window.workbench.getActivity().then((snapshot) => {
+      if (cancel || reset) return
+      const seen = new Set(events.map((event) => event.id))
+      events = [...snapshot.events.filter((event) => !seen.has(event.id)), ...events]
+      show()
+    })
+    const off = window.workbench.onActivityEvent((feed) => {
+      if (feed.type === 'reset') {
+        reset = true
+        events = feed.events
+        show()
+        return
+      }
+      const event = feed.event
+      if (!event.chatId || !ids.includes(event.chatId) || event.kind === 'turn') return
+      const index = events.findIndex((item) => item.id === event.id)
+      events = index >= 0 ? events.map((item, i) => (i === index ? event : item)) : [...events, event]
+      show()
+    })
+    return () => {
+      cancel = true
+      off()
+    }
+  }, [key])
+
+  return labels
+}
