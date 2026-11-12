@@ -9,6 +9,7 @@ import { IndexStatus } from './OrientationCard'
 
 const WIDTH_KEY = 'workbench.sidebarWidth'
 const COLLAPSED_KEY = 'workbench.collapsedProjects'
+const BLURRED_KEY = 'workbench.blurredProjects'
 const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 180
 const MAX_WIDTH = 520
@@ -19,9 +20,9 @@ function readWidth(): number {
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, raw))
 }
 
-function readCollapsed(): Record<string, boolean> {
+function readFlags(key: string): Record<string, boolean> {
   try {
-    const parsed = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '{}') as unknown
+    const parsed = JSON.parse(localStorage.getItem(key) ?? '{}') as unknown
     if (!parsed || typeof parsed !== 'object') return {}
     return parsed as Record<string, boolean>
   } catch {
@@ -72,7 +73,7 @@ function useProjectIcon(project: Project): string | null {
   return icon && icon.key === key ? icon.url : null
 }
 
-function ProjectColorButton({ project }: { project: Project }): React.JSX.Element {
+function ProjectColorButton({ project, blurred }: { project: Project; blurred: boolean }): React.JSX.Element {
   const { updateProject } = useWorkspace()
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -133,7 +134,9 @@ function ProjectColorButton({ project }: { project: Project }): React.JSX.Elemen
         ref={buttonRef}
         data-testid="project-color"
         type="button"
-        className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] text-[10.5px] font-semibold text-[#141414] active:scale-95"
+        className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] text-[10.5px] font-semibold text-[#141414] active:scale-95 ${
+          blurred ? 'blur-[3px]' : ''
+        }`}
         style={icon ? undefined : { background: color }}
         title="Change project color"
         aria-label={`Change color for ${project.name}`}
@@ -281,12 +284,16 @@ function ProjectRenameInput({
 function ProjectMenu({
   project,
   pos,
+  blurred,
   onRename,
+  onToggleBlur,
   onClose
 }: {
   project: Project
   pos: { top: number; left: number }
+  blurred: boolean
   onRename: () => void
+  onToggleBlur: () => void
   onClose: () => void
 }): React.JSX.Element {
   const { updateProject, pickFolder, deleteProject } = useWorkspace()
@@ -366,6 +373,18 @@ function ProjectMenu({
         onClick={() => void changeFolder()}
       >
         Change folder
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        data-testid="project-menu-blur"
+        className={itemClass}
+        onClick={() => {
+          onClose()
+          onToggleBlur()
+        }}
+      >
+        {blurred ? 'Unblur name and icon' : 'Blur name and icon'}
       </button>
       <div className="my-1 border-t border-line" />
       <button
@@ -582,7 +601,9 @@ export function Sidebar(): React.JSX.Element | null {
     showSidebar,
     setShowSidebar
   } = useWorkspace()
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(readCollapsed)
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readFlags(COLLAPSED_KEY))
+  // Names hidden for screen recordings; kept across restarts.
+  const [blurred, setBlurred] = useState<Record<string, boolean>>(() => readFlags(BLURRED_KEY))
   const [width, setWidth] = useState(readWidth)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ projectId: string; top: number; left: number } | null>(null)
@@ -598,6 +619,10 @@ export function Sidebar(): React.JSX.Element | null {
   useEffect(() => {
     localStorage.setItem(COLLAPSED_KEY, JSON.stringify(collapsed))
   }, [collapsed])
+
+  useEffect(() => {
+    localStorage.setItem(BLURRED_KEY, JSON.stringify(blurred))
+  }, [blurred])
 
   const newChatProjectId = activeProjectId ?? projects[0]?.id ?? null
 
@@ -631,7 +656,7 @@ export function Sidebar(): React.JSX.Element | null {
   }
 
   function openMenu(projectId: string, x: number, y: number): void {
-    setMenu({ projectId, ...clampMenuPos(x, y, 168, 112) })
+    setMenu({ projectId, ...clampMenuPos(x, y, 168, 144) })
   }
 
   function startResize(event: React.PointerEvent<HTMLDivElement>): void {
@@ -739,6 +764,7 @@ export function Sidebar(): React.JSX.Element | null {
     const limit = showAll[project.id] || needle ? projectChats.length : VISIBLE_CHATS
     const shown = projectChats.slice(0, limit)
     const hidden = projectChats.length - shown.length
+    const nameBlurred = Boolean(blurred[project.id])
     return (
       <div key={project.id} className="mb-px">
         <div
@@ -768,14 +794,14 @@ export function Sidebar(): React.JSX.Element | null {
               <Icon name="branch" size={13} />
             </span>
           ) : (
-            <ProjectColorButton project={project} />
+            <ProjectColorButton project={project} blurred={nameBlurred} />
           )}
           {renamingId === project.id ? (
             <ProjectRenameInput project={project} onDone={() => setRenamingId(null)} />
           ) : (
             <button
               className="flex h-full min-w-0 flex-1 items-center text-left"
-              title={worktree ? `${project.name} · ${project.path ?? ''}` : project.name}
+              title={nameBlurred ? undefined : worktree ? `${project.name} · ${project.path ?? ''}` : project.name}
               onClick={() => {
                 selectProject(project.id)
                 expandProject(project.id)
@@ -787,9 +813,10 @@ export function Sidebar(): React.JSX.Element | null {
               }}
             >
               <span
+                data-testid={nameBlurred ? 'project-name-blurred' : undefined}
                 className={`truncate text-[13px] ${
                   worktree ? 'text-muted' : open ? 'font-medium text-ink' : 'text-ink-2'
-                }`}
+                } ${nameBlurred ? 'blur-[5px] select-none' : ''}`}
               >
                 {project.name}
               </span>
@@ -972,7 +999,9 @@ export function Sidebar(): React.JSX.Element | null {
         <ProjectMenu
           project={menuProject}
           pos={{ top: menu.top, left: menu.left }}
+          blurred={Boolean(blurred[menuProject.id])}
           onRename={() => setRenamingId(menuProject.id)}
+          onToggleBlur={() => setBlurred((current) => ({ ...current, [menuProject.id]: !current[menuProject.id] }))}
           onClose={() => setMenu(null)}
         />
       )}
