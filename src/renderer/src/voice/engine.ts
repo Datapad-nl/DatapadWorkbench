@@ -98,9 +98,28 @@ function expandSpokenContractions(text: string): string {
     })
 }
 
+/**
+ * Inline code as it is said: a name such as `origin`, `node_modules` or `src/` is read as words,
+ * while code, commands and hashes are left out, since read out they are only noise.
+ */
+export function spokenCode(code: string): string {
+  const text = code.trim()
+  if (!text || text.length > 40 || text.split(/\s+/).length > 3) return ' '
+  if (/[(){}[\]<>=;,"'`|\\$&*!?]/.test(text)) return ' '
+  // Commit hashes and ids: a run of hex or digits mixed with letters says nothing aloud.
+  if (/^[0-9a-f]{7,}$/i.test(text) || /^(?=.*\d)(?=.*[a-z])[a-z0-9]{12,}$/i.test(text)) return ' '
+  return ` ${text
+    .split('/')
+    .filter((part) => part && !/^[0-9a-f]{7,}$/i.test(part))
+    .join(' ')
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/:\d+(?::\d+)?$/, '')} `
+}
+
 export function speakableText(markdown: string): string {
   let text = plainReply(markdown).replace(/```[\s\S]*?```/g, ' ')
-  text = text.replace(/`[^`]+`/g, ' ')
+  text = text.replace(/`([^`]+)`/g, (_span, code: string) => spokenCode(code))
   text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
   text = text.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
   text = text.replace(/^#{1,6}\s+/gm, '')
@@ -108,7 +127,7 @@ export function speakableText(markdown: string): string {
   text = text.replace(/^\s*\d+\.\s+/gm, '')
   text = text.replace(/[*_~>]+/g, '')
   text = text.replace(/\n{2,}/g, '. ')
-  text = text.replace(/\s+/g, ' ').trim()
+  text = text.replace(/\s+/g, ' ').replace(/ ([.,;:!?])/g, '$1').trim()
   text = expandSpokenContractions(text)
   if (text.length > 2500) text = `${text.slice(0, 2500).trim()}…`
   return text

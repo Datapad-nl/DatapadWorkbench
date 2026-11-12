@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 vi.mock('./supertonic', () => ({ loadSupertonic: vi.fn(), synthesize: vi.fn() }))
 vi.mock('./whisper', () => ({ getAsr: vi.fn() }))
 
-import { openLiveMicStream } from './engine'
+import { openLiveMicStream, speakableText } from './engine'
 
 type Mic = { id: string; signal: 'loud' | 'silent' | 'fails' }
 
@@ -105,5 +105,25 @@ describe('openLiveMicStream', () => {
       { id: 'b', stopped: true },
       { id: 'c', stopped: false }
     ])
+  })
+})
+
+describe('speakableText', () => {
+  it('reads names in inline code as words', () => {
+    expect(
+      speakableText('I pushed it to `origin`. The files under `src/` and `docs/`, without the linked `node_modules`, into `master`.')
+    ).toBe('I pushed it to origin. The files under src and docs, without the linked node modules, into master.')
+  })
+
+  it('reads a branch, a file and a function, without line numbers or hashes', () => {
+    expect(speakableText('On `workbench/b4476b3c`, see `ChatPane.tsx:320` and `handoffChat`.')).toBe(
+      'On workbench, see Chat Pane.tsx and handoff Chat.'
+    )
+  })
+
+  it('leaves out commit hashes, commands and code', () => {
+    expect(
+      speakableText('Committed as `a1fd985`. Run `git push -u origin HEAD` or `contexts.get(chatId)` now.')
+    ).toBe('Committed as. Run or now.')
   })
 })
