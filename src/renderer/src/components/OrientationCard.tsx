@@ -154,7 +154,7 @@ export function ProjectOrientation({
   return (
     <div
       data-testid="orientation-card"
-      className="select-text rounded-[8px] border border-line-strong bg-raised px-4 py-3.5"
+      className="corner-marks select-text rounded-[8px] border border-line-strong bg-raised px-4 py-3.5"
     >
       <div className="flex items-start justify-between gap-3">
         <div>

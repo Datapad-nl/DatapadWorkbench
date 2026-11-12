@@ -75,7 +75,7 @@ export function NewProjectModal(): React.JSX.Element | null {
 
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
-      <div className="w-[420px] rounded-2xl border border-line bg-surface p-5 shadow-2xl">
+      <div className="corner-marks w-[420px] rounded-2xl border border-line bg-surface p-5 shadow-2xl">
         <div className="text-[15px] font-semibold tracking-tight">New project</div>
         <p className="mt-1 text-[12.5px] text-muted">
           A project groups chats. Attach a local folder now, or leave it empty.
@@ -609,7 +609,7 @@ export function SettingsModal(): React.JSX.Element | null {
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
       <div
-        className={`flex flex-col rounded-2xl border border-line bg-surface p-5 shadow-2xl ${
+        className={`corner-marks flex flex-col rounded-2xl border border-line bg-surface p-5 shadow-2xl ${
           tab === 'appearance'
             ? 'h-[86vh] w-[880px]'
             : tab === 'mcp'
@@ -1193,7 +1193,7 @@ export function UsageModal(): React.JSX.Element | null {
 
   return (
     <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
-      <div className="max-h-[85vh] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface p-5 shadow-2xl">
+      <div className="corner-marks max-h-[85vh] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface p-5 shadow-2xl">
         <div className="text-[15px] font-semibold tracking-tight">Usage</div>
         {claudeFirst ? claudeSection : grokSection}
         {claudeFirst ? grokSection : claudeSection}

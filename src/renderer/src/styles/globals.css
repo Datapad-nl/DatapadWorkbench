@@ -297,3 +297,58 @@ textarea {
     clip-path: inset(0 0 0 0);
   }
 }
+
+/* The Constellation theme: what the knowledge graph has beyond its colours. */
+/* The night behind the graph, behind a chat as well. */
+:root[data-theme='constellation'] .night-pane {
+  background: radial-gradient(circle at 50% 45%, #101827, var(--color-canvas) 72%);
+}
+
+/* Menus and dialogs stand on dark glass with an ember glow. */
+:root[data-theme='constellation'] .shadow-2xl {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 0 42px rgba(255, 122, 26, 0.12),
+    inset 0 1px 0 rgba(255, 196, 120, 0.18);
+}
+
+:root[data-theme='constellation'] .bg-overlay {
+  backdrop-filter: blur(6px) saturate(140%);
+}
+
+:root[data-theme='constellation'] .cursor,
+:root[data-theme='constellation'] .streaming-dot {
+  box-shadow: 0 0 8px var(--color-accent);
+}
+
+/* Square corners everywhere, as on the graph; only dots and pills stay round. Most corners are
+   set in the components, out of reach of the radii of a theme. */
+:root[data-theme='constellation'] [class*='rounded']:not(.rounded-full) {
+  border-radius: 0;
+}
+
+/* The corner marks of the graph: a short ember bracket a little inside each corner. `corner-marks` draws them
+   on the box itself, for a box with room around what it holds. `corner-marks-over` draws them
+   over what a pane holds, and needs the pane to be positioned. */
+:root[data-theme='constellation'] .corner-marks,
+:root[data-theme='constellation'] .corner-marks-over::after {
+  /* The colour the graph strokes its own marks in. */
+  --mark: linear-gradient(rgba(255, 122, 26, 0.8), rgba(255, 122, 26, 0.8));
+  background-image: var(--mark), var(--mark), var(--mark), var(--mark), var(--mark), var(--mark), var(--mark), var(--mark);
+  background-size: 10px 1px, 1px 10px, 10px 1px, 1px 10px, 10px 1px, 1px 10px, 10px 1px, 1px 10px;
+  background-position:
+    top 6px left 6px, top 6px left 6px, top 6px right 6px, top 6px right 6px,
+    bottom 6px left 6px, bottom 6px left 6px, bottom 6px right 6px, bottom 6px right 6px;
+  background-repeat: no-repeat;
+  background-origin: border-box;
+}
+
+:root[data-theme='constellation'] .corner-marks-over::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* Below the title bar and the tabs of a pane, where the pane says how tall those are. */
+  top: var(--marks-top, 0);
+  z-index: 5;
+  pointer-events: none;
+}

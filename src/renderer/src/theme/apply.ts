@@ -6,6 +6,9 @@ export function applyTheme(theme: ThemeFile): void {
   const root = document.documentElement
   const { colors, fonts, radii } = theme
 
+  // For the effects in globals.css that belong to one theme.
+  root.dataset.theme = theme.id
+
   root.style.setProperty('--color-canvas', colors.canvas)
   root.style.setProperty('--color-sidebar', colors.sidebar)
   root.style.setProperty('--color-surface', colors.surface)

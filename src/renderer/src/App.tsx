@@ -122,7 +122,7 @@ function Shell(): React.JSX.Element {
     git: (
       <aside
         key="git"
-        className={`relative overflow-hidden border-l border-line bg-sidebar ${
+        className={`corner-marks-over relative [--marks-top:var(--spacing-titlebar)] overflow-hidden border-l border-line bg-sidebar ${
           dragging === 'git' ? '' : 'transition-[width] duration-200 ease-out'
         }`}
         style={{
@@ -149,7 +149,7 @@ function Shell(): React.JSX.Element {
     browser: (
       <aside
         key="browser"
-        className={`relative overflow-hidden border-l border-line bg-canvas ${
+        className={`corner-marks-over relative [--marks-top:var(--spacing-titlebar)] overflow-hidden border-l border-line bg-canvas ${
           dragging === 'browser' ? '' : 'transition-[width] duration-200 ease-out'
         }`}
         style={{
@@ -176,7 +176,7 @@ function Shell(): React.JSX.Element {
     activity: (
       <aside
         key="activity"
-        className={`relative overflow-hidden border-l border-line bg-sidebar ${
+        className={`corner-marks-over relative [--marks-top:var(--spacing-titlebar)] overflow-hidden border-l border-line bg-sidebar ${
           dragging === 'activity' ? '' : 'transition-[width] duration-200 ease-out'
         }`}
         style={{

@@ -271,14 +271,52 @@ export const WARM_ATELIER_THEME: ThemeFile = {
   radii: { sm: 8, md: 12, lg: 20 }
 }
 
+/** The look of the knowledge graph, for the whole app. */
+export const CONSTELLATION_THEME: ThemeFile = {
+  version: 1,
+  id: 'constellation',
+  name: 'Constellation',
+  description: 'The knowledge graph at night. Deep navy, ember lines, glow.',
+  colors: {
+    canvas: '#070a12',
+    sidebar: '#0a0e18',
+    surface: '#0e1420',
+    raised: '#151d2c',
+    line: 'rgba(255, 154, 60, 0.18)',
+    ink: '#f1ece2',
+    muted: '#9aa3b5',
+    accent: '#ff9a3c',
+    accentInk: '#070a12',
+    danger: '#e8502a',
+    active: '#182236',
+    overlay: 'rgba(4, 6, 12, 0.66)',
+    code: '#151d2c',
+    codeBlock: '#0a0e18',
+    diffAdd: '#9fe3b4',
+    diffAddBg: '#12301f',
+    diffDel: '#ffb4a8',
+    diffDelBg: '#4a1f1a',
+    scrollbar: 'rgba(255, 154, 60, 0.3)',
+    scrollbarHover: 'rgba(255, 154, 60, 0.5)'
+  },
+  fonts: {
+    sans: SYSTEM_SANS,
+    mono: SYSTEM_MONO,
+    display: SYSTEM_SANS,
+    urls: []
+  },
+  radii: { sm: 0, md: 0, lg: 0 }
+}
+
 export const BUILT_IN_THEMES: ThemeFile[] = [
   GRAPHITE_THEME,
   BRASS_CONSOLE_THEME,
   SIGNAL_NIGHT_THEME,
-  WARM_ATELIER_THEME
+  WARM_ATELIER_THEME,
+  CONSTELLATION_THEME
 ]
 
-export const DEFAULT_THEME_ID = GRAPHITE_THEME.id
+export const DEFAULT_THEME_ID = CONSTELLATION_THEME.id
 
 const builtInById = new Map(BUILT_IN_THEMES.map((theme) => [theme.id, theme]))
 

@@ -287,7 +287,7 @@ export function ChatPane(): React.JSX.Element {
   const progress = useChatProgress(activeChat?.id ?? null, Boolean(streamingNow))
 
   return (
-    <section className="flex min-w-[320px] flex-1 flex-col bg-surface">
+    <section className="night-pane corner-marks-over relative [--marks-top:calc(var(--spacing-titlebar)+2.5rem)] flex min-w-[320px] flex-1 flex-col bg-surface">
       <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line bg-canvas px-3">
         {!showSidebar && (
           <div className="flex shrink-0 items-center pl-traffic">
@@ -2418,7 +2418,7 @@ function RewindModal({
       }}
     >
       <div
-        className="w-[440px] rounded-2xl border border-line bg-surface p-5 shadow-2xl"
+        className="corner-marks w-[440px] rounded-2xl border border-line bg-surface p-5 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="text-[15px] font-semibold tracking-tight">Rewind</div>
