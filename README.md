@@ -107,7 +107,8 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Search the sidebar by project name, chat title, or anything said in a chat
 - A notification and Dock badge when a chat finishes or needs your approval while Workbench is in the background
 - Ask / Auto / Plan permission modes, including plan cards you can approve, revise, or abandon
-- Isolated git worktrees so concurrent chats on the same repo do not clobber each other
+- Isolated git worktrees so concurrent chats on the same repo do not clobber each other: a chat gets one when another chat is already working in the folder, or when you ask for an experiment
+- Chats that share a folder ask before editing a file another chat changed and has not committed: wait for that chat, edit anyway, or skip
 - Checkpoints and rewind of files plus later messages
 - First-run project briefing, Codegraph index status, and an orientation card
 

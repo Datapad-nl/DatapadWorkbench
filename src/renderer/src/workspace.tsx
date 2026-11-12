@@ -53,7 +53,10 @@ function groupByChat<T extends Pending>(items: T[]): Record<string, T[]> {
 
 function pushRequest<T extends Pending>(current: Record<string, T[]>, request: T): Record<string, T[]> {
   const queue = current[request.chatId] ?? []
-  if (queue.some((item) => item.requestId === request.requestId)) return current
+  // The same request again is the card changing, such as an edit that now waits for another chat.
+  if (queue.some((item) => item.requestId === request.requestId)) {
+    return { ...current, [request.chatId]: queue.map((item) => (item.requestId === request.requestId ? request : item)) }
+  }
   return { ...current, [request.chatId]: [...queue, request] }
 }
 
@@ -154,7 +157,7 @@ type WorkspaceContextValue = {
   stopChat: (chatId: string) => Promise<void>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
   approvePlan: (chatId: string, verdict?: PlanVerdict) => Promise<void>
-  resolvePermission: (requestId: string, decision: 'allow' | 'deny') => Promise<void>
+  resolvePermission: (requestId: string, decision: 'allow' | 'deny' | 'wait') => Promise<void>
   resolveQuestion: (
     requestId: string,
     decision: { type: 'skip' } | { type: 'submit'; answers: string[][] }
@@ -961,7 +964,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     [applyChat, sendMessage]
   )
 
-  const resolvePermission = useCallback(async (requestId: string, decision: 'allow' | 'deny') => {
+  const resolvePermission = useCallback(async (requestId: string, decision: 'allow' | 'deny' | 'wait') => {
     await window.workbench.resolvePermission(requestId, decision)
   }, [])
 

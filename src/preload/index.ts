@@ -85,7 +85,7 @@ const api = {
   getLiveState: () => ipcRenderer.invoke('chat:liveState') as Promise<ChatLiveState>,
   setChatMode: (chatId: string, mode: PermissionMode) =>
     ipcRenderer.invoke('chat:setMode', { chatId, mode }),
-  resolvePermission: (requestId: string, decision: 'allow' | 'deny') =>
+  resolvePermission: (requestId: string, decision: 'allow' | 'deny' | 'wait') =>
     ipcRenderer.invoke('chat:resolvePermission', { requestId, decision }),
   resolveQuestion: (
     requestId: string,

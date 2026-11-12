@@ -911,15 +911,15 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   // A chat that continues another works where that one worked: the handoff it opens with is no
   // new task, and the chat it came from is no neighbour to stay clear of.
   const opensHandoff = Boolean(chat.handoffFrom) && chat.messages.length <= 1
-  if (!followUp && !opensHandoff && !chat.worktreePath && project?.path) {
+  // Only before the first reply: a chat that has worked in the folder keeps its edits there.
+  const started = chat.messages.some((message) => message.role === 'assistant')
+  if (!followUp && !opensHandoff && !started && !chat.worktreePath && project?.path) {
     const siblings = (await step(turn, listChats())).filter(
       (item) => item.projectId === chat.projectId && item.id !== chat.id && item.id !== chat.handoffFrom
     )
     // Not raced against stop: a worktree it makes must be saved, or it is lost.
     const isolated = await isolateChatIfNeeded({ ...chat }, project.path, lastUser!.content, {
-      streaming: siblings.some((item) => isStreaming(item.id)),
-      worktrees: siblings.filter((item) => item.worktreePath).length,
-      chats: siblings.length
+      streaming: siblings.some((item) => !item.worktreePath && isStreaming(item.id))
     })
     if (isolated.reason) {
       const { worktreePath, worktreeBranch } = isolated.chat

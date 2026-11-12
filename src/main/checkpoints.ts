@@ -344,6 +344,11 @@ export async function snapshotTouched(chatId: string, update: SessionUpdate['upd
   await snapshotPaths(current, update)
 }
 
+/** The files the chat's running turn has changed so far; its checkpoint is saved only when the turn ends. */
+export function filesThisTurn(chatId: string): string[] {
+  return [...(active.get(chatId)?.checkpoint.files ?? [])]
+}
+
 /** Copy the files a tool will change before it is allowed to run. */
 export async function snapshotBeforeTool(chatId: string, update: SessionUpdate['update']): Promise<void> {
   await snapshotTouched(chatId, update)

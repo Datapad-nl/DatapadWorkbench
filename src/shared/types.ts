@@ -58,6 +58,19 @@ export type PermissionRequest = {
   title: string
   detail: string | null
   toolKind: string | null
+  /** Set when the edit would change files another chat in the same folder changed and has not committed. */
+  clash?: EditClash
+}
+
+export type EditClash = {
+  /** The chat that changed the files last. */
+  chatId: string
+  chatTitle: string
+  files: string[]
+  /** That chat's turn is still running, so the edit can wait for it. */
+  running: boolean
+  /** The user chose to wait; the edit goes ahead when that chat's turn ends. */
+  waiting?: boolean
 }
 
 export type UserQuestionOption = {

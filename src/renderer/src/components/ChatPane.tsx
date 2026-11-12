@@ -7,6 +7,7 @@ import type {
   ChatPullRequest,
   ChatSummary,
   Checkpoint,
+  EditClash,
   FileHit,
   FileMention,
   Message,
@@ -1286,9 +1287,10 @@ function PermissionBar({
   onDecision
 }: {
   request: PermissionRequest
-  onDecision: (decision: 'allow' | 'deny') => Promise<void>
+  onDecision: (decision: 'allow' | 'deny' | 'wait') => Promise<void>
 }): React.JSX.Element {
   const { busy, error, run } = usePending('Could not answer the request')
+  if (request.clash) return <ClashBar request={request} clash={request.clash} onDecision={onDecision} />
   return (
     <div className={`mb-3 ${CARD}`}>
       <div className="flex items-center gap-1.5 text-[11px] text-faint">
@@ -1309,6 +1311,57 @@ function PermissionBar({
         >
           Allow
         </button>
+      </div>
+    </div>
+  )
+}
+
+/** An edit to files another chat in this folder changed and has not committed. */
+function ClashBar({
+  request,
+  clash,
+  onDecision
+}: {
+  request: PermissionRequest
+  clash: EditClash
+  onDecision: (decision: 'allow' | 'deny' | 'wait') => Promise<void>
+}): React.JSX.Element {
+  const { busy, error, run } = usePending('Could not answer the request')
+  const files = clash.files.join(', ')
+  const canWait = clash.running && !clash.waiting
+  return (
+    <div className={`mb-3 ${CARD}`}>
+      <div className="flex items-center gap-1.5 text-[11px] text-faint">
+        <Icon name="shield" size={12} className="text-accent" />
+        Shared file
+      </div>
+      <div className="mt-1 text-[13px] font-semibold text-ink">{request.title}</div>
+      <div className="mt-1 text-[13px] text-muted">
+        <span className="font-mono text-[11.5px]">{files}</span> has changes from “{clash.chatTitle}” that are not
+        committed.{' '}
+        {clash.waiting
+          ? 'Waiting for that chat to finish; the edit goes ahead then.'
+          : clash.running
+            ? 'That chat is still working.'
+            : 'Commit them first, or edit anyway.'}
+      </div>
+      {error && <div className="mt-2 text-[13px] text-danger">{error}</div>}
+      <div className="mt-3 flex justify-end gap-2">
+        <button className={QUIET_BUTTON} disabled={busy} onClick={() => run(() => onDecision('deny'))}>
+          Skip
+        </button>
+        <button
+          className={canWait ? QUIET_BUTTON : PRIMARY_BUTTON}
+          disabled={busy}
+          onClick={() => run(() => onDecision('allow'))}
+        >
+          Edit anyway
+        </button>
+        {canWait && (
+          <button className={PRIMARY_BUTTON} disabled={busy} onClick={() => run(() => onDecision('wait'))}>
+            Wait for it
+          </button>
+        )}
       </div>
     </div>
   )
@@ -1669,7 +1722,7 @@ function Composer({
   agent: ChatAgent
   /** Null once the chat started, or when only one agent is signed in. */
   onAgent: ((agent: ChatAgent) => void) | null
-  onPermission: (requestId: string, decision: 'allow' | 'deny') => Promise<void>
+  onPermission: (requestId: string, decision: 'allow' | 'deny' | 'wait') => Promise<void>
   onQuestion: (
     requestId: string,
     decision: { type: 'skip' } | { type: 'submit'; answers: string[][] }

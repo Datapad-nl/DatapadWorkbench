@@ -172,26 +172,45 @@ export async function dropWorktreeIfUnchanged(
   })
 }
 
-const READ_RE =
-  /\b(explain|describe|what does|what is|how does|how do|why (is|does|do)|summarize|summary|where is|find where|show me|walk me through|don't (edit|change|touch)|do not (edit|change|write)|read only|readonly)\b/i
-const WRITE_RE =
-  /\b(implement|fix|add|create|write|edit|refactor|rename|delete|remove|migrate|update the|patch|wire|replace|extract|introduce|scaffold|build out|land|apply|make it|change the)\b/i
+/** Which of `paths` (relative to the repository folder) have uncommitted changes, new files included. */
+export async function uncommittedPaths(projectPath: string, paths: string[]): Promise<string[]> {
+  if (paths.length === 0) return []
+  const status = await runGit(projectPath, [
+    'status',
+    '--porcelain=v1',
+    '-z',
+    '--untracked-files=all',
+    '--',
+    ...paths
+  ])
+  if (status.code !== 0) return []
+  // Git names files from the top of the repository, which may sit above the project folder.
+  const prefix = (await runGit(projectPath, ['rev-parse', '--show-prefix'])).stdout.trim()
+  const changed = new Set<string>()
+  const entries = status.stdout.split('\0')
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]
+    if (entry.length < 4) continue
+    changed.add(entry.slice(3))
+    // A rename or copy is followed by the path it came from.
+    if (/[RC]/.test(entry.slice(0, 2))) index++
+  }
+  return paths.filter((path) => changed.has(prefix + path))
+}
+
 const SPIKE_RE =
   /\b(spike|prototype|experiment|try (a|this|out)|don't touch main|leave main|feature branch|isolated|worktree|sandbox)\b/i
 
-function looksMutating(prompt: string): boolean {
-  const text = prompt.trim()
-  if (!text) return false
-  if (WRITE_RE.test(text)) return true
-  if (READ_RE.test(text)) return false
-  return false
-}
-
+/**
+ * A chat gets its own worktree only when the prompt asks for an experiment, or another chat is
+ * at work in the project folder right now. Idle chats and chats in their own worktrees leave the
+ * folder alone, so they are no reason to move out of it.
+ */
 export async function isolateChatIfNeeded(
   chat: Chat,
   projectPath: string | null | undefined,
   prompt: string,
-  siblings: { streaming: boolean; worktrees: number; chats: number }
+  siblings: { streaming: boolean }
 ): Promise<{ chat: Chat; reason: string | null }> {
   if (chat.worktreePath || !projectPath) return { chat, reason: null }
   const mode = chat.mode as PermissionMode | undefined
@@ -204,10 +223,6 @@ export async function isolateChatIfNeeded(
     reason = 'This looks like an experiment — using a separate worktree.'
   } else if (siblings.streaming) {
     reason = 'Another chat is already working in this project — isolating so files do not collide.'
-  } else if (looksMutating(prompt) && siblings.worktrees > 0) {
-    reason = 'Other chats already have their own worktrees — isolating this one too.'
-  } else if (looksMutating(prompt) && siblings.chats > 0) {
-    reason = 'Another chat shares this folder — isolating so edits do not collide.'
   }
 
   if (!reason) return { chat, reason: null }

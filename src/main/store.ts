@@ -653,9 +653,50 @@ export async function getChat(chatId: string): Promise<Chat> {
   }
 }
 
+/** What the main process needs to know about the files a chat changed, without its messages. */
+export type ChatEdits = {
+  id: string
+  projectId: string
+  title: string
+  worktreePath: string | null
+  parentChatId: string | null
+  handoffFrom: string | null
+  handoffTo: string | null
+  /** Each file the chat's turns changed, relative to its folder, with the start of the last such turn. */
+  touched: Record<string, string>
+}
+
+function editsOf(chat: Chat): ChatEdits {
+  const touched: Record<string, string> = {}
+  for (const checkpoint of chat.checkpoints ?? []) {
+    for (const file of checkpoint.files) {
+      if (!touched[file] || touched[file] < checkpoint.createdAt) touched[file] = checkpoint.createdAt
+    }
+  }
+  return {
+    id: chat.id,
+    projectId: chat.projectId,
+    title: chat.title,
+    worktreePath: chat.worktreePath ?? null,
+    parentChatId: chat.parentChatId ?? null,
+    handoffFrom: chat.handoffFrom ?? null,
+    handoffTo: chat.handoffTo ?? null,
+    touched
+  }
+}
+
 // Each chat file's summary, kept until the file changes. A chat is saved by renaming a new file
 // over the old one, so a change shows as a new inode, time or size, and listing reads only those.
-const summaries = new Map<string, { ino: number; mtimeMs: number; size: number; summary: ChatSummary }>()
+const summaries = new Map<
+  string,
+  { ino: number; mtimeMs: number; size: number; summary: ChatSummary; edits: ChatEdits }
+>()
+
+/** Every chat's edits, read from the same cache as the summaries. */
+export async function listChatEdits(): Promise<ChatEdits[]> {
+  const ids = new Set((await listChats()).map((chat) => chat.id))
+  return [...summaries.values()].map((entry) => entry.edits).filter((edits) => ids.has(edits.id))
+}
 
 export async function listChats(): Promise<ChatSummary[]> {
   await mkdir(chatsDir(), { recursive: true })
@@ -686,7 +727,8 @@ export async function listChats(): Promise<ChatSummary[]> {
           worktreeBranch: chat.worktreeBranch ?? null,
           schedule: chat.schedule ?? null,
           pr: chat.pr ?? null
-        }
+        },
+        edits: editsOf(chat)
       }
       summaries.set(file, entry)
     }

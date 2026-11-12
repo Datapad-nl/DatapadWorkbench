@@ -1,4 +1,4 @@
-import type { PermissionMode, PermissionRequest } from '../shared/types'
+import type { EditClash, PermissionMode, PermissionRequest } from '../shared/types'
 import { normalizePermissionMode } from '../shared/types'
 
 export type PermissionOption = {
@@ -38,6 +38,27 @@ const pending = new Map<string, PendingAsk>()
 const promptListeners = new Set<(request: PermissionRequest) => void>()
 const settleListeners = new Set<(request: PermissionRequest) => void>()
 const denyListeners = new Set<(request: PermissionRequest) => void>()
+const updateListeners = new Set<(request: PermissionRequest) => void>()
+
+type EditGuard = {
+  /** The clash an edit would cause, or null. */
+  find: (chatId: string, toolCall: NonNullable<PermissionParams['toolCall']>) => Promise<EditClash | null>
+  isRunning: (chatId: string) => boolean
+}
+let editGuard: EditGuard | null = null
+
+/** The chat layer imports this file, so it hands its check for edits to files another chat holds in. */
+export function setEditGuard(guard: EditGuard): void {
+  editGuard = guard
+}
+
+/** The clash an edit asked for by `sessionId` would cause; null for tools that change nothing. */
+export async function findClash(sessionId: string, params: PermissionParams): Promise<EditClash | null> {
+  const tool = params.toolCall
+  const chatId = chatIdForSession(sessionId)
+  if (!editGuard || !chatId || !tool || !isMutatingTool(tool.kind, tool.title, tool.name)) return null
+  return editGuard.find(chatId, tool).catch(() => null)
+}
 
 const DENY_KIND = new Set(['edit', 'delete', 'move', 'execute', 'write'])
 const DENY_NAME = /\b(write|edit|delete|remove|replace|apply_patch|search_replace|run_terminal|bash|shell|spawn|exec)\b/i
@@ -98,6 +119,14 @@ export function onPermissionSettled(listener: (request: PermissionRequest) => vo
   settleListeners.add(listener)
   return () => {
     settleListeners.delete(listener)
+  }
+}
+
+/** A card that changed while it waits, such as an edit now waiting for another chat. */
+export function onPermissionUpdated(listener: (request: PermissionRequest) => void): () => void {
+  updateListeners.add(listener)
+  return () => {
+    updateListeners.delete(listener)
   }
 }
 
@@ -246,7 +275,8 @@ export function decidePermission(mode: PermissionMode, params: PermissionParams)
 export function askPermission(
   requestId: string,
   sessionId: string,
-  params: PermissionParams
+  params: PermissionParams,
+  clash?: EditClash | null
 ): Promise<PermissionOutcome> {
   const chatId = chatIdForSession(sessionId)
   // Nobody can be asked, so the tool does not run.
@@ -257,7 +287,8 @@ export function askPermission(
     chatId,
     title: requestTitle(params),
     detail: requestDetail(params),
-    toolKind: params.toolCall?.kind ?? params.toolCall?.name ?? null
+    toolKind: params.toolCall?.kind ?? params.toolCall?.name ?? null,
+    ...(clash ? { clash } : {})
   }
 
   return new Promise((resolve) => {
@@ -275,10 +306,34 @@ export function askPermission(
   })
 }
 
-export function resolvePermission(requestId: string, decision: 'allow' | 'deny'): boolean {
+export function resolvePermission(requestId: string, decision: 'allow' | 'deny' | 'wait'): boolean {
   const item = pending.get(requestId)
   if (!item) return false
+  if (decision === 'wait') return waitForHolder(requestId, item)
   item.resolve(outcomeFor(item.options, decision))
+  return true
+}
+
+const WAIT_POLL_MS = 1000
+
+/** Keep the card until the chat that holds the files ends its turn, then let the edit through. */
+function waitForHolder(requestId: string, item: PendingAsk): boolean {
+  const clash = item.request.clash
+  const guard = editGuard
+  if (!clash || !guard) return false
+  if (clash.waiting) return true
+  item.request = { ...item.request, clash: { ...clash, waiting: true } }
+  for (const listener of updateListeners) listener(item.request)
+  const check = (): void => {
+    // Answered another way, stopped or cancelled meanwhile.
+    if (pending.get(requestId) !== item) return
+    if (guard.isRunning(clash.chatId)) {
+      setTimeout(check, WAIT_POLL_MS)
+      return
+    }
+    item.resolve(outcomeFor(item.options, 'allow'))
+  }
+  check()
   return true
 }
 

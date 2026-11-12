@@ -13,6 +13,7 @@ import {
   chatIdForSession,
   decidePermission,
   fallbackSessionId,
+  findClash,
   isMutatingTool,
   isPlanGateTool,
   isSessionStopped,
@@ -389,13 +390,16 @@ async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
     return
   }
   const mode = modeForSession(sessionId)
-  const decision = decidePermission(mode, params)
+  let decision = decidePermission(mode, params)
   const requestId = message.id === undefined ? null : promptRequestId(conn, message.id)
+  // An edit to files another chat in the same folder changed and has not committed asks first, in any mode.
+  const clash = decision !== 'deny' && requestId ? await findClash(sessionId, params) : null
+  if (clash) decision = 'ask'
 
   if (decision === 'deny') noteDeniedPermission(sessionId, params)
   const result =
     decision === 'ask' && requestId
-      ? await askPermission(requestId, sessionId, params)
+      ? await askPermission(requestId, sessionId, params, clash)
       : outcomeFor(options, decision === 'deny' ? 'deny' : 'allow')
 
   if (message.id === undefined) return

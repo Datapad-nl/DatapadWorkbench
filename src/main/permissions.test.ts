@@ -1,18 +1,21 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   askPermission,
   bindPermissionSession,
   cancelAllPermissions,
   cancelChatPermissions,
   clearSessionStopped,
+  findClash,
   forgetChatSessions,
   isPlanGateText,
   isSessionStopped,
   markSessionStopped,
   outcomeFor,
   onPermissionSettled,
+  onPermissionUpdated,
   pendingPermissionRequests,
-  resolvePermission
+  resolvePermission,
+  setEditGuard
 } from './permissions'
 import {
   askUserQuestions,
@@ -124,5 +127,49 @@ describe('cancelling questions', () => {
     cancelChatQuestions('chat-1')
     await expect(intakeAsk).resolves.toEqual({ type: 'SkipInterview' })
     expect(pendingQuestionRequests()).toEqual([])
+  })
+})
+
+describe('edits to files another chat holds', () => {
+  const clash = { chatId: 'chat-2', chatTitle: 'Other', files: ['a.ts'], running: true }
+  const edit = { options, toolCall: { kind: 'edit', title: 'Edit a.ts', locations: [{ path: '/p/a.ts' }] } }
+
+  afterEach(() => vi.useRealTimers())
+
+  it('asks the guard only for tools that change files', async () => {
+    const find = vi.fn(async () => clash)
+    setEditGuard({ find, isRunning: () => true })
+    bindPermissionSession('s-1', 'chat-1', 'accept')
+    expect(await findClash('s-1', { options, toolCall: { kind: 'read', title: 'Read a.ts' } })).toBeNull()
+    expect(await findClash('s-1', edit)).toEqual(clash)
+    expect(find).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for the other chat to finish, then lets the edit through', async () => {
+    vi.useFakeTimers()
+    let running = true
+    setEditGuard({ find: async () => clash, isRunning: () => running })
+    bindPermissionSession('s-1', 'chat-1', 'accept')
+    const updates: unknown[] = []
+    const stop = onPermissionUpdated((request) => updates.push(request.clash))
+    const answer = askPermission('r-wait', 's-1', edit, clash)
+
+    expect(resolvePermission('r-wait', 'wait')).toBe(true)
+    expect(updates).toEqual([{ ...clash, waiting: true }])
+    expect(pendingPermissionRequests()[0].clash?.waiting).toBe(true)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(pendingPermissionRequests()).toHaveLength(1)
+
+    running = false
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(await answer).toEqual({ outcome: { outcome: 'selected', optionId: 'yes' } })
+    stop()
+  })
+
+  it('does not wait on a card without a clash', () => {
+    bindPermissionSession('s-1', 'chat-1', 'ask')
+    void askPermission('r-plain', 's-1', edit)
+    expect(resolvePermission('r-plain', 'wait')).toBe(false)
+    expect(pendingPermissionRequests()).toHaveLength(1)
   })
 })

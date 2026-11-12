@@ -85,8 +85,11 @@ import {
   onPermissionDenied,
   onPermissionPrompt,
   onPermissionSettled,
-  resolvePermission
+  onPermissionUpdated,
+  resolvePermission,
+  setEditGuard
 } from './permissions'
+import { findEditClash } from './fileClash'
 import { cancelProjectIntake, maybeStartProjectIntake, scheduleProjectIntake } from './intake'
 import { registerChatTools, stopSchedule } from './chatTools'
 import { unlinkPr } from './pullRequests'
@@ -198,6 +201,11 @@ export function registerIpc(): void {
   setMergeGuard((_projectId, chatId) =>
     isStreaming(chatId) ? 'This chat is still working. Merge once it finishes.' : null
   )
+  // Two chats in one folder: an edit to a file the other changed and has not committed asks first.
+  setEditGuard({
+    find: (chatId, toolCall) => findEditClash(chatId, toolCall, isStreaming),
+    isRunning: isStreaming
+  })
   registerChatTools({ send: sendTurn, emit, isStreaming, builtinAgents: getBuiltinAgents })
   startActivityBridge()
   startBuiltinAgentsBridge()
@@ -220,6 +228,7 @@ export function registerIpc(): void {
       requestId: request.requestId
     })
   })
+  onPermissionUpdated((request) => emit({ type: 'permission', chatId: request.chatId, request }))
   onPermissionSettled((request) => {
     emit({ type: 'permission-clear', chatId: request.chatId, requestId: request.requestId })
     emitPermissionActivity({
@@ -494,8 +503,8 @@ export function registerIpc(): void {
 
   ipcMain.handle(
     'chat:resolvePermission',
-    async (_event, input: { requestId: string; decision: 'allow' | 'deny' }) => {
-      const decision = input.decision === 'deny' ? 'deny' : 'allow'
+    async (_event, input: { requestId: string; decision: 'allow' | 'deny' | 'wait' }) => {
+      const decision = input.decision === 'deny' || input.decision === 'wait' ? input.decision : 'allow'
       return resolvePermission(input.requestId, decision)
     }
   )
