@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   Attachment,
+  Chat,
+  ChatContext,
   ChatPlan,
   ChatPullRequest,
   ChatSummary,
@@ -27,6 +29,7 @@ import {
   type SlashDef
 } from '../../../shared/slash'
 import { DEFAULT_MAX_SUBAGENTS, conductorPrompt } from '../../../shared/conductor'
+import { contextLabel, handoffAdvised, handoffPrompt } from '../../../shared/handoff'
 import { plainReply } from '../../../shared/steps'
 import {
   chatAgentLabel,
@@ -72,6 +75,8 @@ type SlashRun = {
   title: string
   sessionHint: string | null
   messages: Message[]
+  /** The chat this one handed its work to, if it did. */
+  handoffTo: string | null
   createChat: (projectId: string) => Promise<void>
   deleteChat: (chatId: string) => Promise<void>
   renameChat: (chatId: string, title: string) => Promise<void>
@@ -171,6 +176,10 @@ async function runSlash(input: SlashRun): Promise<string | null> {
       if (!confirm(`Delete “${input.title}”?`)) return null
       await input.deleteChat(input.chatId)
       return null
+    case 'handoff':
+      if (input.handoffTo) return 'This chat already handed off its work'
+      await sendSlash(input, handoffPrompt(args))
+      return null
     case 'conduct':
       if (!args) return 'Usage: /conduct <the job>'
       await window.workbench.conductChat(input.chatId)
@@ -259,7 +268,8 @@ export function ChatPane(): React.JSX.Element {
     setShowNewProject,
     showSidebar,
     setShowSidebar,
-    gitSummaries
+    gitSummaries,
+    contexts
   } = useWorkspace()
   const { stopAll } = useVoice()
   const streams = useStreamStatuses()
@@ -318,6 +328,7 @@ export function ChatPane(): React.JSX.Element {
           />
         )}
         {activeChat?.pr && <PrChip chatId={activeChat.id} pr={activeChat.pr} />}
+        {activeChat && contexts[activeChat.id] && <ContextChip context={contexts[activeChat.id]} />}
         <div className="min-w-2 flex-1" />
         <PaneToggles />
       </header>
@@ -365,6 +376,13 @@ export function ChatPane(): React.JSX.Element {
             onSuggest={(text) => void sendMessage(activeChat.id, text)}
           />
           <SubagentsPanel chatId={activeChat.id} />
+          <HandoffBar
+            chat={activeChat}
+            context={contexts[activeChat.id]}
+            busy={Boolean(streamingNow)}
+            onOpen={(chatId) => void openChat(chatId)}
+            onHandoff={() => void sendMessage(activeChat.id, handoffPrompt(''))}
+          />
           <Composer
             key={activeChat.id}
             streaming={Boolean(streamingNow)}
@@ -412,6 +430,7 @@ export function ChatPane(): React.JSX.Element {
                       .join(' · ')
                   : null,
                 messages: activeChat.messages,
+                handoffTo: activeChat.handoffTo ?? null,
                 createChat,
                 deleteChat,
                 renameChat,
@@ -481,6 +500,82 @@ function BranchChip({ branch }: { branch: string | null }): React.JSX.Element {
       <Icon name="branch" size={12} className="text-faint" />
       <span className="truncate">{branch ?? 'no git'}</span>
     </span>
+  )
+}
+
+/** How full the chat's context window is. Amber once a handoff would be cheaper. */
+function ContextChip({ context }: { context: ChatContext }): React.JSX.Element {
+  const tokens = `${Math.round(context.used / 1000)}k tokens`
+  const title = [
+    context.size
+      ? `Context: ${tokens} of ${Math.round(context.size / 1000)}k`
+      : `Context: ${tokens}`,
+    context.estimate ? 'Estimated from the last turn: Grok Build reports a turn, not a single call' : '',
+    'Every model call sends this again. /handoff continues in a new chat with a fresh context.'
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return (
+    <span
+      data-testid="chat-context"
+      title={title}
+      className={`flex h-[22px] shrink-0 items-center gap-1 rounded-md border px-1.5 font-mono text-[11px] ${
+        handoffAdvised(context) ? 'border-accent-line text-accent' : 'border-line-strong text-muted'
+      }`}
+    >
+      <span className="font-sans text-faint">ctx</span>
+      {contextLabel(context)}
+    </span>
+  )
+}
+
+/**
+ * Above the composer: where a handed-off chat went on, where a new one came from, and the offer
+ * to hand off once the context is large. Only between turns, so a turn is never cut short.
+ */
+function HandoffBar(props: {
+  chat: Chat
+  context: ChatContext | undefined
+  busy: boolean
+  onOpen: (chatId: string) => void
+  onHandoff: () => void
+}): React.JSX.Element | null {
+  const { chatsById } = useWorkspace()
+  const { chat } = props
+  const [dismissed, setDismissed] = useState<string | null>(null)
+  const linked = chat.handoffTo ?? (chat.messages.length <= 2 ? chat.handoffFrom : undefined)
+  if (linked) {
+    const forward = Boolean(chat.handoffTo)
+    const other = chatsById[linked]
+    return (
+      <div className="mx-auto mb-2 w-[min(720px,100%-40px)] shrink-0" data-testid="handoff-bar">
+        <div className="flex items-center gap-2 rounded-[8px] border border-line-strong bg-raised px-3 py-2 text-[12.5px]">
+          <span className="text-muted">
+            {forward ? 'The work goes on in a new chat with a fresh context.' : 'This chat continues an earlier one from its handoff.'}
+          </span>
+          <div className="flex-1" />
+          <button type="button" className="font-medium text-accent hover:underline" onClick={() => props.onOpen(linked)}>
+            {forward ? 'Open the new chat' : `Open ${other?.title ? `“${other.title}”` : 'the earlier chat'}`}
+          </button>
+        </div>
+      </div>
+    )
+  }
+  const key = `${chat.id}:${props.context?.size ? Math.floor((props.context.used / props.context.size) * 10) : Math.floor((props.context?.used ?? 0) / 50_000)}`
+  if (props.busy || !handoffAdvised(props.context) || dismissed === key) return null
+  return (
+    <div className="mx-auto mb-2 w-[min(720px,100%-40px)] shrink-0" data-testid="handoff-offer">
+      <div className="flex items-center gap-2 rounded-[8px] border border-accent-line bg-accent-soft px-3 py-2 text-[12.5px]">
+        <span className="text-ink">
+          The context of this chat is {contextLabel(props.context!)} full, and every turn sends all of it again.
+        </span>
+        <div className="flex-1" />
+        <button type="button" className="shrink-0 font-medium text-accent hover:underline" onClick={props.onHandoff}>
+          Continue in a new chat
+        </button>
+        <IconButton icon="close" label="Not now" onClick={() => setDismissed(key)} />
+      </div>
+    </div>
   )
 }
 

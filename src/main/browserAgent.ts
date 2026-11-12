@@ -29,6 +29,7 @@ import {
   readProjectChat,
   scheduleTask,
   startProjectChat,
+  handoffChat,
   waitForDelegate
 } from './chatTools'
 import { linkPr, prStatus, unlinkCallerPr } from './pullRequests'
@@ -107,6 +108,7 @@ const DRIVE: Record<string, (body: Record<string, unknown>) => Promise<unknown>>
   '/chats/list': (body) => listProjectChats(body.from),
   '/chats/read': (body) => readProjectChat(body),
   '/chats/start': (body) => startProjectChat(body),
+  '/chats/handoff': (body) => handoffChat(body),
   '/chats/delegate': (body) => delegateTask(body),
   '/chats/nudge': (body) => nudgeWorker(body),
   '/chats/wait': (body) => waitForDelegate(body),

@@ -124,6 +124,13 @@ export type SessionUpdate = {
     total_deliverables?: number
     totalDeliverables?: number
     availableCommands?: Array<{ name?: unknown; description?: unknown; input?: { hint?: unknown } | null }>
+    /** Context use: Claude Code's `usage_update`, Grok's `turn_completed` and auto-compact notices. */
+    used?: number
+    size?: number
+    usage?: { inputTokens?: number; modelCalls?: number }
+    tokens_used?: number
+    context_window?: number
+    tokens_after?: number
   }
 }
 

@@ -12,6 +12,7 @@ import type {
   Attachment,
   Chat,
   ChatAgent,
+  ChatContext,
   ChatEvent,
   ChatLiveState,
   ChatSummary,
@@ -118,6 +119,8 @@ type WorkspaceContextValue = {
   showKnowledge: boolean
   showSidebar: boolean
   gitSummaries: Record<string, GitSummary>
+  /** How full each chat's context window is, as its agent last reported it. */
+  contexts: Record<string, ChatContext>
   rightPaneOrder: RightPaneId[]
   setShowNewProject: (open: boolean) => void
   setShowSettings: (open: boolean | 'mcp') => void
@@ -249,6 +252,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   const [indexes, setIndexes] = useState<Record<string, ProjectIndex>>({})
   const [openChatIds, setOpenChatIds] = useState<string[]>([])
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
+  const activeChatIdRef = useRef(activeChatId)
+  activeChatIdRef.current = activeChatId
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [chatsById, setChatsById] = useState<Record<string, Chat>>({})
   const chatsByIdRef = useRef(chatsById)
@@ -345,6 +350,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const [permissionQueues, setPermissionQueues] = useState<Record<string, PermissionRequest[]>>({})
   const [questionQueues, setQuestionQueues] = useState<Record<string, UserQuestionRequest[]>>({})
+  const [contexts, setContexts] = useState<Record<string, ChatContext>>({})
   const permissions = useMemo(() => heads(permissionQueues), [permissionQueues])
   const questions = useMemo(() => heads(questionQueues), [questionQueues])
 
@@ -362,6 +368,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       }
       setPermissionQueues(groupByChat(state.permissions))
       setQuestionQueues(groupByChat(state.questions))
+      setContexts(state.contexts ?? {})
       if (!withTurns || state.turns.length === 0) return
       flushStreamBuf()
       for (const turn of state.turns) {
@@ -589,6 +596,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         case 'open':
           void openChatRef.current?.(event.chatId)
           return
+        case 'context':
+          setContexts((current) => ({ ...current, [event.chatId]: event.context }))
+          return
         case 'turn-start': {
           const known = turnsRef.current[event.chatId]
           if (known && event.turnId <= known.turnId) return
@@ -682,7 +692,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         case 'question-clear':
           setQuestionQueues((current) => dropRequest(current, event.chatId, event.requestId))
           return
-        case 'chat':
+        case 'chat': {
+          // The chat on screen handed off: follow the work to the chat that continues it.
+          const handedTo = event.chat.handoffTo
+          if (
+            handedTo &&
+            !chatsByIdRef.current[event.chatId]?.handoffTo &&
+            activeChatIdRef.current === event.chatId
+          ) {
+            queueMicrotask(() => void openChatRef.current?.(handedTo))
+          }
           // Only the chat changes here. The stream, and an error it shows, belong to the turn.
           applyChat(event.chatId, event.chat)
           setChats((current) => {
@@ -701,6 +720,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
             )
           })
           return
+        }
         default:
           // An event this window does not know yet changes nothing.
           return
@@ -1011,6 +1031,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       showKnowledge,
       showSidebar,
       gitSummaries,
+      contexts,
       rightPaneOrder,
       setShowNewProject,
       setShowSettings,
@@ -1063,6 +1084,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       showKnowledge,
       showSidebar,
       gitSummaries,
+      contexts,
       rightPaneOrder,
       setShowActivity,
       setShowBrowser,

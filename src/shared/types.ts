@@ -137,6 +137,10 @@ export type Chat = {
   conductor?: boolean
   /** The chat that started this one with `delegate`. */
   parentChatId?: string
+  /** The chat this one continues, from its handoff file. */
+  handoffFrom?: string
+  /** The chat that continues this one with a fresh context. */
+  handoffTo?: string
   /** ACP session id of the chat's agent (Grok or Claude). */
   grokSessionId: string | null
   createdAt: string
@@ -425,12 +429,23 @@ export type ChatEvent =
   | { type: 'open'; chatId: string }
   /** The slash commands the chat's agent offers, as it announced them. */
   | { type: 'commands'; chatId: string; commands: AgentCommand[] }
+  /** How full the context window of the chat's session is. */
+  | { type: 'context'; chatId: string; context: ChatContext }
 
 export type AgentCommand = { name: string; description: string; hint?: string }
 
 /** What is running right now, for a window that loads or reloads mid-turn. */
+/** Tokens the conversation takes in each model call, and the model's window when known. */
+export type ChatContext = {
+  used: number
+  size: number | null
+  /** Grok Build reports a turn's total, so `used` is the turn's average per model call. */
+  estimate?: boolean
+}
+
 export type ChatLiveState = {
   turns: Array<{ chatId: string; turnId: number; draft: string }>
+  contexts: Record<string, ChatContext>
   permissions: PermissionRequest[]
   questions: UserQuestionRequest[]
 }

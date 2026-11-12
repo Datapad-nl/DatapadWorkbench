@@ -275,6 +275,25 @@ const WORKBENCH_TOOLS = [
       },
       additionalProperties: false
     }
+  },
+  {
+    name: 'handoff',
+    description:
+      'Continue this conversation in a new chat with a fresh context, when the user or Datapad Workbench asks for a handoff. The new chat gets only `summary`, saved as a handoff file, and works in the same folder on the same agent. Stop working in this chat after the call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        summary: {
+          type: 'string',
+          description:
+            'Markdown for an agent that has seen none of this conversation: the goal, where the work stands, decisions and why, the files that matter, what is verified and what is not, and what the user asked for that still holds'
+        },
+        next: { type: 'string', description: 'Unfinished work the user asked for, which the new chat starts with. Leave out when it should wait for the user' },
+        title: { type: 'string', description: 'Sidebar title of the new chat; default: this chat\'s title' }
+      },
+      required: ['summary'],
+      additionalProperties: false
+    }
   }
 ]
 
@@ -389,6 +408,7 @@ async function handleWorkbenchTool(name, args, requestId) {
   if (name === 'list_chats') return callApi('POST', '/chats/list', { from: CHAT_ID })
   if (name === 'read_chat') return callApi('POST', '/chats/read', { ...args, from: CHAT_ID })
   if (name === 'start_chat') return callApi('POST', '/chats/start', { ...args, from: CHAT_ID })
+  if (name === 'handoff') return callApi('POST', '/chats/handoff', { ...args, from: CHAT_ID })
   if (name === 'schedule_task') return callApi('POST', '/chats/schedule', { ...args, from: CHAT_ID })
   if (name === 'cancel_schedule') return callApi('POST', '/chats/unschedule', { ...args, from: CHAT_ID })
   if (name === 'link_pr') return callApi('POST', '/pr/link', { ...args, from: CHAT_ID })

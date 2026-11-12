@@ -1,6 +1,7 @@
 import type { Chat, ChatAgent, ChatEvent } from "../shared/types";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
 import { nextCronRun } from "../shared/cron";
+import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
@@ -13,6 +14,7 @@ import {
   listChats,
   listProjects,
   mutateChat,
+  saveHandoff,
 } from "./store";
 
 /**
@@ -204,6 +206,58 @@ export async function startProjectChat(input: {
     agent: chatAgentLabel(normalizeChatAgent(chat.agent)),
     sent: Boolean(prompt),
   };
+}
+
+/**
+ * Continues the caller's work in a new chat that starts from a handoff file instead of the whole
+ * conversation. The new chat works in the same folder, on the same agent, model and mode, and
+ * takes the pull request along. The caller stays in the sidebar, pointing at the chat after it.
+ */
+export async function handoffChat(input: {
+  from?: unknown;
+  summary?: unknown;
+  next?: unknown;
+  title?: unknown;
+}): Promise<unknown> {
+  const caller = await callerChat(input.from);
+  const summary = typeof input.summary === "string" ? input.summary.trim() : "";
+  if (!summary)
+    throw new Error("summary is empty. The new chat starts with nothing else, so write the handoff there.");
+  if ((await runningSubagents(caller.id)) > 0)
+    throw new Error("Subagents of this chat are still running. Hand off once they have reported back.");
+  const next = typeof input.next === "string" ? input.next.trim() : "";
+  const file = await saveHandoff(
+    caller.id,
+    `# Handoff from "${caller.title}"\n\n${summary}${next ? `\n\n## Next\n\n${next}` : ""}\n`,
+  );
+  const created = await createChat(caller.projectId, {
+    title:
+      typeof input.title === "string" && input.title.trim()
+        ? clip(input.title.trim(), 80)
+        : caller.title,
+    agent: normalizeChatAgent(caller.agent),
+    model: caller.model,
+  });
+  const chat = await mutateChat(created.id, (latest) => {
+    latest.handoffFrom = caller.id;
+    latest.mode = caller.mode;
+    latest.prePlanMode = caller.prePlanMode;
+    latest.conductor = caller.conductor;
+    latest.worktreePath = caller.worktreePath;
+    latest.worktreeBranch = caller.worktreeBranch;
+    latest.pr = caller.pr;
+  });
+  // One chat is woken for a watched pull request: the one the work goes on in.
+  emitChat(
+    await mutateChat(caller.id, (latest) => {
+      latest.handoffTo = chat.id;
+      latest.pr = null;
+    }),
+  );
+  emitChat(chat);
+  const opening = handoffOpening({ fromTitle: caller.title, fromId: caller.id, file, summary, next });
+  (await send(chat.id, opening)).done.catch(() => {});
+  return { chatId: chat.id, title: chat.title, file };
 }
 
 /**

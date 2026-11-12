@@ -393,7 +393,11 @@ export function registerIpc(): void {
     const projects = await listProjects()
     const project = chat ? projects.find((item) => item.id === chat.projectId) : null
     let cwd = chat && project ? chatWorkingDir(chat, project.path) : project?.path ?? null
-    if (chat?.worktreePath && project?.path) {
+    // After a handoff two chats work in one worktree. It goes with the last of them.
+    const shared =
+      Boolean(chat?.worktreePath) &&
+      (await listChats()).some((item) => item.id !== chatId && item.worktreePath === chat?.worktreePath)
+    if (chat?.worktreePath && project?.path && !shared) {
       const removed = await removeChatWorktree(project.path, chat.worktreePath)
       // Deleting the chat now would leave its worktree with nothing pointing at it.
       if (!removed) {

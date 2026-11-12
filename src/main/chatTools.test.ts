@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Chat } from '../shared/types'
 
-const stub = vi.hoisted(() => ({ chats: new Map<string, Chat>(), subagentModel: '', maxSubagents: 4 }))
+const stub = vi.hoisted(() => ({
+  chats: new Map<string, Chat>(),
+  subagentModel: '',
+  maxSubagents: 4,
+  handoffs: [] as string[]
+}))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
 vi.mock('./store', () => ({
   createChat: vi.fn(),
@@ -14,10 +19,22 @@ vi.mock('./store', () => ({
     const chat = stub.chats.get(chatId)!
     change(chat)
     return structuredClone(chat)
+  },
+  saveHandoff: async (chatId: string, markdown: string) => {
+    stub.handoffs.push(markdown)
+    return `/data/handoffs/${chatId}.md`
   }
 }))
 
-import { agentHook, delegateTask, nudgeWorker, registerChatTools, startScheduler, waitForDelegate } from './chatTools'
+import {
+  agentHook,
+  delegateTask,
+  handoffChat,
+  nudgeWorker,
+  registerChatTools,
+  startScheduler,
+  waitForDelegate
+} from './chatTools'
 import type { BuiltinAgent } from '../shared/builtinAgents'
 import { createChat } from './store'
 
@@ -198,5 +215,86 @@ describe('workers', () => {
     expect(sent).toEqual([['worker', 'the test still fails']])
     expect(await waitForDelegate({ chatId: 'worker', ms: 1000 })).toMatchObject({ answer: 'did: the test still fails' })
     await expect(nudgeWorker({ from: 'boss', chat: 'other', message: 'hi' })).rejects.toThrow('not a worker')
+  })
+})
+
+describe('handoff', () => {
+  const pr = { number: 7, url: 'https://github.com/o/r/pull/7', watch: true } as unknown as Chat['pr']
+
+  function setup(): { sent: Array<[string, string]>; events: Chat[] } {
+    const sent: Array<[string, string]> = []
+    const events: Chat[] = []
+    registerChatTools({
+      send: async (chatId, content) => {
+        sent.push([chatId, content])
+        const chat = stub.chats.get(chatId)!
+        return { chat, done: Promise.resolve(chat) }
+      },
+      emit: (event) => {
+        if (event.type === 'chat') events.push(event.chat)
+      },
+      isStreaming: () => false
+    })
+    stub.chats.set('long', {
+      id: 'long',
+      projectId: 'p',
+      title: 'Move the store',
+      agent: 'claude',
+      model: 'opus',
+      mode: 'accept',
+      worktreePath: '/wt/long',
+      worktreeBranch: 'workbench/long',
+      pr,
+      messages: [{ id: 'm', role: 'user', content: 'go', createdAt: '' }]
+    } as unknown as Chat)
+    // Earlier cases may leave a queued implementation behind.
+    vi.mocked(createChat).mockReset()
+    vi.mocked(createChat).mockImplementationOnce(async (projectId, made) => {
+      stub.chats.set('fresh', { id: 'fresh', projectId, title: 'New chat', messages: [], ...made } as unknown as Chat)
+      return stub.chats.get('fresh')!
+    })
+    return { sent, events }
+  }
+
+  it('continues in a new chat that works where the old one did, and moves the PR along', async () => {
+    const { sent, events } = setup()
+    const result = await handoffChat({ from: 'long', summary: '## Goal\nSQLite store', next: 'run the migration' })
+
+    expect(result).toEqual({ chatId: 'fresh', title: 'Move the store', file: '/data/handoffs/long.md' })
+    expect(vi.mocked(createChat).mock.lastCall).toEqual(['p', { title: 'Move the store', agent: 'claude', model: 'opus' }])
+    const fresh = stub.chats.get('fresh')!
+    expect(fresh).toMatchObject({
+      handoffFrom: 'long',
+      mode: 'accept',
+      worktreePath: '/wt/long',
+      worktreeBranch: 'workbench/long',
+      pr
+    })
+    expect(stub.chats.get('long')).toMatchObject({ handoffTo: 'fresh', pr: null })
+    expect(events.map((chat) => chat.id)).toEqual(['long', 'fresh'])
+    expect(stub.handoffs.at(-1)).toBe('# Handoff from "Move the store"\n\n## Goal\nSQLite store\n\n## Next\n\nrun the migration\n')
+    expect(sent).toHaveLength(1)
+    expect(sent[0][0]).toBe('fresh')
+    expect(sent[0][1]).toContain('## Goal\nSQLite store')
+    expect(sent[0][1]).toContain('Start with this: run the migration')
+  })
+
+  it('refuses an empty handoff and leaves the chat as it was', async () => {
+    setup()
+    await expect(handoffChat({ from: 'long', summary: '  ' })).rejects.toThrow('summary is empty')
+    expect(createChat).not.toHaveBeenCalled()
+    expect(stub.chats.get('long')?.handoffTo).toBeUndefined()
+  })
+
+  it('waits for running subagents before handing off', async () => {
+    setup()
+    stub.chats.set('child', { id: 'child', projectId: 'p', parentChatId: 'long', messages: [] } as unknown as Chat)
+    registerChatTools({
+      send: async () => ({ chat: stub.chats.get('long')!, done: Promise.resolve(null) }),
+      emit: () => undefined,
+      isStreaming: (chatId) => chatId === 'child'
+    })
+    await expect(handoffChat({ from: 'long', summary: 'state' })).rejects.toThrow('Subagents of this chat are still running')
+    stub.chats.delete('child')
   })
 })

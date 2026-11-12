@@ -31,6 +31,7 @@ export const SLASH_COMMANDS: SlashDef[] = [
       'Commit the current changes. Inspect the git status and diff, write a clear commit message, and create the commit. Do not push.' },
   { id: 'review', hint: 'Review the current changes', kind: 'prompt', prompt:
       'Review the current uncommitted changes. Point out bugs, regressions, and missing tests. Do not edit files unless I ask.' },
+  { id: 'handoff', hint: 'Continue in a new chat with a fresh context', kind: 'local' },
   { id: 'compact', hint: 'Compress conversation history', kind: 'prompt', prompt:
       'Compact this conversation. Keep decisions, file paths, and unfinished work. Drop recovered dead ends.' },
   { id: 'copy', hint: 'Copy the latest reply', kind: 'local' },

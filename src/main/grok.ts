@@ -4,6 +4,7 @@ import type {
   Attachment,
   Chat,
   ChatAgent,
+  ChatContext,
   ChatEvent,
   ChatLiveState,
   ChatPlan,
@@ -14,6 +15,7 @@ import type {
   Project
 } from '../shared/types'
 import { chatAgentLabel, normalizeChatAgent, normalizePermissionMode } from '../shared/types'
+import { contextFromUpdate } from '../shared/handoff'
 import {
   abortAgent,
   acpModeIdFor,
@@ -161,6 +163,8 @@ const asideSteers = new Map<string, SteerNote[]>()
 let nextGen = 1
 const livePlans = new Map<string, ChatPlan>()
 const sessionChats = new Map<string, string>()
+/** How full each chat's context window is, as its agent last reported it. */
+const contexts = new Map<string, ChatContext>()
 const liveListeners = new Set<(event: ChatEvent) => void>()
 
 function emitLive(event: ChatEvent): void {
@@ -304,6 +308,11 @@ onExitPlanPrompt((input) => {
 
 onSessionUpdate((event) => {
   const chatId = sessionChats.get(event.sessionId)
+  const context = chatId ? contextFromUpdate(event.update, contexts.get(chatId)) : null
+  if (chatId && context) {
+    contexts.set(chatId, context)
+    emitLive({ type: 'context', chatId, context })
+  }
   if (event.update.sessionUpdate === 'available_commands_update') {
     if (chatId) emitLive({ type: 'commands', chatId, commands: sessionCommands(event.sessionId) })
     return
@@ -567,6 +576,7 @@ export function forgetChat(chatId: string): void {
     if (owner === chatId) sessionChats.delete(sessionId)
   }
   livePlans.delete(chatId)
+  contexts.delete(chatId)
   asideSteers.delete(chatId)
   forgetChatSessions(chatId)
 }
@@ -577,6 +587,7 @@ export function liveState(): ChatLiveState {
   for (const turn of turns.values()) flushDelta(turn)
   return {
     turns: [...turns.values()].map((turn) => ({ chatId: turn.chatId, turnId: turn.id, draft: turn.draft })),
+    contexts: Object.fromEntries(contexts),
     permissions: pendingPermissionRequests(),
     questions: pendingQuestionRequests()
   }
@@ -897,9 +908,12 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
         (followUp || (message.kind !== 'btw' && message.kind !== 'steer'))
     )
   if (!followUp && !lastUser) throw new Error('Message is empty')
-  if (!followUp && !chat.worktreePath && project?.path) {
+  // A chat that continues another works where that one worked: the handoff it opens with is no
+  // new task, and the chat it came from is no neighbour to stay clear of.
+  const opensHandoff = Boolean(chat.handoffFrom) && chat.messages.length <= 1
+  if (!followUp && !opensHandoff && !chat.worktreePath && project?.path) {
     const siblings = (await step(turn, listChats())).filter(
-      (item) => item.projectId === chat.projectId && item.id !== chat.id
+      (item) => item.projectId === chat.projectId && item.id !== chat.id && item.id !== chat.handoffFrom
     )
     // Not raced against stop: a worktree it makes must be saved, or it is lost.
     const isolated = await isolateChatIfNeeded({ ...chat }, project.path, lastUser!.content, {

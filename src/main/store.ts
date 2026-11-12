@@ -134,6 +134,15 @@ function chatPath(chatId: string): string {
   return join(chatsDir(), `${chatId}.json`)
 }
 
+/** Saves what a chat hands to the chat that continues it, and returns the file's path. */
+export async function saveHandoff(chatId: string, markdown: string): Promise<string> {
+  const dir = join(dataDir(), 'handoffs')
+  await mkdir(dir, { recursive: true })
+  const file = join(dir, `${chatId.replace(/[^\w-]/g, '_')}-${Date.now()}.md`)
+  await writeFileAtomic(file, markdown)
+  return file
+}
+
 async function readJson<T>(path: string, fallback: T): Promise<T> {
   return readJsonFile(path, fallback)
 }
