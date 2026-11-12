@@ -73,7 +73,6 @@ const MAX_AREAS = 16
 const MAX_CHILDREN = 8
 /** Folder notes below the top-level areas, so the area, fixed and user notes still fit in MAX_NOTES. */
 const LAYOUT_BUDGET = 120
-const MAX_KEY_FILES = 3
 const SCRIPT_LANGUAGES = new Set(['typescript', 'tsx', 'javascript', 'jsx'])
 const SCRIPT_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']
 const RELATIVE_IMPORT = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*['"](\.{1,2}\/[^'"\n]+)['"]/g
@@ -111,9 +110,10 @@ const askedFeatures = new Map<string, string>()
 const describing = new Set<string>()
 
 type Area = { name: string; children: string[] }
-type Folder = { folders: string[]; files: string[]; tests: string[] }
+type Folder = { folders: string[]; files: string[] }
 /**
- * The index's folders and files under the top-level areas, by project path. `noted` holds the folders with a note.
+ * The index's folders and files under the top-level areas, by project path. `noted` holds the modules: the folders
+ * the model describes one by one.
  * `loose` holds the areas the index has nothing of, such as docs or images, with what is directly in each.
  */
 type Layout = {
@@ -122,8 +122,8 @@ type Layout = {
   noted: Set<string>
   loose: Map<string, string[]>
 }
-/** Imports between noted folders, by importing folder then imported one, and how many files import each file. */
-type ModuleLinks = { uses: Map<string, Map<string, number>>; importers: Map<string, number> }
+/** Imports between modules, by importing module then imported one. */
+type ModuleLinks = { uses: Map<string, Map<string, number>> }
 
 function posix(path: string): string {
   return path.split(/[\\/]/).join('/')
@@ -523,7 +523,7 @@ function wiki(title: string): string {
   return `[[${title}]]`
 }
 
-/** A test is listed in its folder's note, without a note of its own. */
+/** A test is not part of what a module is described from. */
 function isTestFile(path: string): boolean {
   return /\.(test|spec)\.[^./]+$/.test(path) || path.split('/').includes('__tests__')
 }
@@ -535,7 +535,7 @@ function buildLayout(indexed: IndexedFile[], listed: Area[]): Layout {
   const folderAt = (path: string): Folder => {
     let folder = folders.get(path)
     if (!folder) {
-      folder = { folders: [], files: [], tests: [] }
+      folder = { folders: [], files: [] }
       folders.set(path, folder)
       const cut = path.lastIndexOf('/')
       if (cut > 0) folderAt(path.slice(0, cut)).folders.push(path)
@@ -549,19 +549,16 @@ function buildLayout(indexed: IndexedFile[], listed: Area[]): Layout {
     if (parts.length < 2 || !areas.has(parts[0])) continue
     if (parts.some((part) => part.startsWith('.') || IGNORE.has(part))) continue
     const folder = folderAt(parts.slice(0, -1).join('/'))
-    if (isTestFile(path)) {
-      folder.tests.push(path)
-    } else {
-      folder.files.push(path)
-      files.set(path, { ...file, path })
-    }
+    if (isTestFile(path)) continue
+    folder.files.push(path)
+    files.set(path, { ...file, path })
   }
   for (const folder of folders.values()) folder.folders.sort()
   const depth = (path: string): number => path.split('/').length
   const nested = [...folders.keys()]
     .filter((path) => path.includes('/'))
     .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b))
-  // Past the budget, the deepest folders go without a note.
+  // Past the budget, the deepest folders count with the module above them.
   const noted = new Set([...folders.keys()].filter((path) => !path.includes('/')))
   for (const path of nested.slice(0, LAYOUT_BUDGET)) noted.add(path)
   const loose = new Map(
@@ -572,39 +569,12 @@ function buildLayout(indexed: IndexedFile[], listed: Area[]): Layout {
   return { folders, files, noted, loose }
 }
 
-/** The noted folder a file counts toward: its own, or the nearest one above it. */
+/** The module a file counts toward: its own folder, or the nearest module above it. */
 function moduleOf(path: string, layout: Layout): string {
   let dir = path.slice(0, path.lastIndexOf('/'))
-  // Top-level folders are always noted.
+  // Top-level folders are always modules.
   while (!layout.noted.has(dir)) dir = dir.slice(0, dir.lastIndexOf('/'))
   return dir
-}
-
-/** Where a folder's note lives under `generated/`. A top-level folder's is its area note. */
-function layoutFile(path: string): string {
-  const parts = path.split('/')
-  const dirs = [areaFileName(parts[0]), ...parts.slice(1, -1).map(sanitizeName)]
-  if (parts.length === 1) return `${dirs[0]}.md`
-  return `${dirs.join('/')}/${areaFileName(parts[parts.length - 1])}.md`
-}
-
-/** A link by path: folders share names across the project, so a title alone could point at several notes. */
-function layoutLink(path: string): string {
-  return `[[generated/${layoutFile(path)}|${path.split('/').pop() ?? path}]]`
-}
-
-function folderContents(path: string, folder: Folder, layout: Layout, summary: ModuleSummary | undefined): string {
-  const name = (item: string): string => item.slice(path.length + 1)
-  const file = (item: string): string => {
-    const does = summary?.files[name(item)]
-    return does ? `- \`${name(item)}\`: ${does}` : `- \`${name(item)}\``
-  }
-  const lines = [
-    ...folder.folders.map((item) => (layout.noted.has(item) ? `- ${layoutLink(item)}` : `- \`${name(item)}/\``)),
-    ...folder.files.map(file),
-    ...folder.tests.map((item) => `- \`${name(item)}\` (test)`)
-  ]
-  return lines.length > 0 ? lines.join('\n') : '_Nothing indexed._'
 }
 
 /** The indexed files a JS or TS file imports by relative path. */
@@ -624,13 +594,11 @@ function relativeImports(from: string, source: string, layout: Layout): string[]
 
 async function readModuleLinks(root: string, layout: Layout): Promise<ModuleLinks> {
   const uses = new Map<string, Map<string, number>>()
-  const importers = new Map<string, number>()
   for (const file of layout.files.values()) {
     if (!SCRIPT_LANGUAGES.has(file.language)) continue
     const source = await readFile(join(root, file.path), 'utf8').catch(() => '')
     const from = moduleOf(file.path, layout)
     for (const target of relativeImports(file.path, source, layout)) {
-      importers.set(target, (importers.get(target) ?? 0) + 1)
       const to = moduleOf(target, layout)
       if (to === from) continue
       const counts = uses.get(from) ?? new Map<string, number>()
@@ -638,7 +606,7 @@ async function readModuleLinks(root: string, layout: Layout): Promise<ModuleLink
       uses.set(from, counts)
     }
   }
-  return { uses, importers }
+  return { uses }
 }
 
 /** Lines of the project's docs about a folder, or failing that about a file directly in it. */
@@ -656,41 +624,6 @@ function describedIn(docs: string, path: string): string[] {
   const aboutFolder = lines.filter((line) => folder.test(line))
   const picked = aboutFolder.length > 0 ? aboutFolder : lines.filter((line) => file.test(line))
   return picked.slice(0, 3).map((line) => line.trim().replace(/^(?:#+|[-*+]|\d+[.)])\s+/, ''))
-}
-
-/**
- * What a folder's note says: what it does, what the docs call it, its parent, the folders it uses, its key files,
- * and what it holds.
- */
-function moduleSections(
-  path: string,
-  folder: Folder,
-  layout: Layout,
-  links: ModuleLinks,
-  docs: string,
-  summary: ModuleSummary | undefined
-): string[] {
-  const described = describedIn(docs, path)
-  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : null
-  const uses = [...(links.uses.get(path) ?? [])].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-  const key = [...links.importers]
-    .filter(([file, count]) => count >= 2 && moduleOf(file, layout) === path)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, MAX_KEY_FILES)
-  return [
-    ...(summary ? [summary.about, ''] : []),
-    ...(described.length > 0 ? [...described, ''] : []),
-    ...(parent != null ? ['## In', '', `- ${layoutLink(parent)}`, ''] : []),
-    ...(uses.length > 0
-      ? ['## Uses', '', ...uses.map(([to, count]) => `- ${layoutLink(to)} (${count} import${count === 1 ? '' : 's'})`), '']
-      : []),
-    ...(key.length > 0
-      ? ['## Key files', '', ...key.map(([file, count]) => `- \`${file.slice(path.length + 1)}\`: imported by ${count} files`), '']
-      : []),
-    '## Contains',
-    '',
-    folderContents(path, folder, layout, summary)
-  ]
 }
 
 function signatureOf(path: string, layout: Layout): string {
@@ -716,7 +649,7 @@ async function readBrief(root: string, path: string, layout: Layout, links: Modu
     )
     return { path, docs: describedIn(docs, path), folders: loose.filter((name) => name.endsWith('/')), uses: [], files }
   }
-  const folder = layout.folders.get(path) ?? { folders: [], files: [], tests: [] }
+  const folder = layout.folders.get(path) ?? { folders: [], files: [] }
   const files = await Promise.all(
     folder.files.map(async (file) => ({
       name: file.slice(path.length + 1),
@@ -732,7 +665,7 @@ async function readBrief(root: string, path: string, layout: Layout, links: Modu
   }
 }
 
-/** Each file a feature can name, with the module whose note lists it. */
+/** Each file a concept can name, with the module it is in. */
 function featureFiles(layout: Layout): Map<string, string> {
   return new Map([
     ...[...layout.files.keys()].map((file): [string, string] => [file, moduleOf(file, layout)]),
@@ -817,28 +750,54 @@ function describeChanged(
     .finally(() => describing.delete(project.id))
 }
 
-/** Where a feature's note lives under `generated/`. */
+/** Where a concept's note lives under `generated/`. */
 function featureFile(name: string): string {
-  return `features/${areaFileName(name)}.md`
+  return `concepts/${areaFileName(name)}.md`
 }
 
-/** What a feature's note says: what it does, then the files behind it under the module each is in. */
-function featureSections(feature: Feature, files: Map<string, string>, summaries: Map<string, StoredSummary>): string[] | null {
+function featureLink(name: string): string {
+  return `[[generated/${featureFile(name)}|${name}]]`
+}
+
+/** The tag that says which part of the project a concept is mostly in: the folder, two deep, most of its files are under. */
+function areaTag(feature: Feature, files: Map<string, string>): string | null {
+  const counts = new Map<string, number>()
+  for (const file of feature.files) {
+    if (!files.has(file)) continue
+    const folder = file.split('/').slice(0, -1).slice(0, 2).join('/')
+    counts.set(folder, (counts.get(folder) ?? 0) + 1)
+  }
+  const top = [...counts].sort((a, b) => b[1] - a[1])[0]
+  return top ? `area/${top[0].replace(/[^\w/-]+/g, '-')}` : null
+}
+
+/**
+ * What a concept's note says: how it works, the concepts it works with among `noted`, the ones with a note, and the
+ * files behind it under the module each is in.
+ */
+function featureSections(
+  feature: Feature,
+  files: Map<string, string>,
+  summaries: Map<string, StoredSummary>,
+  noted: Set<string>
+): string[] | null {
   const byModule = new Map<string, string[]>()
   for (const file of feature.files) {
     const module = files.get(file)
-    // A file that has left the project since the feature was written.
+    // A file that has left the project since the concept was written.
     if (module == null) continue
     byModule.set(module, [...(byModule.get(module) ?? []), file.slice(module.length + 1)])
   }
   if (byModule.size === 0) return null
+  const related = feature.related.filter((name) => noted.has(name))
   return [
     feature.about,
     '',
+    ...(related.length > 0 ? ['## Works with', '', ...related.map((name) => `- ${featureLink(name)}`), ''] : []),
     '## Where it lives',
     '',
     ...[...byModule].flatMap(([module, names]) => [
-      `- [[generated/${layoutFile(module)}|${module}]]`,
+      `- \`${module}/\`${summaries.has(module) ? `: ${firstSentence(summaries.get(module)!.about)}` : ''}`,
       ...names.map((name) => {
         const does = summaries.get(module)?.files[name]
         return does ? `  - \`${name}\`: ${does}` : `  - \`${name}\``
@@ -863,7 +822,7 @@ async function listUserNotes(vault: string): Promise<string[]> {
 
 function homeGeneratedBlock(
   projectName: string,
-  links: { overview: boolean; architecture: boolean; stack: boolean; rules: boolean; areas: string[] },
+  links: { overview: boolean; architecture: boolean; stack: boolean; rules: boolean; concepts: string[] },
   userNotes: string[]
 ): string {
   const generated = [
@@ -871,8 +830,11 @@ function homeGeneratedBlock(
     links.architecture ? `- ${wiki('Architecture')}` : null,
     links.stack ? `- ${wiki('Stack')}` : null,
     links.rules ? `- ${wiki('Rules')}` : null,
-    ...links.areas.map((link) => `- ${link}`)
   ].filter(Boolean)
+  const concepts =
+    links.concepts.length > 0
+      ? links.concepts
+      : ['_None yet. They are written once the project has been read, while the Knowledge pane is open._']
   const notes =
     userNotes.length > 0
       ? userNotes.map((name) => `- ${wiki(name)}`)
@@ -883,6 +845,10 @@ function homeGeneratedBlock(
     '## Generated',
     '',
     ...generated,
+    '',
+    '## Concepts',
+    '',
+    ...concepts,
     '',
     '## Your notes',
     '',
@@ -1063,7 +1029,6 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
       )
     ).join('\n')
     const keep = new Set<string>()
-    const areaLinks: string[] = []
 
     const summariesPath = join(vault, 'generated', SUMMARIES_FILE)
     const storedState = await readFile(summariesPath, 'utf8').catch(() => null)
@@ -1090,14 +1055,18 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
     }
 
     const files = featureFiles(layout)
+    // A concept none of whose files is left in the project gets no note.
+    const concepts = (features?.list ?? []).filter((feature) => feature.files.some((file) => files.has(file)))
+    const noted = new Set(concepts.map((feature) => feature.name))
     const featureLines: string[] = []
-    for (const feature of features?.list ?? []) {
-      const sections = featureSections(feature, files, summaries)
+    for (const feature of concepts) {
+      const sections = featureSections(feature, files, summaries, noted)
       if (!sections) continue
       const file = featureFile(feature.name)
-      await writeGenerated(vault, file, generatedNote(feature.name, ['feature'], sections.join('\n')))
+      const area = areaTag(feature, files)
+      await writeGenerated(vault, file, generatedNote(feature.name, ['concept', ...(area ? [area] : [])], sections.join('\n')))
       keep.add(file)
-      featureLines.push(`- [[generated/${file}|${feature.name}]] — ${firstSentence(feature.about)}`)
+      featureLines.push(`- ${featureLink(feature.name)} — ${firstSentence(feature.about)}`)
     }
 
     const overviewBits = [
@@ -1106,7 +1075,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
       orientation.languages.length ? `Languages: ${orientation.languages.join(', ')}.` : null,
       orientation.fileCount != null ? `${orientation.fileCount} indexed files.` : null,
       orientation.nodeCount != null ? `${orientation.nodeCount} symbols.` : null,
-      ...(featureLines.length > 0 ? ['', '## What it does', '', ...featureLines] : []),
+      ...(featureLines.length > 0 ? ['', '## How it works', '', ...featureLines] : []),
       '',
       '## Map',
       '',
@@ -1122,68 +1091,15 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
     )
     keep.add('Overview.md')
 
-    const areaLines: string[] = []
-    for (const area of listing.areas) {
-      const file = layoutFile(area.name)
-      const title = area.name
-      areaLinks.push(layoutLink(area.name))
-      const indexedFolder = layout.folders.get(area.name)
+    // The folders are described here, in one note: the graph is of the concepts, not of the folders.
+    const areaLines = listing.areas.map((area) => {
       const summary = summaries.get(area.name)
-      const sections = indexedFolder
-        ? moduleSections(area.name, indexedFolder, layout, links, docs, summary)
-        : [
-            ...(summary ? [summary.about, ''] : []),
-            '## Contains',
-            '',
-            area.children.length > 0
-              ? area.children
-                  .map((child) => {
-                    const does = summary?.files[child]
-                    return does ? `- \`${area.name}/${child}\`: ${does}` : `- \`${area.name}/${child}\``
-                  })
-                  .join('\n')
-              : '_Empty or unread folder._'
-          ]
-      await writeGenerated(
-        vault,
-        file,
-        generatedNote(
-          title,
-          ['area'],
-          [
-            `Top-level area \`${area.name}/\`.`,
-            '',
-            ...sections,
-            '',
-            '## Related',
-            '',
-            `- ${wiki('Architecture')}`,
-            `- ${wiki('Overview')}`
-          ].join('\n')
-        )
-      )
-      keep.add(file)
-      areaLines.push(`- ${layoutLink(area.name)} — ${summary ? firstSentence(summary.about) : `\`${area.name}/\``}`)
-    }
-
-    for (const [path, folder] of layout.folders) {
-      if (!path.includes('/') || !layout.noted.has(path)) continue
-      const file = layoutFile(path)
-      await writeGenerated(
-        vault,
-        file,
-        generatedNote(
-          path,
-          ['folder'],
-          [
-            `Folder \`${path}/\`.`,
-            '',
-            ...moduleSections(path, folder, layout, links, docs, summaries.get(path))
-          ].join('\n')
-        )
-      )
-      keep.add(file)
-    }
+      return summary ? `- \`${area.name}/\`: ${firstSentence(summary.about)}` : `- \`${area.name}/\``
+    })
+    const moduleLines = [...summaries]
+      .filter(([path]) => path.includes('/'))
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([path, summary]) => `- \`${path}/\`: ${summary.about}`)
 
     const rootFiles =
       listing.files.length > 0
@@ -1196,12 +1112,13 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
         'Architecture',
         ['architecture'],
         [
-          `How **${project.name}** is laid out. Areas below are wiki-linked so the graph stays connected.`,
+          `How **${project.name}** is laid out: its folders and what each is for. How it works is in the concepts ${wiki('Overview')} lists.`,
           '',
           '## Areas',
           '',
           areaLines.length > 0 ? areaLines.join('\n') : '_No source folders yet._',
           '',
+          ...(moduleLines.length > 0 ? ['## Modules', '', ...moduleLines, ''] : []),
           '## Root files',
           '',
           rootFiles,
@@ -1271,7 +1188,7 @@ async function maintainVaultNow(project: Project): Promise<KnowledgeSnapshot> {
           architecture: true,
           stack: hasStack,
           rules: hasRules,
-          areas: areaLinks
+          concepts: featureLines
         },
         userNotes
       )

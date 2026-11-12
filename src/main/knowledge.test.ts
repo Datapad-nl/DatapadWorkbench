@@ -196,47 +196,49 @@ async function indexFiles(files: Record<string, string>): Promise<void> {
 const generated = (path: string): Promise<string> => readFile(join(root, 'knowledge', 'generated', path), 'utf8')
 
 describe('the layout', () => {
-  it('gives each indexed folder a note, linked to the folder holding it and the folders it imports from', async () => {
-    await indexFiles({
-      'src/main/a.ts': "import { b } from './b'\nimport type { T } from '../shared/types.js'\nimport './a.test'\n",
-      'src/main/c.ts': "import { b } from './b'\nimport type { T } from '../shared/types'\n",
-      'src/main/b.ts': 'export const b = 1\n',
-      'src/main/a.test.ts': "import './a'\nimport './b'\n",
-      'src/shared/types.ts': 'export type T = 1\n',
-      'node_modules/dep/index.ts': '',
-      '.github/ci.ts': '',
-      'root.ts': ''
-    })
+  /** The requests for module descriptions. */
+  const modulePrompts = (): string =>
+    stub.ask.mock.calls
+      .map(([, prompt]) => prompt as string)
+      .filter((prompt) => prompt.includes('module notes'))
+      .join('\n')
+
+  it('gives no folder a note: the folders are listed in Architecture, and the notes an earlier version wrote go', async () => {
+    await indexFiles({ 'src/main/a.ts': '', 'src/shared/types.ts': '', 'node_modules/dep/index.ts': '', 'root.ts': '' })
+    await mkdir(join(root, 'knowledge', 'generated', 'src'), { recursive: true })
+    await writeFile(join(root, 'knowledge', 'generated', 'src', 'main.md'), '# src/main\n')
+    await writeFile(join(root, 'knowledge', 'generated', 'src.md'), '# src\n')
     const knowledge = await load()
     const snapshot = await knowledge.maintainVault(project)
 
-    expect(snapshot.nodes.map((node) => node.path).filter((path) => path.startsWith('generated/src')).sort()).toEqual([
-      'generated/src.md',
-      'generated/src/main.md',
-      'generated/src/shared.md'
+    expect(snapshot.nodes.map((node) => node.path).sort()).toEqual([
+      'Home.md',
+      'generated/Architecture.md',
+      'generated/Overview.md',
+      'notes/How to use this vault.md'
     ])
-    const edges = snapshot.edges.map((edge) => `${edge.from} -> ${edge.to}`)
-    expect(edges).toEqual(
-      expect.arrayContaining([
-        'Home.md -> generated/src.md',
-        'generated/src.md -> generated/src/main.md',
-        'generated/src.md -> generated/src/shared.md',
-        'generated/src/main.md -> generated/src.md',
-        'generated/src/main.md -> generated/src/shared.md'
-      ])
-    )
-    expect(edges).not.toContain('generated/src/shared.md -> generated/src/main.md')
-    const main = await generated('src/main.md')
-    expect(main).toContain('- [[generated/src/shared.md|shared]] (2 imports)')
-    // The test's import of b.ts doesn't count.
-    expect(main).toContain('- `b.ts`: imported by 2 files')
-    expect(main).toContain('- `a.ts`')
-    expect(main).toContain('- `a.test.ts` (test)')
-    expect(await generated('src/shared.md')).toContain('- `types.ts`: imported by 2 files')
-    expect(existsSync(join(root, 'knowledge', 'generated', 'node_modules.md'))).toBe(false)
+    expect(existsSync(join(root, 'knowledge', 'generated', 'src'))).toBe(false)
+    expect(await generated('Architecture.md')).toContain('## Areas\n\n- `src/`\n')
   })
 
-  it('describes a folder with the lines of the rules file and README about it', async () => {
+  it('has each module described with the modules it imports from, leaving out the tests', async () => {
+    await indexFiles({
+      'src/main/a.ts': "import { b } from './b'\nimport type { T } from '../shared/types.js'\nimport './a.test'\n",
+      'src/main/b.ts': 'export const b = 1\n',
+      'src/main/a.test.ts': "import '../ui/view'\n",
+      'src/shared/types.ts': 'export type T = 1\n',
+      'src/ui/view.ts': ''
+    })
+    const knowledge = await load()
+    await knowledge.setKnowledgeActiveProject('p1')
+    await vi.waitFor(() => expect(stub.ask).toHaveBeenCalled())
+    expect(modulePrompts()).toContain('## Module src/main/\nUses: src/shared\n### a.ts\n')
+    expect(modulePrompts()).not.toContain('a.test.ts')
+    expect(modulePrompts()).not.toContain('## Module src/shared/\nUses')
+    knowledge.stopKnowledgeWatchers()
+  })
+
+  it('has a module described with the lines of the rules file and README about it', async () => {
     await writeFile(
       join(root, 'CLAUDE.md'),
       [
@@ -255,49 +257,27 @@ describe('the layout', () => {
     stub.orientation.mockImplementation(async (target: Project) => ({ ...card(target), rulesFile: 'CLAUDE.md' }))
     await indexFiles({ 'src/main/a.ts': '', 'src/main/util/x.ts': '', 'src/shared/types.ts': '' })
     const knowledge = await load()
-    await knowledge.maintainVault(project)
+    await knowledge.setKnowledgeActiveProject('p1')
+    await vi.waitFor(() => expect(stub.ask).toHaveBeenCalled())
 
-    const main = await generated('src/main.md')
-    expect(main).toContain('\nMain process: `src/main` (persistence, IPC)\n')
-    expect(main.indexOf('Main process')).toBeLessThan(main.indexOf('## In'))
-    expect(main).toContain('\nBuild output lands next to src/main.\n')
-    expect(main).not.toContain('helpers')
-    expect(main).not.toContain('not this')
+    expect(modulePrompts()).toContain(
+      '## Module src/main/\nDocs: Main process: `src/main` (persistence, IPC)\nDocs: Build output lands next to src/main.\n'
+    )
+    expect(modulePrompts()).not.toContain('not this')
     // No line names the folder, so one about a file directly in it stands in.
-    expect(await generated('src/shared.md')).toContain('\nShared types: `src/shared/types.ts`\n')
-    expect(await generated('src.md')).not.toContain('Main process')
+    expect(modulePrompts()).toContain('## Module src/shared/\nDocs: Shared types: `src/shared/types.ts`\n')
+    expect(modulePrompts()).not.toContain('## Module src/\nDocs')
+    knowledge.stopKnowledgeWatchers()
   })
 
-  it('links an area to the areas it imports from, not to every other area', async () => {
-    await indexFiles({ 'src/a.ts': "import { b } from '../lib/b'\n", 'lib/b.ts': '', 'tools/c.ts': '' })
-    const knowledge = await load()
-    await knowledge.maintainVault(project)
-    const src = await generated('src.md')
-    expect(src).toContain('[[generated/lib.md|lib]]')
-    expect(src).not.toContain('generated/tools.md')
-    expect(await generated('tools.md')).not.toContain('generated/src.md')
-  })
-
-  it('drops the notes of folders that left the index, and the folders under generated/ that emptied', async () => {
-    await indexFiles({ 'src/main/a.ts': '', 'src/ui/web/b.ts': '' })
-    const knowledge = await load()
-    await knowledge.maintainVault(project)
-    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'ui', 'web.md'))).toBe(true)
-
-    await rm(join(root, 'src', 'ui'), { recursive: true })
-    await indexFiles({ 'src/main/a.ts': '' })
-    await knowledge.maintainVault(project)
-    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'ui'))).toBe(false)
-    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'ui.md'))).toBe(false)
-    expect(existsSync(join(root, 'knowledge', 'generated', 'src', 'main.md'))).toBe(true)
-  })
-
-  it('past the note budget, lists the deepest folders in their parent without a note', async () => {
+  it('past the module budget, counts the deepest folders with the module above them', async () => {
     await indexFiles(Object.fromEntries(Array.from({ length: 125 }, (_, i) => [`src/m${i}/f.ts`, ''])))
     const knowledge = await load()
-    const snapshot = await knowledge.maintainVault(project)
-    expect(snapshot.nodes.filter((node) => node.path.startsWith('generated/src/'))).toHaveLength(120)
-    expect(await generated('src.md')).toMatch(/^- `m\d+\/`$/m)
+    await knowledge.setKnowledgeActiveProject('p1')
+    await vi.waitFor(() => expect(stub.ask).toHaveBeenCalled())
+    await knowledge.maintainVault(project)
+    expect(modulePrompts().match(/^## Module src\/m\d+\/$/gm)).toHaveLength(120)
+    knowledge.stopKnowledgeWatchers()
   })
 })
 
@@ -309,11 +289,11 @@ describe('module descriptions', () => {
       { path: 'src/shared', about: 'Types both processes share.', files: { 'types.ts': 'The shared types.' } }
     ]
   })
-  /** The requests for module descriptions. The one for the features comes after them. */
+  /** The requests for module descriptions. The one for the concepts comes after them. */
   const modulePrompts = (): string[] =>
     stub.ask.mock.calls.map(([, prompt]) => prompt as string).filter((prompt) => prompt.includes('module notes'))
   const describedMain = (): Promise<void> =>
-    vi.waitFor(async () => expect(await generated('src/main.md')).toContain('Runs the main process.'), {
+    vi.waitFor(async () => expect(await generated('Architecture.md')).toContain('Runs the main process.'), {
       timeout: 5_000,
       interval: 50
     })
@@ -332,11 +312,11 @@ describe('module descriptions', () => {
     await describedMain()
     // Lets the run that wrote it finish.
     await knowledge.maintainVault(project)
-    const main = await generated('src/main.md')
-    expect(main).toContain('- `config.ts`: Reads the config file.')
-    expect(main.indexOf('Runs the main process.')).toBeLessThan(main.indexOf('## In'))
-    expect(await generated('src/shared.md')).toContain('- `types.ts`: The shared types.')
-    expect(await generated('Architecture.md')).toContain('- [[generated/src.md|src]] — Holds the app.\n')
+    const architecture = await generated('Architecture.md')
+    expect(architecture).toContain('## Areas\n\n- `src/`: Holds the app.\n')
+    expect(architecture).toContain(
+      '## Modules\n\n- `src/main/`: Runs the main process. It reads the config.\n- `src/shared/`: Types both processes share.\n'
+    )
     expect(modulePrompts()).toHaveLength(1)
     expect(modulePrompts()[0]).toContain(
       '## Module src/main/\nUses: src/shared\n### config.ts\n// Reads the config.\nexport function readConfig(): T\n'
@@ -360,11 +340,11 @@ describe('module descriptions', () => {
     expect(modulePrompts()).toHaveLength(1)
 
     stub.ask.mockResolvedValue(
-      JSON.stringify({ modules: [{ path: 'src/main', about: 'Runs the main process.', files: { 'extra.ts': 'The extras.' } }] })
+      JSON.stringify({ modules: [{ path: 'src/main', about: 'Runs the main process and the extras.', files: { 'extra.ts': 'The extras.' } }] })
     )
     await indexFiles({ 'src/main/config.ts': '', 'src/main/extra.ts': '', 'src/shared/types.ts': '' })
     await knowledge.maintainVault(project)
-    await vi.waitFor(async () => expect(await generated('src/main.md')).toContain('- `extra.ts`: The extras.'), {
+    await vi.waitFor(async () => expect(await generated('Architecture.md')).toContain('and the extras.'), {
       timeout: 5_000,
       interval: 50
     })
@@ -375,7 +355,7 @@ describe('module descriptions', () => {
     expect(prompt).not.toContain('## Module src/shared/\n')
     expect(prompt).not.toContain('## Module src/\n')
     // The other modules keep what was written about them.
-    expect(await generated('src/shared.md')).toContain('Types both processes share.')
+    expect(await generated('Architecture.md')).toContain('Types both processes share.')
     knowledge.stopKnowledgeWatchers()
   })
 
@@ -393,7 +373,7 @@ describe('module descriptions', () => {
   })
 })
 
-describe('features', () => {
+describe('concepts', () => {
   const modules = JSON.stringify({
     modules: [
       { path: 'src', about: 'Holds the app.', files: {} },
@@ -406,51 +386,70 @@ describe('features', () => {
       {
         name: 'Settings',
         about: 'Keeps what the user chose. It is read at launch.',
+        related: ['Launch', 'Guesswork'],
         files: ['src/main/config.ts', 'docs/guide.md', 'src/main/gone.ts']
       },
-      { name: 'Guesswork', about: 'Nothing behind it.', files: ['src/nowhere.ts'] }
+      { name: 'Launch', about: 'Starts the app. It reads the settings first.', related: ['Settings'], files: ['src/main/config.ts'] },
+      { name: 'Guesswork', about: 'Nothing behind it.', related: ['Settings'], files: ['src/nowhere.ts'] }
     ]
   })
   const prompts = (about: string): string[] =>
     stub.ask.mock.calls.map(([, prompt]) => prompt as string).filter((prompt) => prompt.includes(about))
   const written = (text: string): Promise<void> =>
-    vi.waitFor(async () => expect(await generated('features/Settings.md')).toContain(text), { timeout: 5_000, interval: 50 })
+    vi.waitFor(async () => expect(await generated('concepts/Settings.md')).toContain(text), { timeout: 5_000, interval: 50 })
 
   beforeEach(async () => {
     stub.ask.mockImplementation(async (_project: Project, prompt: string) =>
-      prompt.includes('feature notes') ? features : modules
+      prompt.includes('concept notes') ? features : modules
     )
     await mkdir(join(root, 'docs'))
     await writeFile(join(root, 'docs', 'guide.md'), '# Guide\n\nHow to set the app up.\n')
   })
 
-  it('come from the model once the modules are described, each a note linked from the overview and to its modules', async () => {
+  it('come from the model once the modules are described, each a note linked from the overview and to the concepts it works with', async () => {
     await indexFiles({ 'src/main/config.ts': '' })
     let knowledge = await load()
     await knowledge.setKnowledgeActiveProject('p1')
     await written('Keeps what the user chose.')
     const snapshot = await knowledge.maintainVault(project)
 
-    expect(await generated('features/Settings.md')).toContain(
+    expect(await generated('concepts/Settings.md')).toContain(
       [
+        '## Works with',
+        '',
+        '- [[generated/concepts/Launch.md|Launch]]',
+        '',
         '## Where it lives',
         '',
-        '- [[generated/src/main.md|src/main]]',
+        '- `src/main/`: Runs the main process.',
         '  - `config.ts`: Reads the config file.',
-        '- [[generated/docs.md|docs]]',
+        '- `docs/`: The written guides.',
         '  - `guide.md`: How to set the app up.',
         ''
       ].join('\n')
     )
-    expect(existsSync(join(root, 'knowledge', 'generated', 'features', 'Guesswork.md'))).toBe(false)
+    expect(existsSync(join(root, 'knowledge', 'generated', 'concepts', 'Guesswork.md'))).toBe(false)
     expect(await generated('Overview.md')).toContain(
-      '## What it does\n\n- [[generated/features/Settings.md|Settings]] — Keeps what the user chose.\n'
+      '## How it works\n\n- [[generated/concepts/Settings.md|Settings]] — Keeps what the user chose.\n'
     )
-    expect(snapshot.nodes.find((node) => node.path === 'generated/features/Settings.md')?.tags).toContain('feature')
-    expect(snapshot.edges).toContainEqual({ from: 'generated/Overview.md', to: 'generated/features/Settings.md' })
-    expect(snapshot.edges).toContainEqual({ from: 'generated/features/Settings.md', to: 'generated/src/main.md' })
-    expect(prompts('feature notes')).toHaveLength(1)
-    expect(prompts('feature notes')[0]).toContain('## src/main/\nRuns the main process.\n- src/main/config.ts: Reads the config file.\n')
+    expect(await readFile(join(root, 'knowledge', 'Home.md'), 'utf8')).toContain(
+      '## Concepts\n\n- [[generated/concepts/Settings.md|Settings]] — Keeps what the user chose.\n'
+    )
+    expect(snapshot.nodes.find((node) => node.path === 'generated/concepts/Settings.md')?.tags).toEqual(
+      expect.arrayContaining(['concept', 'area/src/main'])
+    )
+    expect(snapshot.edges).toContainEqual({ from: 'generated/Overview.md', to: 'generated/concepts/Settings.md' })
+    expect(snapshot.edges).toContainEqual({ from: 'generated/concepts/Settings.md', to: 'generated/concepts/Launch.md' })
+    expect(snapshot.edges).toContainEqual({ from: 'generated/concepts/Launch.md', to: 'generated/concepts/Settings.md' })
+    // Every generated note is a concept or one of the notes about the whole project.
+    expect(snapshot.nodes.map((node) => node.path).filter((path) => path.startsWith('generated/')).sort()).toEqual([
+      'generated/Architecture.md',
+      'generated/Overview.md',
+      'generated/concepts/Launch.md',
+      'generated/concepts/Settings.md'
+    ])
+    expect(prompts('concept notes')).toHaveLength(1)
+    expect(prompts('concept notes')[0]).toContain('## src/main/\nRuns the main process.\n- src/main/config.ts: Reads the config file.\n')
     knowledge.stopKnowledgeWatchers()
 
     // After a restart they are read from the vault.
@@ -470,8 +469,8 @@ describe('features', () => {
 
     await indexFiles({ 'src/main/config.ts': '', 'src/main/extra.ts': '' })
     await knowledge.maintainVault(project)
-    await vi.waitFor(() => expect(prompts('feature notes')).toHaveLength(2), { timeout: 5_000, interval: 50 })
-    expect(prompts('feature notes')[1]).toContain('- src/main/extra.ts: The extras.')
+    await vi.waitFor(() => expect(prompts('concept notes')).toHaveLength(2), { timeout: 5_000, interval: 50 })
+    expect(prompts('concept notes')[1]).toContain('- src/main/extra.ts: The extras.')
     expect(prompts('module notes')).toHaveLength(2)
     knowledge.stopKnowledgeWatchers()
   })
@@ -480,13 +479,11 @@ describe('features', () => {
     await indexFiles({ 'src/main/config.ts': '' })
     const knowledge = await load()
     await knowledge.setKnowledgeActiveProject('p1')
-    await vi.waitFor(async () => expect(await generated('docs.md')).toContain('The written guides.'), {
+    await vi.waitFor(async () => expect(await generated('Architecture.md')).toContain('- `docs/`: The written guides.\n'), {
       timeout: 5_000,
       interval: 50
     })
-    expect(await generated('docs.md')).toContain('- `docs/guide.md`: How to set the app up.')
     expect(prompts('module notes')[0]).toContain('## Module docs/\n### guide.md\n# Guide\nHow to set the app up.\n')
-    expect(await generated('Architecture.md')).toContain('- [[generated/docs.md|docs]] — The written guides.\n')
     knowledge.stopKnowledgeWatchers()
   })
 })

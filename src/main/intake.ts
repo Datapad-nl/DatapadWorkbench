@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { mkdir, readFile, writeFile } from 'fs/promises'
+import { access, mkdir, readFile, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
 import type {
@@ -146,7 +146,25 @@ export async function projectSessionRules(projectId: string | undefined): Promis
   const project = projects.find((item) => item.id === projectId)
   if (!project) return null
   const intake = await getProjectIntake(projectId)
-  return formatProjectSessionRules(intake, project)
+  const rules = [formatProjectSessionRules(intake, project), await vaultSessionRule(project)].filter(Boolean)
+  return rules.length > 0 ? rules.join('\n\n') : null
+}
+
+/** Points the agent at the project's knowledge vault, when it has one. The path is whole, so a chat in a worktree finds it too. */
+export async function vaultSessionRule(project: Project): Promise<string | null> {
+  if (!project.path) return null
+  const vault = join(project.path, 'knowledge')
+  try {
+    await access(join(vault, 'Home.md'))
+  } catch {
+    return null
+  }
+  return [
+    `This project has a knowledge vault of notes about how it works, in ${vault}.`,
+    'Home.md there is the map: it lists the concepts of the project, each a note on how one thing works, which concepts it works with and which files are behind it.',
+    'Read the concepts that cover your task before you explore the code, and follow their [[wiki-links]] to the ones they work with.',
+    'The notes under generated/ are written from the code index and can be behind the code: when a note and the code disagree, the code is right.'
+  ].join(' ')
 }
 
 function memoryBlock(project: Project, intake: ProjectIntake): string {

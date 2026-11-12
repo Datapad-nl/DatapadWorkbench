@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -25,8 +25,11 @@ import {
   formatProjectSessionRules,
   getProjectIntake,
   maybeStartProjectIntake,
-  needsProjectIntake
+  needsProjectIntake,
+  projectSessionRules,
+  vaultSessionRule
 } from './intake'
+import type { Project } from '../shared/types'
 import { pendingQuestionRequests, resolveUserQuestion } from './questions'
 
 const questions = Array.from({ length: 7 }, (_, index) => ({
@@ -56,6 +59,27 @@ async function nextCard(): Promise<ReturnType<typeof pendingQuestionRequests>[nu
   await vi.waitFor(() => expect(pendingQuestionRequests()).toHaveLength(1))
   return pendingQuestionRequests()[0]
 }
+
+describe('the knowledge vault in the session rules', () => {
+  const project = (path: string): Project => ({ id: 'p2', name: 'Demo', path, createdAt: '', updatedAt: '' })
+
+  it('points the agent at the vault of a project that has one', async () => {
+    mkdirSync(join(stub.dir, 'knowledge'))
+    writeFileSync(join(stub.dir, 'knowledge', 'Home.md'), '# Home\n')
+    const rule = await vaultSessionRule(project(stub.dir))
+    expect(rule).toContain(join(stub.dir, 'knowledge'))
+    expect(rule).toContain('Home.md')
+  })
+
+  it('says nothing for a project without a vault or without a folder', async () => {
+    expect(await vaultSessionRule(project(stub.dir))).toBeNull()
+    expect(await vaultSessionRule(project(''))).toBeNull()
+  })
+
+  it('gives a project with no briefing and no vault no rules', async () => {
+    expect(await projectSessionRules('p1')).toBeNull()
+  })
+})
 
 describe('project intake', () => {
   it('posts no card when its chat is deleted before the intake got going', async () => {

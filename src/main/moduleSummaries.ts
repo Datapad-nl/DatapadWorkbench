@@ -4,8 +4,11 @@ import { createHash } from 'crypto'
 export type ModuleSummary = { about: string; files: Record<string, string> }
 /** A summary as stored in the vault, with the signature of the module it was written for. */
 export type StoredSummary = ModuleSummary & { signature: string }
-/** Something the project does, in the model's words, and the files that do it, by project path. */
-export type Feature = { name: string; about: string; files: string[] }
+/**
+ * A concept of the project in the model's words: something it does, or a mechanism behind that. With the names of
+ * the concepts it works with, and the files that implement it, by project path.
+ */
+export type Feature = { name: string; about: string; related: string[]; files: string[] }
 /** The features as stored in the vault, with the signature of the summaries they were written from. */
 export type StoredFeatures = { signature: string; list: Feature[] }
 
@@ -21,7 +24,8 @@ export type ModuleBrief = {
 const MAX_DECLARATIONS = 8
 const MAX_LINE = 120
 const BATCH_CHARS = 40_000
-const MAX_FEATURES = 20
+const MAX_FEATURES = 30
+const MAX_RELATED = 5
 const MAX_FEATURE_FILES = 12
 
 // Top-level declarations in JS/TS, Python, Go and Rust.
@@ -167,7 +171,8 @@ export function parseSummaries(raw: string, briefs: ModuleBrief[]): Map<string, 
 /** Changes when a module is described again, which is when the features are written again. */
 export function featuresSignature(summaries: Map<string, StoredSummary>): string {
   const parts = [...summaries].map(([path, summary]) => [path, summary.signature]).sort(([a], [b]) => a.localeCompare(b))
-  return createHash('sha1').update(JSON.stringify(parts)).digest('hex').slice(0, 16)
+  // 'concepts' sets these apart from the features of earlier versions, so those are written again.
+  return createHash('sha1').update(JSON.stringify(['concepts', parts])).digest('hex').slice(0, 16)
 }
 
 export function featurePrompt(
@@ -186,17 +191,19 @@ export function featurePrompt(
     modules.push(...lines)
   }
   return [
-    `You are writing the feature notes of a knowledge vault for the software project "${projectName}".`,
+    `You are writing the concept notes of a knowledge vault for the software project "${projectName}".`,
     overview ? `The project: ${overview}` : null,
     'Below is every module of the project with what it does, and the files in it with what each does.',
-    'List what the project does as features: what someone using it would name when asked what it can do, not its folders or layers.',
-    `Give each feature one subject. Do not join unrelated things into one feature. At most ${MAX_FEATURES}, and fewer for a small project.`,
-    'For each feature write:',
+    'List the concepts someone has to understand to know how the project works: what it does for whoever uses it, and the mechanisms behind that, such as how data moves through it, where state is kept and how the parts talk to each other.',
+    'A concept is an idea, not a place: do not make one per folder, file or layer.',
+    `Give each concept one subject. Do not join unrelated things into one concept. At most ${MAX_FEATURES}, and fewer for a small project.`,
+    'For each concept write:',
     '- "name": a title of one to four words.',
-    '- "about": three to five plain sentences on what the feature does for whoever uses the project, and how the parts behind it work together.',
-    `- "files": the paths of the files that implement it, the most important first, at most ${MAX_FEATURE_FILES}. A file can be in several features.`,
+    '- "about": three to six plain sentences on what it is and how it works, step by step: what starts it, what happens in which order, and what comes out.',
+    `- "related": the names of the other concepts in your list that it depends on or works with, at most ${MAX_RELATED}. Relate every concept to at least one other.`,
+    `- "files": the paths of the files that implement it, the most important first, at most ${MAX_FEATURE_FILES}. A file can be in several concepts.`,
     'Work only from what is given. Do not use tools. Do not read files. Reply with JSON only:',
-    '{"features":[{"name":"...","about":"...","files":["src/example/file.ts"]}]}',
+    '{"features":[{"name":"...","about":"...","related":["..."],"files":["src/example/file.ts"]}]}',
     '',
     ...modules
   ]
@@ -204,7 +211,7 @@ export function featurePrompt(
     .join('\n')
 }
 
-/** The features in a model's reply, each with the files it names that are among `known`. */
+/** The concepts in a model's reply, each with the files it names that are among `known` and the other concepts it names. */
 export function parseFeatures(raw: string, known: Set<string>): Feature[] {
   let parsed: unknown
   try {
@@ -225,8 +232,15 @@ export function parseFeatures(raw: string, known: Set<string>): Feature[] {
     // A feature with no file of the project behind it is a guess.
     if (!name || !about || files.length === 0 || names.has(name.toLowerCase())) continue
     names.add(name.toLowerCase())
-    features.push({ name, about, files: files.slice(0, MAX_FEATURE_FILES) })
+    const related = (Array.isArray(entry?.related) ? entry.related : []).filter((other): other is string => typeof other === 'string')
+    features.push({ name, about, related, files: files.slice(0, MAX_FEATURE_FILES) })
     if (features.length === MAX_FEATURES) break
+  }
+  // A concept can name one that comes later in the list, so these are matched once all are known.
+  const kept = new Map(features.map((feature) => [feature.name.toLowerCase(), feature.name]))
+  for (const feature of features) {
+    const others = feature.related.map((other) => kept.get(other.trim().toLowerCase())).filter((other) => other != null)
+    feature.related = [...new Set(others)].filter((other) => other !== feature.name).slice(0, MAX_RELATED)
   }
   return features
 }
@@ -262,15 +276,20 @@ export function readStoredFeatures(text: string | null): StoredFeatures | null {
   }
   const entry = record(record(parsed)?.features)
   if (typeof entry?.signature !== 'string' || !Array.isArray(entry.list)) return null
-  const list = entry.list.filter((item): item is Feature => {
-    const feature = record(item)
-    return (
-      typeof feature?.name === 'string' &&
-      typeof feature.about === 'string' &&
-      Array.isArray(feature.files) &&
-      feature.files.every((file) => typeof file === 'string')
-    )
-  })
+  const list = entry.list
+    .filter((item): item is Feature => {
+      const feature = record(item)
+      return (
+        typeof feature?.name === 'string' &&
+        typeof feature.about === 'string' &&
+        Array.isArray(feature.files) &&
+        feature.files.every((file) => typeof file === 'string')
+      )
+    })
+    .map((feature) => ({
+      ...feature,
+      related: Array.isArray(feature.related) ? feature.related.filter((other) => typeof other === 'string') : []
+    }))
   return { signature: entry.signature, list }
 }
 

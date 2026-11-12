@@ -266,3 +266,34 @@ textarea {
   .subagent-flow { animation: none; }
   .subagent-pulse { animation-duration: 1ms; }
 }
+
+/* The note over the knowledge graph: it comes in from below, under faint scan lines. */
+.note-overlay {
+  animation: note-overlay-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.note-overlay::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(180deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 3px);
+}
+
+.note-overlay-body .markdown {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@keyframes note-overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+    clip-path: inset(100% 0 0 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    clip-path: inset(0 0 0 0);
+  }
+}

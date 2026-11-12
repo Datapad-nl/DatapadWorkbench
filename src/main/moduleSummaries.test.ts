@@ -145,15 +145,35 @@ describe('features', () => {
       ]
     })}`
     expect(parseFeatures(raw, known)).toEqual([
-      { name: 'Settings beta', about: 'Keeps what you chose.', files: ['src/main/config.ts'] }
+      { name: 'Settings beta', about: 'Keeps what you chose.', related: [], files: ['src/main/config.ts'] }
     ])
     expect(parseFeatures('Sorry, no.', known)).toEqual([])
   })
 
+  it('are read with the other concepts each names, also a later one, and not itself or one that was left out', () => {
+    const known = new Set(['src/main/config.ts', 'src/ui/App.tsx'])
+    const raw = JSON.stringify({
+      features: [
+        { name: 'Settings', about: 'Keeps what you chose.', related: ['window', 'Settings', 'Guess', 'Window', 7], files: ['src/main/config.ts'] },
+        { name: 'Guess', about: 'Nothing behind it.', related: ['Settings'], files: ['src/nowhere.ts'] },
+        { name: 'Window', about: 'Shows the app.', files: ['src/ui/App.tsx'] }
+      ]
+    })
+    expect(parseFeatures(raw, known).map((feature) => [feature.name, feature.related])).toEqual([
+      ['Settings', ['Window']],
+      ['Window', []]
+    ])
+  })
+
   it('read back what was stored, next to the summaries', () => {
-    const features = { signature: 'f1', list: [{ name: 'Settings', about: 'Keeps what you chose.', files: ['src/main/config.ts'] }] }
+    const settings = { name: 'Settings', about: 'Keeps what you chose.', files: ['src/main/config.ts'] }
+    const features = { signature: 'f1', list: [{ ...settings, related: ['Window'] }] }
     const text = storedText(summaries, features)
     expect(readStoredFeatures(text)).toEqual(features)
+    // What an earlier version stored names no related concepts.
+    expect(readStoredFeatures(JSON.stringify({ features: { signature: 'f0', list: [settings] } }))?.list).toEqual([
+      { ...settings, related: [] }
+    ])
     expect(readStored(text)).toEqual(summaries)
     expect(readStoredFeatures(storedText(summaries))).toBeNull()
     expect(readStoredFeatures(null)).toBeNull()
