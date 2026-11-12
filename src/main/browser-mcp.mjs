@@ -217,7 +217,7 @@ const WORKBENCH_TOOLS = [
         model: {
           type: 'string',
           description:
-            'Claude Code model for the child, which then runs on Claude Code: opus for work that needs judgement, sonnet for routine work, haiku when a small, fast model is enough. Leave out for the model set in Settings. Settings can fix one model for every child; that one then wins.'
+            'Claude Code model for the child, which then runs on Claude Code: fable for a really hard task (it costs the most), opus for work that needs judgement, sonnet for routine work, haiku when a small, fast model is enough. Leave out for the model set in Settings. Settings can fix one model for every child; that one then wins.'
         },
         title: { type: 'string', description: 'Sidebar title for the child chat' },
         worktree: {

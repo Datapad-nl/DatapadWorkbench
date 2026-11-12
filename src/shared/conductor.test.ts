@@ -5,6 +5,7 @@ describe('conductorPrompt', () => {
   it('lets the conductor pick a model per worker when Settings fixes none', () => {
     const prompt = conductorPrompt('  move the store to SQLite ', '', 4)
     expect(prompt).toContain('`haiku` when a small, fast model is enough')
+    expect(prompt).toContain('`fable` for a really hard task')
     expect(prompt.endsWith('The job:\nmove the store to SQLite')).toBe(true)
   })
 
@@ -34,6 +35,7 @@ describe('agentToolRule', () => {
   it('has Claude Code pick a model per agent when Settings fixes none', () => {
     const rule = agentToolRule('', 3)
     expect(rule).toContain('`haiku` when a small, fast model is enough')
+    expect(rule).toContain('`fable` for a really hard task')
     expect(rule).toContain('At most 3 of your agents run at the same time')
   })
 

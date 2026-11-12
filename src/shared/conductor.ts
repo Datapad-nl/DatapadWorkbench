@@ -20,7 +20,7 @@ export const MAX_SUBAGENTS_CHOICES = Array.from({ length: MOST_SUBAGENTS }, (_, 
 export function conductorPrompt(job: string, workerModel: string, maxWorkers: number): string {
   const model = workerModel
     ? `Every worker runs on ${workerModel}, as set in Settings.`
-    : 'Pick the model for each worker with `model`: `opus` for work that needs judgement, `sonnet` for routine work, and `haiku` when a small, fast model is enough for the job.'
+    : 'Pick the model for each worker with `model`: `fable` for a really hard task, such as a bug nobody has found, a design with many parts or a long change across the codebase; `opus` for work that needs judgement; `sonnet` for routine work; and `haiku` when a small, fast model is enough for the job. Fable costs the most, so keep it for the tasks that need it.'
   return [
     'You are the conductor of this job. You do the thinking: the plan, the architecture, the strategy.',
     'Split the job into tasks. Give each one to its own worker with the `delegate` tool of the `workbench` MCP server. Start tasks that do not depend on each other in the same turn, so they run side by side; give workers that edit files at the same time their own worktree. A worker starts with no context: its brief carries the goal, the files, what is already ruled out, and what to report back.',
@@ -40,6 +40,6 @@ export function conductorPrompt(job: string, workerModel: string, maxWorkers: nu
 export function agentToolRule(agentModel: string, maxAgents: number): string {
   const model = agentModel
     ? `Agents you start with your own Agent tool run on ${agentModel}, as set in Settings.`
-    : 'When you start an agent with your own Agent tool, pick its model with `model`: `haiku` when a small, fast model is enough for the task, `sonnet` for routine work, and `opus` for work that needs judgement. Leave `model` out only when the task needs the model you run on.'
+    : 'When you start an agent with your own Agent tool, pick its model with `model`: `haiku` when a small, fast model is enough for the task, `sonnet` for routine work, `opus` for work that needs judgement, and `fable` for a really hard task, such as a bug nobody has found, a design with many parts or a long change across the codebase. Fable costs the most, so keep it for the tasks that need it. Leave `model` out only when the task needs the model you run on.'
   return `${model} At most ${maxAgents} ${maxAgents === 1 ? 'of your agents runs' : 'of your agents run'} at the same time, as set in Settings; a start past that is refused. When there is more work than that, start the next agent when one reports back.`
 }
