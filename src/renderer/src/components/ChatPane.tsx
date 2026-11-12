@@ -31,6 +31,7 @@ import {
 } from '../../../shared/slash'
 import { DEFAULT_MAX_SUBAGENTS, conductorPrompt } from '../../../shared/conductor'
 import { contextLabel, handoffAdvised, handoffPrompt } from '../../../shared/handoff'
+import { resolveProjectColor } from '../../../shared/projectColor'
 import { plainReply } from '../../../shared/steps'
 import {
   chatAgentLabel,
@@ -706,7 +707,11 @@ function TabBar({
     return new Map(
       chats.map((chat) => [
         chat.id,
-        { title: chat.title, projectName: projectById.get(chat.projectId)?.name ?? 'Project' }
+        {
+          title: chat.title,
+          projectName: projectById.get(chat.projectId)?.name ?? 'Project',
+          color: resolveProjectColor(projectById.get(chat.projectId) ?? { id: chat.projectId })
+        }
       ])
     )
   }, [chats, projects])
@@ -730,9 +735,10 @@ function TabBar({
             >
               <button className="flex min-w-0 items-center gap-2" onClick={() => onOpen(id)}>
                 <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    active || streaming ? 'bg-accent' : 'bg-faint'
-                  } ${streaming ? 'streaming-dot' : ''}`}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${active || streaming ? '' : 'opacity-50'} ${
+                    streaming ? 'streaming-dot' : ''
+                  }`}
+                  style={{ background: tab?.color }}
                 />
                 <span className={`truncate text-[12.5px] ${active ? 'font-medium' : ''}`}>
                   {tab?.title ?? 'Chat'}
