@@ -10,6 +10,7 @@ import {
 } from 'react'
 import type {
   Attachment,
+  BotMention,
   Chat,
   ChatAgent,
   ChatContext,
@@ -111,6 +112,9 @@ type WorkspaceContextValue = {
   openChatIds: string[]
   activeChatId: string | null
   activeProjectId: string | null
+  /** The bot whose page shows in place of the chat pane. */
+  activeBotId: string | null
+  openBot: (botId: string | null) => void
   chatsById: Record<string, Chat>
   showNewProject: boolean
   /** `'mcp'` opens Settings on the MCP tab. */
@@ -152,7 +156,8 @@ type WorkspaceContextValue = {
     content: string,
     attachments?: Attachment[],
     mentions?: FileMention[],
-    conversation?: string
+    conversation?: string,
+    bots?: BotMention[]
   ) => Promise<boolean>
   stopChat: (chatId: string) => Promise<void>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
@@ -258,6 +263,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   const activeChatIdRef = useRef(activeChatId)
   activeChatIdRef.current = activeChatId
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [activeBotId, setActiveBotId] = useState<string | null>(null)
   const [chatsById, setChatsById] = useState<Record<string, Chat>>({})
   const chatsByIdRef = useRef(chatsById)
   chatsByIdRef.current = chatsById
@@ -599,6 +605,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         case 'open':
           void openChatRef.current?.(event.chatId)
           return
+        case 'open-bot':
+          setActiveBotId(event.botId)
+          return
         case 'context':
           setContexts((current) => ({ ...current, [event.chatId]: event.context }))
           return
@@ -736,7 +745,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     // Events may have brought a newer copy while it loaded.
     setChatsById((current) => (current[chatId] ? current : { ...current, [chatId]: chat }))
     setActiveChatId(chatId)
-    setActiveProjectId(chat.projectId)
+    // A bot's chat has no project, so the project stays where it was.
+    if (!chat.botId) setActiveProjectId(chat.projectId)
+    setActiveBotId(null)
     setOpenChatIds((current) => (current.includes(chatId) ? current : [...current, chatId]))
   }, [])
   useEffect(() => {
@@ -772,6 +783,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   const selectProject = useCallback((projectId: string) => {
     setActiveProjectId(projectId)
+    setActiveBotId(null)
+  }, [])
+
+  const openBot = useCallback((botId: string | null) => {
+    setActiveBotId(botId)
   }, [])
 
   const createProject = useCallback(
@@ -782,6 +798,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       setChatsById((current) => ({ ...current, [chat.id]: chat }))
       setOpenChatIds((current) => (current.includes(chat.id) ? current : [...current, chat.id]))
       setActiveChatId(chat.id)
+      setActiveBotId(null)
       setShowNewProject(false)
     },
     [refreshAfterChange]
@@ -826,6 +843,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       setOpenChatIds((current) => (current.includes(chat.id) ? current : [...current, chat.id]))
       setActiveChatId(chat.id)
       setActiveProjectId(projectId)
+      setActiveBotId(null)
     },
     [refreshAfterChange]
   )
@@ -858,7 +876,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       content: string,
       attachments?: Attachment[],
       mentions?: FileMention[],
-      conversation?: string
+      conversation?: string,
+      bots?: BotMention[]
     ) => {
       const atSend = turnsRef.current[chatId]
       const asAside = atSend?.live === true
@@ -877,7 +896,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
           content,
           attachments,
           mentions,
-          asAside ? conversation : undefined
+          asAside ? conversation : undefined,
+          bots
         )
         // The turn's done can come before this reply; its chat is newer than this one.
         const now = turnsRef.current[chatId]
@@ -1024,6 +1044,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       openChatIds,
       activeChatId,
       activeProjectId,
+      activeBotId,
+      openBot,
       chatsById,
       showNewProject,
       showSettings,
@@ -1077,6 +1099,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       openChatIds,
       activeChatId,
       activeProjectId,
+      activeBotId,
+      openBot,
       chatsById,
       showNewProject,
       showSettings,

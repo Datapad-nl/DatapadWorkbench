@@ -11,7 +11,7 @@ const stub = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({ app: { getPath: () => stub.dir } }))
 vi.mock('./store', () => ({
-  getChat: async (id: string) => ({ id, projectId: 'p1' }),
+  getChat: async (id: string) => ({ id, projectId: 'p1', ...(id.startsWith('bot-') ? { botId: 'b1' } : {}) }),
   // '/tmp' has no briefing file, so the tests write nothing outside the temp dir.
   listProjects: async () => [{ id: 'p1', name: 'Demo', path: '/tmp' }]
 }))
@@ -82,6 +82,12 @@ describe('the knowledge vault in the session rules', () => {
 })
 
 describe('project intake', () => {
+  it('asks nothing in a bot run in the project', async () => {
+    await maybeStartProjectIntake('p1', 'bot-run')
+    expect(pendingQuestionRequests()).toHaveLength(0)
+    expect(stub.generate).not.toHaveBeenCalled()
+  })
+
   it('posts no card when its chat is deleted before the intake got going', async () => {
     const started = maybeStartProjectIntake('p1', 'chat-gone')
     // chat:delete cancels while the intake is still reading the chat and the projects.

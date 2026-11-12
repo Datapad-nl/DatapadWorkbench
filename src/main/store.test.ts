@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const stub = vi.hoisted(() => ({ dir: '' }))
 vi.mock('electron', () => ({ app: { getPath: () => stub.dir } }))
 
-import { deleteChat, listChats, mutateChat } from './store'
+import { createChat, deleteChat, listChats, mutateChat } from './store'
 
 let chats = ''
 
@@ -74,5 +74,19 @@ describe('listChats', () => {
     expect(list).toHaveLength(2)
     await deleteChat('b')
     expect((await listChats()).map((chat) => chat.id)).toEqual(['a'])
+  })
+})
+
+describe('bot chats', () => {
+  it('opens a chat of a bot without a project, and lists it with its bot', async () => {
+    writeFileSync(
+      join(stub.dir, 'workbench', 'bots.json'),
+      JSON.stringify({ bots: [{ id: 'b1', name: 'Scout', agent: 'grok', model: '', instructions: '', allowedTools: [], avatar: null }] })
+    )
+    const chat = await createChat('', { botId: 'b1', title: 'Scheduled: report' })
+    expect(chat).toMatchObject({ projectId: '', botId: 'b1' })
+    expect((await listChats()).find((item) => item.id === chat.id)).toMatchObject({ projectId: '', botId: 'b1' })
+    await expect(createChat('', { botId: 'gone' })).rejects.toThrow('Bot not found')
+    await expect(createChat('nowhere')).rejects.toThrow('Project not found')
   })
 })

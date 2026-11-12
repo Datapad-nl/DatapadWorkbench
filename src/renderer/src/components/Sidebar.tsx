@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PROJECT_COLORS, resolveProjectColor } from '../../../shared/projectColor'
-import type { ChatSummary, Project } from '../../../shared/types'
+import type { Bot, ChatSummary, Project } from '../../../shared/types'
+import { BotAvatar, useBots } from '../bots'
 import { useStreamStatuses, useWorkspace } from '../workspace'
 import wordmark from '../assets/wordmark.png'
 import { Icon, IconButton } from './icons'
@@ -492,7 +493,8 @@ function ChatRow({
   worktreeBranch
 }: {
   chat: ChatSummary
-  project: Project
+  /** Missing for a bot's chat. */
+  project?: Project
   /** Branch of the worktree project this chat runs in, when it is folded under its parent. */
   worktreeBranch?: string | null
 }): React.JSX.Element {
@@ -513,7 +515,7 @@ function ChatRow({
         <button
           className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2 text-left"
           title={chat.title}
-          data-project={project.id}
+          data-project={project?.id}
           onClick={() => void openChat(chat.id)}
         >
           <span className="truncate text-[12.5px]">{chat.title}</span>
@@ -599,8 +601,11 @@ export function Sidebar(): React.JSX.Element | null {
     setShowSettings,
     gitSummaries,
     showSidebar,
-    setShowSidebar
+    setShowSidebar,
+    activeBotId,
+    openBot
   } = useWorkspace()
+  const { bots, createBot } = useBots()
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readFlags(COLLAPSED_KEY))
   // Names hidden for screen recordings; kept across restarts.
   const [blurred, setBlurred] = useState<Record<string, boolean>>(() => readFlags(BLURRED_KEY))
@@ -698,6 +703,8 @@ export function Sidebar(): React.JSX.Element | null {
   const chatsByProject = useMemo(() => {
     const grouped: Record<string, typeof chats> = {}
     for (const chat of chats) {
+      // A bot's run in a project lists under the bot.
+      if (chat.botId) continue
       const owner = ownerOf[chat.projectId] ?? chat.projectId
       grouped[owner] ??= []
       grouped[owner].push(chat)
@@ -740,6 +747,20 @@ export function Sidebar(): React.JSX.Element | null {
       })
       .filter((item): item is { project: Project; chats: ChatSummary[] } => item !== null)
   }, [projects, ownerOf, chatsByProject, needle, contentHits])
+
+  // Bots filter like projects: by name, or by any of their chats.
+  const shownBots = useMemo(() => {
+    return bots
+      .map((bot) => {
+        const all = chats.filter((chat) => chat.botId === bot.id)
+        if (!needle) return { bot, chats: all }
+        const nameHit = bot.name.toLowerCase().includes(needle)
+        const hits = all.filter((chat) => chat.title.toLowerCase().includes(needle) || contentHits.has(chat.id))
+        if (!nameHit && hits.length === 0) return null
+        return { bot, chats: nameHit && hits.length === 0 ? all : hits }
+      })
+      .filter((item): item is { bot: Bot; chats: ChatSummary[] } => item !== null)
+  }, [bots, chats, needle, contentHits])
 
   const menuProject = menu ? (projects.find((item) => item.id === menu.projectId) ?? null) : null
 
@@ -955,6 +976,59 @@ export function Sidebar(): React.JSX.Element | null {
       </div>
 
       <div className="no-drag min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <SectionLabel
+          label="Bots"
+          onAdd={() =>
+            void createBot('New bot')
+              .then((bot) => openBot(bot.id))
+              .catch((caught: unknown) => window.alert(errorText(caught, 'Could not create the bot')))
+          }
+          addLabel="New bot"
+          addTestId="new-bot"
+        />
+        {bots.length === 0 ? (
+          <div className="px-2 pb-1 text-[12px] text-faint">No bots yet.</div>
+        ) : (
+          shownBots.map(({ bot, chats: botChats }) => {
+            const active = activeBotId === bot.id
+            const limit = showAll[bot.id] || needle ? botChats.length : VISIBLE_CHATS
+            const hidden = botChats.length - Math.min(limit, botChats.length)
+            return (
+              <div key={bot.id} className="mb-px">
+                <button
+                  data-testid="bot-row"
+                  className={`flex h-[30px] w-full items-center gap-2 rounded-[7px] px-2 text-left ${
+                    active
+                      ? 'bg-raised text-ink shadow-[inset_0_0_0_1px_var(--color-line-strong)]'
+                      : 'text-ink-2 hover:bg-hover hover:text-ink'
+                  }`}
+                  title={bot.name}
+                  onClick={() => openBot(bot.id)}
+                >
+                  <BotAvatar bot={bot} size={18} />
+                  <span className="truncate text-[13px]">{bot.name}</span>
+                </button>
+                {botChats.length > 0 && (
+                  <div className="mb-1 pl-[26px]" data-testid="bot-chats">
+                    <div className="ml-[9px] border-l border-line pl-2">
+                      {botChats.slice(0, limit).map((chat) => (
+                        <ChatRow key={chat.id} chat={chat} />
+                      ))}
+                      {hidden > 0 && (
+                        <button
+                          className="flex h-7 w-full items-center rounded-[7px] px-2 text-left text-[12px] text-faint hover:bg-hover hover:text-muted"
+                          onClick={() => setShowAll((current) => ({ ...current, [bot.id]: true }))}
+                        >
+                          Show {hidden} more
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })
+        )}
         <SectionLabel
           label="Projects"
           onAdd={() => setShowNewProject(true)}

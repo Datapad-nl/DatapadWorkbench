@@ -9,8 +9,11 @@ import type {
   CreateProjectInput,
   FileMention,
   IndexEvent,
+  BotMention,
   PermissionMode,
   PlanVerdict,
+  SaveBotSkillInput,
+  UpdateBotInput,
   UpdateProjectInput,
   UserQuestionAnswer,
   VoiceSettings
@@ -23,6 +26,18 @@ import {
   getActivitySnapshot,
   startActivityBridge
 } from './activity'
+import {
+  AVATAR_MIME,
+  botAvatarUrl,
+  botFolder,
+  clearBotAvatar,
+  createBot,
+  getBot,
+  listBots,
+  removeBot,
+  setBotAvatar,
+  updateBot
+} from './bots'
 import { getBuiltinAgents, startBuiltinAgentsBridge } from './builtinAgents'
 import {
   cancelBrowserAnnotate,
@@ -75,11 +90,16 @@ import {
   stopStream
 } from './grok'
 import {
+  abortAgent,
+  agentKey,
+  applyBotToLiveSessions,
   applyClaudeModelToLiveSessions,
   applyEffortToLiveSessions,
   fetchUsage,
-  getClaudeOptions
+  getClaudeOptions,
+  grokCommands
 } from './acp'
+import { listBotSkills, removeBotSkill, saveBotSkill } from './botSkills'
 import { fetchClaudeUsage } from './claudeUsage'
 import {
   onPermissionDenied,
@@ -91,7 +111,7 @@ import {
 } from './permissions'
 import { findEditClash } from './fileClash'
 import { cancelProjectIntake, maybeStartProjectIntake, scheduleProjectIntake } from './intake'
-import { registerChatTools, stopSchedule } from './chatTools'
+import { askBot, registerChatTools, scheduleBotTask, stopSchedule } from './chatTools'
 import { unlinkPr } from './pullRequests'
 import { cancelChatQuestions, onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
 import {
@@ -155,14 +175,21 @@ function emit(event: ChatEvent): void {
   }
 }
 
-function openFromNotice(chatId: string): void {
+export function openFromNotice(chatId: string): void {
   emit({ type: 'open', chatId })
+}
+
+export function openBotFromTray(botId: string): void {
+  emit({ type: 'open-bot', botId })
 }
 
 /** System notification for a chat that needs the user, when the app is in the background. */
 async function noticeFor(chatId: string, body: string, urgent = false): Promise<void> {
   const chat = await getChat(chatId).catch(() => null)
-  if (chat) notifyChat(chat, body, openFromNotice, urgent)
+  if (!chat) return
+  // A bot's chat may run unattended, so its notice says which bot asks.
+  const bot = chat.botId ? await getBot(chat.botId).catch(() => null) : null
+  notifyChat(bot ? { id: chat.id, title: `${bot.name}: ${chat.title}` } : chat, body, openFromNotice, urgent)
 }
 
 function emitIndex(event: IndexEvent): void {
@@ -176,10 +203,11 @@ async function sendTurn(
   chatId: string,
   content: string,
   attachments: Array<{ id: string; mimeType: string; data: string }> = [],
-  mentions: FileMention[] = []
+  mentions: FileMention[] = [],
+  bots: BotMention[] = []
 ): Promise<{ chat: Chat; done: Promise<Chat | null> }> {
   // The turn sends its own done or error event; this only adds the system notification.
-  const { chat, done } = await sendUserTurn(chatId, content, attachments, mentions)
+  const { chat, done } = await sendUserTurn(chatId, content, attachments, mentions, bots)
   const notified = done.then(
     (saved) => {
       const reply = saved?.messages.at(-1)
@@ -339,6 +367,47 @@ export function registerIpc(): void {
     return result.filePaths[0]
   })
 
+  ipcMain.handle('bot:list', () => listBots())
+  ipcMain.handle('bot:create', (_event, name: unknown) => createBot(typeof name === 'string' ? name : ''))
+  ipcMain.handle('bot:update', async (_event, input: UpdateBotInput) => {
+    const bot = await updateBot(input)
+    await applyBotToLiveSessions(bot.id)
+    return bot
+  })
+  ipcMain.handle('bot:delete', async (_event, botId: string) => {
+    // The bot's own Grok process, which loaded its skills, goes with it.
+    abortAgent(agentKey('grok', botFolder(String(botId))))
+    await removeBot(String(botId))
+  })
+  ipcMain.handle('bot:avatar', (_event, botId: string) => botAvatarUrl(String(botId)))
+  ipcMain.handle('bot:clearAvatar', (_event, botId: string) => clearBotAvatar(String(botId)))
+  ipcMain.handle('bot:pickAvatar', async (_event, botId: string) => {
+    const window = BrowserWindow.getFocusedWindow()
+    const options = {
+      title: 'Choose an avatar',
+      properties: ['openFile' as const],
+      filters: [{ name: 'Images', extensions: Object.keys(AVATAR_MIME).map((ext) => ext.slice(1)) }]
+    }
+    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    return setBotAvatar(String(botId), result.filePaths[0])
+  })
+  ipcMain.handle('bot:skills', (_event, botId: string) => listBotSkills(String(botId)))
+  ipcMain.handle('bot:saveSkill', (_event, input: SaveBotSkillInput) => saveBotSkill(input))
+  ipcMain.handle('bot:removeSkill', (_event, botId: string, name: string) => removeBotSkill(String(botId), String(name)))
+  // Grok names a bot's skills without the bot's name, so one can hide a global command of the same name.
+  ipcMain.handle('bot:grokCommandNames', async () =>
+    (await grokCommands(null).catch(() => [])).map((command) => command.name)
+  )
+  ipcMain.handle('bot:schedule', (_event, input: { botId: string; prompt: string; cron?: string; at?: string }) =>
+    scheduleBotTask(input ?? {})
+  )
+  ipcMain.handle('bot:openFolder', async (_event, botId: string) => {
+    const bot = await getBot(String(botId))
+    const error = await shell.openPath(bot.folder)
+    if (error) throw new Error(error)
+  })
+
   ipcMain.handle('project:ensureIntake', async (_event, input: { projectId: string; chatId: string }) => {
     void maybeStartProjectIntake(input.projectId, input.chatId)
     return true
@@ -456,9 +525,29 @@ export function registerIpc(): void {
         attachments?: Array<{ id: string; mimeType: string; data: string }>
         mentions?: FileMention[]
         conversation?: string
+        /** The bots asked with @. Each answers in a run of its own. */
+        bots?: BotMention[]
       }
     ) => {
     const conversation = typeof input.conversation === 'string' ? input.conversation : undefined
+    const bots = (Array.isArray(input.bots) ? input.bots : []).filter(
+      (bot, index, all) =>
+        typeof bot?.id === 'string' &&
+        typeof bot.name === 'string' &&
+        all.findIndex((item) => item?.id === bot.id) === index
+    )
+    // After the project chat's turn is reserved, so a Stop sent right away still finds it.
+    const askBots = (): void => {
+      for (const bot of bots) {
+        void askBot({
+          botId: bot.id,
+          fromChatId: input.chatId,
+          content: input.content,
+          attachments: input.attachments ?? [],
+          mentions: input.mentions ?? []
+        })
+      }
+    }
     // Nothing is awaited before a new turn is reserved, so a Stop sent right after this finds it.
     if (isStreaming(input.chatId)) {
       const projects = await listProjects()
@@ -472,6 +561,7 @@ export function registerIpc(): void {
         input.mentions ?? [],
         conversation
       )
+      askBots()
       return started
     }
     // A clip from a conversation that ended while it was on its way does not start a turn.
@@ -480,9 +570,11 @@ export function registerIpc(): void {
       input.chatId,
       input.content,
       input.attachments ?? [],
-      input.mentions ?? []
+      input.mentions ?? [],
+      bots.map((bot) => ({ id: bot.id, name: bot.name }))
     )
     done.catch(() => {})
+    askBots()
     return chat
   })
 

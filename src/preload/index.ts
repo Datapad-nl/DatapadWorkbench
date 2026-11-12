@@ -11,6 +11,9 @@ import type {
   BrowserAnnotationHit,
   BrowserBounds,
   BrowserState,
+  Bot,
+  BotMention,
+  BotSkill,
   Chat,
   ChatLiveState,
   ChatAgent,
@@ -28,6 +31,8 @@ import type {
   PermissionMode,
   PlanVerdict,
   PublicSettings,
+  SaveBotSkillInput,
+  UpdateBotInput,
   UpdateProjectInput,
   UpdateState,
   UsageSnapshot,
@@ -49,6 +54,21 @@ const api = {
   ensureProjectIntake: (projectId: string, chatId: string) =>
     ipcRenderer.invoke('project:ensureIntake', { projectId, chatId }),
   pickFolder: () => ipcRenderer.invoke('project:pickFolder'),
+  listBots: (): Promise<Bot[]> => ipcRenderer.invoke('bot:list'),
+  createBot: (name: string): Promise<Bot> => ipcRenderer.invoke('bot:create', name),
+  updateBot: (input: UpdateBotInput): Promise<Bot> => ipcRenderer.invoke('bot:update', input),
+  deleteBot: (botId: string): Promise<void> => ipcRenderer.invoke('bot:delete', botId),
+  getBotAvatar: (botId: string): Promise<string | null> => ipcRenderer.invoke('bot:avatar', botId),
+  pickBotAvatar: (botId: string): Promise<Bot | null> => ipcRenderer.invoke('bot:pickAvatar', botId),
+  clearBotAvatar: (botId: string): Promise<Bot> => ipcRenderer.invoke('bot:clearAvatar', botId),
+  openBotFolder: (botId: string): Promise<void> => ipcRenderer.invoke('bot:openFolder', botId),
+  listBotSkills: (botId: string): Promise<BotSkill[]> => ipcRenderer.invoke('bot:skills', botId),
+  saveBotSkill: (input: SaveBotSkillInput): Promise<BotSkill> => ipcRenderer.invoke('bot:saveSkill', input),
+  removeBotSkill: (botId: string, name: string): Promise<void> => ipcRenderer.invoke('bot:removeSkill', botId, name),
+  grokCommandNames: (): Promise<string[]> => ipcRenderer.invoke('bot:grokCommandNames'),
+  /** `cron` repeats; `at` (an ISO time) runs once. */
+  scheduleBot: (input: { botId: string; prompt: string; cron?: string; at?: string }): Promise<Chat> =>
+    ipcRenderer.invoke('bot:schedule', input),
   createChat: (projectId: string) => ipcRenderer.invoke('chat:create', projectId),
   getChat: (chatId: string) => ipcRenderer.invoke('chat:get', chatId),
   searchChats: (query: string): Promise<string[]> => ipcRenderer.invoke('chat:search', query),
@@ -72,8 +92,9 @@ const api = {
     content: string,
     attachments?: Array<{ id: string; mimeType: string; data: string }>,
     mentions?: FileMention[],
-    conversation?: string
-  ) => ipcRenderer.invoke('chat:send', { chatId, content, attachments, mentions, conversation }),
+    conversation?: string,
+    bots?: BotMention[]
+  ) => ipcRenderer.invoke('chat:send', { chatId, content, attachments, mentions, conversation, bots }),
   /** Ending a voice conversation takes back the corrections said in it that the agent has not received. */
   endConversation: (conversation: string) =>
     ipcRenderer.invoke('chat:endConversation', conversation) as Promise<void>,

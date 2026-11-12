@@ -2,6 +2,7 @@ import { homedir } from 'os'
 import type {
   AgentCommand,
   Attachment,
+  BotMention,
   Chat,
   ChatAgent,
   ChatContext,
@@ -20,6 +21,7 @@ import {
   abortAgent,
   acpModeIdFor,
   agentGeneration,
+  agentKey,
   bindExitPlanSession,
   cancelSession,
   clearQueuedExitPlanVerdict,
@@ -40,9 +42,12 @@ import {
   resolveExitPlan,
   sessionCommands,
   setAcpSessionMode,
+  type AgentKey,
   type SessionUpdate
 } from './acp'
 import { emitNotice, finishTurn, startTurn } from './activity'
+import { promptForBotAnswers, promptForBotsAsked } from './botPrompt'
+import { botFolder, botSessionRules, getBot } from './bots'
 import { endForegroundAgents } from './builtinAgents'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
@@ -124,8 +129,8 @@ type Turn = {
   /** 'preparing' until the prompt goes to the agent. */
   phase: 'preparing' | 'streaming'
   sessionId: string | null
-  agent: ChatAgent
   /** The agent process this turn prompts. Stop kills only that one. */
+  agent: AgentKey
   agentGeneration: number
   cancelled: boolean
   /** Cancelled by a steer, which runs as soon as this turn ends. The session is kept. */
@@ -747,9 +752,23 @@ export async function loadChat(chatId: string): Promise<Chat> {
   return applyDiskPlan(chat)
 }
 
+/** Where a chat works: its worktree, its project, or its bot's folder. */
+function chatFolder(chat: Chat, project: Project | undefined): string {
+  return chatWorkingDir(chat, project?.path) || (chat.botId ? botFolder(chat.botId) : null) || homedir()
+}
+
+/** A bot's instructions come before the rules of the project it works in. */
+async function chatRules(chat: Chat, project: Project | undefined): Promise<string | null> {
+  const bot = chat.botId ? botSessionRules(await getBot(chat.botId)) : null
+  const rules = [bot, await projectSessionRules(project?.id)].filter(Boolean)
+  return rules.length > 0 ? rules.join('\n\n') : null
+}
+
 async function resolveSession(chat: Chat, project: Project | undefined): Promise<{ chat: Chat; sessionId: string }> {
-  const cwd = chatWorkingDir(chat, project?.path) || homedir()
+  const cwd = chatFolder(chat, project)
   const agent = normalizeChatAgent(chat.agent)
+  // A bot's own skills come from its folder.
+  const pluginDir = chat.botId ? botFolder(chat.botId) : null
   const bind = (sessionId: string): void => {
     sessionChats.set(sessionId, chat.id)
     bindPermissionSession(sessionId, chat.id, normalizePermissionMode(chat.mode))
@@ -768,14 +787,14 @@ async function resolveSession(chat: Chat, project: Project | undefined): Promise
     bind(sessionId)
     if (hasLiveSession(sessionId)) return { chat, sessionId }
     try {
-      await loadSession(sessionId, cwd, await projectSessionRules(project?.id), agent, chat.id)
+      await loadSession(sessionId, cwd, await chatRules(chat, project), agent, chat.id, pluginDir)
       return { chat, sessionId }
     } catch {
       // Session is gone in this agent process. Prompting the dead id returns
       // an empty turn, so open a replacement session instead.
     }
   }
-  const sessionId = await newSession(cwd, await projectSessionRules(project?.id), agent, chat.id)
+  const sessionId = await newSession(cwd, await chatRules(chat, project), agent, chat.id, pluginDir)
   await mutateChat(chat.id, (latest) => {
     latest.grokSessionId = sessionId
   })
@@ -788,7 +807,8 @@ async function appendUserMessage(
   chatId: string,
   content: string,
   attachments: Attachment[],
-  mentions: FileMention[]
+  mentions: FileMention[],
+  bots: BotMention[]
 ): Promise<Chat> {
   const loaded = await getChat(chatId)
   await mutateChat(chatId, (chat) => {
@@ -800,6 +820,7 @@ async function appendUserMessage(
       content,
       attachments: attachments.length > 0 ? attachments : undefined,
       mentions: mentions.length > 0 ? mentions : undefined,
+      bots: bots.length > 0 ? bots : undefined,
       createdAt: now()
     })
     if (chat.title === 'New chat') {
@@ -831,14 +852,15 @@ export async function sendUserTurn(
   chatId: string,
   content: string,
   attachments: Attachment[] = [],
-  mentions: FileMention[] = []
+  mentions: FileMention[] = [],
+  bots: BotMention[] = []
 ): Promise<{ chat: Chat; done: Promise<Chat | null> }> {
   const trimmed = content.trim()
   if (!trimmed && attachments.length === 0 && mentions.length === 0) throw new Error('Message is empty')
   const turn = reserveTurn(chatId)
   let chat: Chat
   try {
-    chat = await appendUserMessage(chatId, trimmed, attachments, mentions)
+    chat = await appendUserMessage(chatId, trimmed, attachments, mentions, bots)
   } catch (error) {
     releaseTurn(turn)
     emitLive({ type: 'error', chatId, turnId: turn.id, error: errorMessage(error) })
@@ -893,10 +915,13 @@ function stoppedReply(turn: Turn): string {
 async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null> {
   let chat = await step(turn, getChat(turn.chatId))
   const agent = normalizeChatAgent(chat.agent)
-  turn.agent = agent
+  // A bot that was deleted takes its chats along, so this only fails while that happens.
+  if (chat.botId) await step(turn, getBot(chat.botId))
+  const pluginDir = chat.botId ? botFolder(chat.botId) : null
+  turn.agent = agentKey(agent, pluginDir)
   const signInError = await step(turn, agentSignInError(agent))
   if (signInError) throw new Error(signInError)
-  await step(turn, ensureAgent(agent))
+  await step(turn, ensureAgent(agent, pluginDir))
   const project = (await step(turn, listProjects())).find((item) => item.id === chat.projectId)
 
   const followText = followUp?.text.trim() ?? ''
@@ -913,9 +938,11 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const opensHandoff = Boolean(chat.handoffFrom) && chat.messages.length <= 1
   // Only before the first reply: a chat that has worked in the folder keeps its edits there.
   const started = chat.messages.some((message) => message.role === 'assistant')
-  if (!followUp && !opensHandoff && !started && !chat.worktreePath && project?.path) {
+  // A bot asked with @ works in the project's folder next to the project's agent, so neither moves away from the other.
+  if (!followUp && !opensHandoff && !started && !chat.worktreePath && !chat.botId && project?.path) {
     const siblings = (await step(turn, listChats())).filter(
-      (item) => item.projectId === chat.projectId && item.id !== chat.id && item.id !== chat.handoffFrom
+      (item) =>
+        item.projectId === chat.projectId && item.id !== chat.id && item.id !== chat.handoffFrom && !item.botId
     )
     // Not raced against stop: a worktree it makes must be saved, or it is lost.
     const isolated = await isolateChatIfNeeded({ ...chat }, project.path, lastUser!.content, {
@@ -966,14 +993,29 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   checkStopped(turn)
 
   const userText = followText || lastUser!.content
-  const mentioned = followText ? followText : promptForMentions(lastUser!.content, lastUser!.mentions)
-  const cued = promptForMode(mode, mentioned)
+  const mentioned = followText
+    ? followText
+    : promptForBotsAsked(promptForMentions(lastUser!.content, lastUser!.mentions), lastUser!.bots)
+  // Bot answers posted since the agent's last prompt: it sees them now, once.
+  const answers = chat.messages.filter((message) => message.fromBot && !message.fromBot.delivered)
+  if (answers.length > 0) {
+    const ids = new Set(answers.map((message) => message.id))
+    await step(
+      turn,
+      mutateChat(chat.id, (latest) => {
+        for (const message of latest.messages) {
+          if (message.fromBot && ids.has(message.id)) message.fromBot.delivered = true
+        }
+      })
+    )
+  }
+  const cued = promptForMode(mode, promptForBotAnswers(mentioned, answers))
   const images = followUp ? (followUp.attachments ?? []) : (lastUser!.attachments ?? [])
 
   // From here the agent owns the turn. Nothing is awaited until the prompt is sent.
   turn.phase = 'streaming'
   turn.sessionId = sessionId
-  turn.agentGeneration = agentGeneration(agent)
+  turn.agentGeneration = agentGeneration(turn.agent)
   sessionTurns.set(sessionId, turn)
   clearSessionStopped(sessionId)
   sessionChats.set(sessionId, chat.id)
@@ -1317,7 +1359,7 @@ async function runAside(
     detail: question || 'Screenshot'
   })
 
-  const cwd = chatWorkingDir(started, project?.path) || homedir()
+  const cwd = chatFolder(started, project)
   let assembled = ''
   let steer = false
   try {

@@ -358,7 +358,8 @@ export async function maybeStartProjectIntake(projectId: string, chatId: string)
   try {
     if (!(await needsProjectIntake(projectId))) return
     const chat = await getChat(chatId).catch(() => null)
-    if (!chat || chat.projectId !== projectId) return
+    // A bot's run in the project is not where the user talks about the project.
+    if (!chat || chat.projectId !== projectId || chat.botId) return
     const projects = await listProjects()
     const project = projects.find((item) => item.id === projectId)
     if (!project) return

@@ -2,6 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from 'child_process'
 import readline from 'readline'
 import { toAcpMcpServers } from '../shared/mcp'
 import { agentToolRule } from '../shared/conductor'
+import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
 import { claudeAcpCommand } from './claudeCli'
 import { grokBinary } from './grokCli'
@@ -46,6 +47,7 @@ import {
   type UsageSnapshot
 } from '../shared/types'
 import {
+  chatBot,
   claudeModelFor,
   getApiKey,
   getClaudeModel,
@@ -160,9 +162,40 @@ const queuedVerdicts = new Map<string, { outcome: ExitPlanOutcome; at: number }>
 const QUEUED_VERDICT_TTL_MS = 60_000
 const SESSION_UPDATE_METHODS = new Set(['session/update', 'x.ai/session/update', '_x.ai/session/update'])
 
-/** One ACP agent process. Grok Build and Claude Code each get their own. */
+/**
+ * Tool names by tool call id, from the tool call updates. Claude Code names an MCP tool in its permission request
+ * but other tools only in the tool call that comes before it. Holds the latest calls only.
+ */
+const toolCallNames = new Map<string, string>()
+
+function noteToolCallName(update: SessionUpdate['update'] | undefined): void {
+  const kind = update?.sessionUpdate
+  if ((kind !== 'tool_call' && kind !== 'tool_call_update') || !update?.toolCallId) return
+  const name = toolCallName(update)
+  if (!name) return
+  toolCallNames.delete(update.toolCallId)
+  toolCallNames.set(update.toolCallId, name)
+  if (toolCallNames.size > 500) toolCallNames.delete(toolCallNames.keys().next().value as string)
+}
+
+/** Whether a bot chat may run this tool without asking, because the tool is on the bot's list. */
+async function botAllowsTool(sessionId: string, params: PermissionParams): Promise<boolean> {
+  const tool = params.toolCall
+  const name = toolCallName(tool) ?? (tool?.toolCallId ? toolCallNames.get(tool.toolCallId) : undefined)
+  if (!name) return false
+  const bot = await chatBot(chatIdForSession(sessionId) ?? undefined).catch(() => null)
+  return !!bot && isToolAllowed(bot.allowedTools, name)
+}
+
+/**
+ * One ACP agent process. Grok Build and Claude Code each get their own, and so does every bot on
+ * Grok Build, because Grok takes a bot's skills (`--plugin-dir`) for the whole process.
+ */
 type Conn = {
   agent: ChatAgent
+  /** `grok`, `claude`, or `grok@<bot folder>`. */
+  key: AgentKey
+  pluginDir: string | null
   proc: ChildProcessWithoutNullStreams | null
   /** Counts spawns, so a timer can tell the process it meant from a respawn. */
   generation: number
@@ -174,9 +207,19 @@ type Conn = {
   flushScheduled: boolean
 }
 
-function makeConn(agent: ChatAgent): Conn {
+/** Names one agent process. A chat agent's own name is the key of its shared process. */
+export type AgentKey = string
+
+/** The process a session runs on: Claude Code takes a bot's skills per session, Grok per process. */
+export function agentKey(agent: ChatAgent, pluginDir?: string | null): AgentKey {
+  return agent === 'grok' && pluginDir ? `grok@${pluginDir}` : agent
+}
+
+function makeConn(agent: ChatAgent, pluginDir: string | null = null): Conn {
   return {
     agent,
+    key: agentKey(agent, pluginDir),
+    pluginDir: agent === 'grok' ? pluginDir : null,
     proc: null,
     generation: 0,
     ready: null,
@@ -188,8 +231,26 @@ function makeConn(agent: ChatAgent): Conn {
   }
 }
 
-const conns: Record<ChatAgent, Conn> = { grok: makeConn('grok'), claude: makeConn('claude') }
+const conns = new Map<AgentKey, Conn>([
+  ['grok', makeConn('grok')],
+  ['claude', makeConn('claude')]
+])
+const grokConn = conns.get('grok') as Conn
+const claudeConn = conns.get('claude') as Conn
+
+function connFor(agent: ChatAgent, pluginDir?: string | null): Conn {
+  const key = agentKey(agent, pluginDir)
+  let conn = conns.get(key)
+  if (!conn) {
+    conn = makeConn(agent, pluginDir)
+    conns.set(key, conn)
+  }
+  return conn
+}
+
 const sessionAgents = new Map<string, ChatAgent>()
+/** The process of each session, when it is not its agent's shared one. */
+const sessionConns = new Map<string, Conn>()
 /** The chat of each session, for the model that chat runs on. */
 const sessionChatIds = new Map<string, string>()
 
@@ -202,20 +263,27 @@ export function agentForSession(sessionId: string): ChatAgent {
 }
 
 function connForSession(sessionId: string): Conn {
-  return conns[agentForSession(sessionId)]
+  return sessionConns.get(sessionId) ?? connFor(agentForSession(sessionId))
 }
 
-/** Request ids from two agents can collide, so Claude's get a prefix. */
+function bindSession(sessionId: string, conn: Conn): void {
+  sessionAgents.set(sessionId, conn.agent)
+  if (conn.pluginDir) sessionConns.set(sessionId, conn)
+  else sessionConns.delete(sessionId)
+}
+
+/** Request ids from two processes can collide, so all but the shared Grok one get a prefix. */
 function promptRequestId(conn: Conn, id: number | string): string {
-  return conn.agent === 'grok' ? String(id) : `${conn.agent}:${id}`
+  return conn.key === 'grok' ? String(id) : `${conn.key}:${id}`
 }
 
-async function spawnAgent(agent: ChatAgent): Promise<ChildProcessWithoutNullStreams> {
+async function spawnAgent(agent: ChatAgent, pluginDir?: string | null): Promise<ChildProcessWithoutNullStreams> {
   if (agent === 'claude') {
     const { command, args, env } = await claudeAcpCommand()
     return spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env })
   }
-  return spawn(grokBinary(), ['agent', '--no-leader', 'stdio'], {
+  const plugin = pluginDir ? ['--plugin-dir', pluginDir] : []
+  return spawn(grokBinary(), ['agent', '--no-leader', ...plugin, 'stdio'], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: process.env
   })
@@ -391,6 +459,8 @@ async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
   }
   const mode = modeForSession(sessionId)
   let decision = decidePermission(mode, params)
+  // A bot runs the tools on its list unattended. Anything else asks, and the question sends a notification.
+  if (decision === 'ask' && (await botAllowsTool(sessionId, params))) decision = 'allow'
   const requestId = message.id === undefined ? null : promptRequestId(conn, message.id)
   // An edit to files another chat in the same folder changed and has not committed asks first, in any mode.
   const clash = decision !== 'deny' && requestId ? await findClash(sessionId, params) : null
@@ -642,6 +712,7 @@ function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
   if (message.method && SESSION_UPDATE_METHODS.has(message.method)) {
     const params = message.params as SessionUpdate | undefined
     if (params?.sessionId) {
+      noteToolCallName(params.update)
       if (params.update?.sessionUpdate === 'turn_completed') {
         noteTurnCompleted(params.sessionId)
       }
@@ -771,8 +842,8 @@ async function handshake(agent: ChatAgent, call: Call, clientName: string): Prom
 /** Drop everything waiting on one agent's sessions. The other agent keeps running. */
 function releaseAgentState(conn: Conn, reason: string): void {
   const sessions = new Set(conn.liveSessions)
-  for (const [sessionId, agent] of sessionAgents) {
-    if (agent === conn.agent) sessions.add(sessionId)
+  for (const sessionId of sessionAgents.keys()) {
+    if (connForSession(sessionId) === conn) sessions.add(sessionId)
   }
   for (const waiter of conn.pending.values()) {
     if (waiter.timer) clearTimeout(waiter.timer)
@@ -792,10 +863,10 @@ function releaseAgentState(conn: Conn, reason: string): void {
     turnWaits.delete(sessionId)
   }
   for (const item of [...pendingExits.values()]) {
-    if (agentForSession(item.sessionId) === conn.agent) item.resolve('abandoned')
+    if (connForSession(item.sessionId) === conn) item.resolve('abandoned')
   }
-  const other = conns[conn.agent === 'grok' ? 'claude' : 'grok']
-  if (!other.proc) {
+  const othersRunning = [...conns.values()].some((other) => other !== conn && other.proc)
+  if (!othersRunning) {
     cancelAllPermissions()
     // Project intake asks its questions without an agent. They outlive a crash.
     cancelAgentQuestions()
@@ -809,8 +880,9 @@ function releaseAgentState(conn: Conn, reason: string): void {
   for (const sessionId of sessions) {
     acpSessionModes.delete(sessionId)
     acpSessionCommands.delete(sessionId)
-    if (sessionAgents.get(sessionId) === conn.agent) {
+    if (connForSession(sessionId) === conn) {
       sessionAgents.delete(sessionId)
+      sessionConns.delete(sessionId)
       sessionChatIds.delete(sessionId)
     }
   }
@@ -878,12 +950,12 @@ export function onTaskNotification(listener: (sessionId: string, message: unknow
   }
 }
 
-export async function ensureAgent(agent: ChatAgent = 'grok'): Promise<void> {
-  const conn = conns[agent]
+export async function ensureAgent(agent: ChatAgent = 'grok', pluginDir?: string | null): Promise<void> {
+  const conn = connFor(agent, pluginDir)
   if (conn.ready) return conn.ready
   let child: ChildProcessWithoutNullStreams | null = null
   const ready = (async () => {
-    child = await spawnAgent(agent)
+    child = await spawnAgent(agent, conn.pluginDir)
     attachProcess(conn, child)
     await handshake(
       agent,
@@ -923,13 +995,22 @@ async function sessionConfig(
   agent: ChatAgent,
   cwd: string,
   extraRules?: string | null,
-  chatId?: string
+  chatId?: string,
+  pluginDir?: string | null
 ): Promise<Record<string, unknown>> {
   const rules = extraRules?.trim()
     ? `${BROWSER_SESSION_RULE}\n\n${extraRules.trim()}`
     : BROWSER_SESSION_RULE
   const config = { cwd, mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(await getMcpServers())] }
-  if (agent !== 'claude' || !chatId) return { ...config, ...sessionRules(agent, rules) }
+  if (agent !== 'claude') return { ...config, ...sessionRules(agent, rules) }
+  // A bot's own skills come with the session, as a plugin in the bot's folder.
+  const plugins = pluginDir ? { plugins: [{ type: 'local', path: pluginDir }] } : {}
+  if (!chatId) {
+    const session = sessionRules(agent, rules)
+    if (!pluginDir) return { ...config, ...session }
+    const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
+    return { ...config, ...session, _meta: { claudeCode: { ...meta, options: plugins } } }
+  }
   // Claude Code starts agents of its own with its Agent tool. Settings holds for those too.
   const subagentModel = await getSubagentModel()
   const session = sessionRules(agent, `${rules}\n\n${agentToolRule(subagentModel, await getMaxSubagents())}`)
@@ -942,7 +1023,8 @@ async function sessionConfig(
         ...meta,
         options: {
           settings: await agentHookSettings(chatId),
-          ...(subagentModel ? { env: { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } } : {})
+          ...(subagentModel ? { env: { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } } : {}),
+          ...plugins
         }
       }
     }
@@ -969,11 +1051,17 @@ async function applySessionEffort(sessionId: string, effort: ReasoningEffort | n
 
 export async function applyEffortToLiveSessions(effort: ReasoningEffort | null): Promise<void> {
   if (!effort) return
-  const sessions = Object.values(conns).flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
-  await Promise.all(sessions.map((sessionId) => applySessionEffort(sessionId, effort)))
+  const sessions = [...conns.values()].flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
+  await Promise.all(
+    sessions.map(async (sessionId) => {
+      // A bot with an effort of its own keeps it.
+      const bot = await chatBot(sessionChatIds.get(sessionId)).catch(() => null)
+      await applySessionEffort(sessionId, bot?.effort || effort)
+    })
+  )
 }
 
-/** Pick the Claude Code model. The Grok agent has no model to choose here. */
+/** Pick the session's model. Claude Code takes an alias or a model id, Grok Build a model id. */
 async function applyClaudeModel(call: Call, sessionId: string, model: string): Promise<void> {
   if (!model) return
   try {
@@ -1035,7 +1123,7 @@ export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
       await ensureAgent('claude')
       if (!claudeProbe) {
         claudeProbe = request<{ sessionId: string; configOptions?: unknown }>(
-          conns.claude,
+          claudeConn,
           'session/new',
           { cwd: tmpdir(), mcpServers: [] },
           30_000
@@ -1055,7 +1143,7 @@ export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
     if (claudeOptionsCache.has(key)) return claudeOptionsCache.get(key) ?? null
     try {
       const result = await request<{ configOptions?: unknown }>(
-        conns.claude,
+        claudeConn,
         'session/set_config_option',
         { sessionId, configId: 'model', value: key },
         8_000
@@ -1073,7 +1161,7 @@ export function getClaudeOptions(model: string): Promise<ClaudeOptions | null> {
 
 /** Put every live Claude chat on its model again, after a setting or a chat's role changed. */
 export async function applyClaudeModelToLiveSessions(): Promise<void> {
-  const conn = conns.claude
+  const conn = claudeConn
   if (!conn.proc) return
   const call = connCall(conn)
   await Promise.all(
@@ -1086,25 +1174,46 @@ export async function applyClaudeModelToLiveSessions(): Promise<void> {
 }
 
 async function applySessionSettings(agent: ChatAgent, sessionId: string, chatId?: string): Promise<void> {
-  await applySessionEffort(sessionId, await getEffort())
-  if (agent !== 'claude') return
   if (chatId) sessionChatIds.set(sessionId, chatId)
-  await applyClaudeModel(connCall(conns.claude), sessionId, await claudeModelFor(chatId))
+  // A bot's chats run at the bot's effort, and a Grok bot on its own model. Other Grok chats keep Grok's default.
+  const bot = await chatBot(chatId).catch(() => null)
+  if (agent !== 'claude' && bot?.agent === 'grok') {
+    await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, bot.model)
+  }
+  await applySessionEffort(sessionId, bot?.effort || (await getEffort()))
+  if (agent !== 'claude') return
+  await applyClaudeModel(connCall(claudeConn), sessionId, await claudeModelFor(chatId))
 }
 
+/** Put the live chats of a bot on its model and effort again, after its page was saved. */
+export async function applyBotToLiveSessions(botId: string): Promise<void> {
+  const sessions = [...conns.values()].flatMap((conn) =>
+    conn.proc ? [...conn.liveSessions].map((sessionId) => ({ agent: conn.agent, sessionId })) : []
+  )
+  await Promise.all(
+    sessions.map(async ({ agent, sessionId }) => {
+      const chatId = sessionChatIds.get(sessionId)
+      const bot = await chatBot(chatId).catch(() => null)
+      if (bot?.id === botId) await applySessionSettings(agent, sessionId, chatId)
+    })
+  )
+}
+
+/** `pluginDir` is a bot's folder: the session loads the bot's own skills from it. */
 export async function newSession(
   cwd: string,
   extraRules?: string | null,
   agent: ChatAgent = 'grok',
-  chatId?: string
+  chatId?: string,
+  pluginDir?: string | null
 ): Promise<string> {
-  await ensureAgent(agent)
-  const conn = conns[agent]
+  await ensureAgent(agent, pluginDir)
+  const conn = connFor(agent, pluginDir)
   const result = await request<{
     sessionId: string
     modes?: { currentModeId?: string; availableModes?: SessionMode[] }
-  }>(conn, 'session/new', await sessionConfig(agent, cwd, extraRules, chatId), 30_000)
-  sessionAgents.set(result.sessionId, agent)
+  }>(conn, 'session/new', await sessionConfig(agent, cwd, extraRules, chatId, pluginDir), 30_000)
+  bindSession(result.sessionId, conn)
   rememberModes(result.sessionId, result)
   conn.liveSessions.add(result.sessionId)
   await applySessionSettings(agent, result.sessionId, chatId)
@@ -1116,15 +1225,16 @@ export async function loadSession(
   cwd: string,
   extraRules?: string | null,
   agent: ChatAgent = 'grok',
-  chatId?: string
+  chatId?: string,
+  pluginDir?: string | null
 ): Promise<void> {
-  await ensureAgent(agent)
-  const conn = conns[agent]
-  sessionAgents.set(sessionId, agent)
+  await ensureAgent(agent, pluginDir)
+  const conn = connFor(agent, pluginDir)
+  bindSession(sessionId, conn)
   const result = await request<unknown>(
     conn,
     'session/load',
-    { sessionId, ...(await sessionConfig(agent, cwd, extraRules, chatId)) },
+    { sessionId, ...(await sessionConfig(agent, cwd, extraRules, chatId, pluginDir)) },
     60_000
   )
   rememberModes(sessionId, result)
@@ -1172,8 +1282,9 @@ export async function grokCommands(sessionId: string | null): Promise<AgentComma
   const key = live ?? ''
   const known = acpSessionCommands.get(key)
   if (known?.length) return known
-  await ensureAgent('grok')
-  const raw = asRecord(await request<unknown>(conns.grok, '_x.ai/commands/list', live ? { sessionId: live } : {}, 10_000))
+  const conn = live ? connForSession(live) : grokConn
+  await ensureAgent('grok', conn.pluginDir)
+  const raw = asRecord(await request<unknown>(conn, '_x.ai/commands/list', live ? { sessionId: live } : {}, 10_000))
   const commands = readCommands(raw.commands as SessionUpdate['update']['availableCommands'])
   acpSessionCommands.set(key, commands)
   return commands
@@ -1181,7 +1292,7 @@ export async function grokCommands(sessionId: string | null): Promise<AgentComma
 
 export async function fetchUsage(): Promise<UsageSnapshot> {
   await ensureAgent('grok')
-  const raw = asRecord(await request<unknown>(conns.grok, '_x.ai/billing', {}, 20_000))
+  const raw = asRecord(await request<unknown>(grokConn, '_x.ai/billing', {}, 20_000))
   const config = asRecord(raw.config ?? raw)
   const period = asRecord(config.currentPeriod)
   const used = moneyVal(config.creditUsagePercent)
@@ -1218,8 +1329,8 @@ export async function promptSession(
   text: string,
   images: Array<{ mimeType: string; data: string }> = []
 ): Promise<void> {
-  const agent = agentForSession(sessionId)
-  await ensureAgent(agent)
+  const conn = connForSession(sessionId)
+  await ensureAgent(conn.agent, conn.pluginDir)
   const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
   if (text.trim()) {
     prompt.push({ type: 'text', text })
@@ -1232,7 +1343,7 @@ export async function promptSession(
   }
   beginTurn(sessionId)
   await request(
-    conns[agent],
+    conn,
     'session/prompt',
     {
       sessionId,
@@ -1241,7 +1352,7 @@ export async function promptSession(
     0
   )
   // Grok can send turn_completed after the prompt reply. Claude Code sends every update first.
-  if (agent === 'grok') await waitForTurnEnd(sessionId)
+  if (conn.agent === 'grok') await waitForTurnEnd(sessionId)
   else markTurnDone(sessionId)
 }
 
@@ -1252,8 +1363,8 @@ export function cancelSession(sessionId: string): void {
 }
 
 /** Which process an agent is on. A kill aimed at one process must not hit its replacement. */
-export function agentGeneration(agent: ChatAgent): number {
-  return conns[agent].generation
+export function agentGeneration(key: AgentKey): number {
+  return conns.get(key)?.generation ?? 0
 }
 
 /**
@@ -1268,15 +1379,15 @@ export function hasOtherActivePrompts(sessionId: string): boolean {
   return false
 }
 
-/** Kill both agents, for quitting. */
+/** Kill every agent process, for quitting. */
 export function stopAgents(): void {
-  abortAgent('grok')
-  abortAgent('claude')
+  for (const key of conns.keys()) abortAgent(key)
 }
 
-/** Kill one agent's process. Chats on the other agent keep running. */
-export function abortAgent(agent: ChatAgent = 'grok', generation?: number): void {
-  const conn = conns[agent]
+/** Kill one agent process. Chats on the others keep running. */
+export function abortAgent(key: AgentKey = 'grok', generation?: number): void {
+  const conn = conns.get(key)
+  if (!conn) return
   const child = conn.proc
   if (!child) return
   if (generation !== undefined && generation !== conn.generation) return

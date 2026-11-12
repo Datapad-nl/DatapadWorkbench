@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { chatAgentLabel } from '../../../shared/types'
+import { useBots } from '../bots'
 import { useWorkspace } from '../workspace'
 import { Icon } from './icons'
 
@@ -38,6 +39,7 @@ export function StatusBar(): React.JSX.Element {
     activeChatId,
     chatsById
   } = useWorkspace()
+  const { bots } = useBots()
   const [usage, setUsage] = useState<Usage | null>(null)
   // Same order as the usage panel: the default agent's plan, or Claude's when it is the only one.
   const claudeOn = settings?.claude.signedIn === true
@@ -87,7 +89,10 @@ export function StatusBar(): React.JSX.Element {
   const agent = activeChat ? (activeChat.agent ?? 'grok') : settings?.defaultAgent
   const connected =
     agent === 'claude' ? claudeOn : agent === 'grok' ? settings?.grokBuildSignedIn === true : false
-  const project = projects.find((item) => item.id === activeProjectId) ?? null
+  // A bot's chat works in the bot's folder, whatever project the sidebar is on; a run asked with @ in its project's.
+  const bot = activeChat?.botId ? bots.find((item) => item.id === activeChat.botId) : undefined
+  const project = projects.find((item) => item.id === (bot ? activeChat?.projectId : activeProjectId)) ?? null
+  const folder = project?.path ?? bot?.folder
   const indexLabel = project ? INDEX_LABEL[indexes[project.id]?.state ?? ''] : undefined
   const percent = usage ? Math.min(100, Math.max(0, usage.percent)) : null
   const usageText =
@@ -108,10 +113,10 @@ export function StatusBar(): React.JSX.Element {
           {indexLabel}
         </span>
       )}
-      {project?.path && (
-        <span className="flex min-w-0 items-center gap-1.5" title={project.path}>
+      {folder && (
+        <span className="flex min-w-0 items-center gap-1.5" title={folder}>
           <Icon name="folder" size={12} className="shrink-0 text-faint" />
-          <span className="truncate font-mono">{project.path}</span>
+          <span className="truncate font-mono">{folder}</span>
         </span>
       )}
       <div className="flex-1" />

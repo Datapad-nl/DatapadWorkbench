@@ -12,6 +12,7 @@ import {
   normalizeChatAgent,
   normalizeReasoningEffort,
   normalizeVoiceSettings,
+  type Bot,
   type Chat,
   type ChatAgent,
   type ChatSummary,
@@ -21,6 +22,7 @@ import {
   type UpdateProjectInput,
   type VoiceSettings
 } from '../shared/types'
+import { botFolder, getBot, isBotFolder, listBots } from './bots'
 import { forgetProjectIndex, isUnsafeProjectPath, queueIndex } from './codegraph'
 import { id, now, titleFromPrompt } from './ids'
 import { getClaudeCliInfo, peekClaudeCliInfo } from './claudeCli'
@@ -442,11 +444,19 @@ export async function getClaudeModel(): Promise<string> {
   return file.claudeModel ?? ''
 }
 
+/** The bot a chat belongs to, or null for a project's chat. */
+export async function chatBot(chatId: string | undefined): Promise<Bot | null> {
+  const chat = chatId ? await readChat(chatId) : null
+  return chat?.botId ? await getBot(chat.botId).catch(() => null) : null
+}
+
 /** The Claude Code model a chat runs on: its own, the orchestrator's for a conductor, else the setting. */
 export async function claudeModelFor(chatId: string | undefined): Promise<string> {
   const file = await loadSettingsFile()
   const chat = chatId ? await readChat(chatId) : null
-  return chat?.model || (chat?.conductor && file.orchestratorModel) || file.claudeModel || ''
+  // A bot's chats follow the model on its page.
+  const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
+  return bot?.model || chat?.model || (chat?.conductor && file.orchestratorModel) || file.claudeModel || ''
 }
 
 export async function getSubagentModel(): Promise<string> {
@@ -607,6 +617,7 @@ export async function chatMediaRoots(chatId: string): Promise<string[]> {
   if (!chat) return []
   const roots: string[] = []
   if (chat.worktreePath) roots.push(chat.worktreePath)
+  if (chat.botId) roots.push(botFolder(chat.botId))
   const project = (await loadProjects()).find((item) => item.id === chat.projectId)
   if (project?.path) roots.push(project.path)
   if (chat.grokSessionId && normalizeChatAgent(chat.agent) === 'grok') {
@@ -717,6 +728,7 @@ export async function listChats(): Promise<ChatSummary[]> {
         summary: {
           id: chat.id,
           projectId: chat.projectId,
+          botId: chat.botId,
           title: chat.title,
           agent: normalizeChatAgent(chat.agent),
           grokSessionId: chat.grokSessionId ?? null,
@@ -778,10 +790,13 @@ export async function createChat(
     parentChatId?: string
     grokSessionId?: string | null
     messages?: Chat['messages']
+    /** A chat of this bot, which needs no project. */
+    botId?: string
   }
 ): Promise<Chat> {
   const projects = await loadProjects()
-  if (!projects.some((project) => project.id === projectId)) {
+  if (input?.botId) await getBot(input.botId)
+  else if (!projects.some((project) => project.id === projectId)) {
     throw new Error('Project not found')
   }
   const timestamp = now()
@@ -793,6 +808,7 @@ export async function createChat(
     agent: input?.agent ?? (await getDefaultAgent()),
     model: input?.model || undefined,
     parentChatId: input?.parentChatId,
+    botId: input?.botId,
     grokSessionId: input?.grokSessionId ?? null,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -861,7 +877,8 @@ async function importGrokSessions(): Promise<void> {
   for (const session of await importable(sessions)) {
     if (known.has(session.id)) continue
     const cwd = normalizeProjectPath(session.cwd)
-    if (isUnsafeProjectPath(cwd)) continue
+    // A bot's session belongs to the bot's chat, not to a project of its own.
+    if (isUnsafeProjectPath(cwd) || isBotFolder(cwd)) continue
     let project = projects.find((item) => item.path && normalizeProjectPath(item.path) === cwd)
     if (!project) {
       if (dismissed.has(cwd) || restoring) continue
@@ -948,7 +965,12 @@ async function touchProject(projectId: string): Promise<void> {
 export async function snapshot(): Promise<{ projects: Project[]; chats: ChatSummary[]; settings: PublicSettings }> {
   await syncGrokSessions()
   await syncClaudeSessions()
-  const [projects, chats, settings] = await Promise.all([listProjects(), listChats(), getPublicSettings()])
-  const visible = new Set(projects.map((project) => project.id))
-  return { projects, chats: chats.filter((chat) => visible.has(chat.projectId)), settings }
+  const [projects, chats, settings, bots] = await Promise.all([
+    listProjects(),
+    listChats(),
+    getPublicSettings(),
+    listBots()
+  ])
+  const visible = new Set([...projects, ...bots].map((item) => item.id))
+  return { projects, chats: chats.filter((chat) => visible.has(chat.botId ?? chat.projectId)), settings }
 }

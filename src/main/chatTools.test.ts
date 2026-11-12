@@ -8,6 +8,12 @@ const stub = vi.hoisted(() => ({
   handoffs: [] as string[]
 }))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
+vi.mock('./bots', () => ({
+  getBot: async (botId: string) => {
+    if (botId !== 'scout') throw new Error('Bot not found')
+    return { id: 'scout', name: 'Scout', agent: 'claude', model: '', folder: '/bots/scout' }
+  }
+}))
 vi.mock('./store', () => ({
   createChat: vi.fn(),
   getChat: async (chatId: string) => structuredClone(stub.chats.get(chatId)!),
@@ -28,10 +34,12 @@ vi.mock('./store', () => ({
 
 import {
   agentHook,
+  askBot,
   delegateTask,
   handoffChat,
   nudgeWorker,
   registerChatTools,
+  scheduleBotTask,
   startScheduler,
   waitForDelegate
 } from './chatTools'
@@ -296,5 +304,100 @@ describe('handoff', () => {
     })
     await expect(handoffChat({ from: 'long', summary: 'state' })).rejects.toThrow('Subagents of this chat are still running')
     stub.chats.delete('child')
+  })
+})
+
+describe('bot schedules', () => {
+  function made(): void {
+    vi.mocked(createChat).mockImplementationOnce(async (projectId, input) => {
+      const chat = { id: 'bot-run', projectId, title: '', messages: [], ...input } as unknown as Chat
+      stub.chats.set(chat.id, chat)
+      return structuredClone(chat)
+    })
+  }
+
+  it("opens a chat of the bot, on the bot's agent, that runs on the schedule", async () => {
+    made()
+    const chat = await scheduleBotTask({ botId: 'scout', prompt: '  check the feeds\nand summarise ', cron: '0 9 * * 1-5' })
+    expect(vi.mocked(createChat).mock.lastCall).toEqual([
+      '',
+      { botId: 'scout', title: 'Scheduled: check the feeds', agent: 'claude' }
+    ])
+    expect(chat.schedule).toMatchObject({ prompt: 'check the feeds\nand summarise', cron: '0 9 * * 1-5' })
+    expect(Date.parse(chat.schedule!.nextRunAt!)).toBeGreaterThan(Date.now())
+  })
+
+  it('runs once at a time to come', async () => {
+    made()
+    const at = new Date(Date.now() + 3_600_000).toISOString()
+    const chat = await scheduleBotTask({ botId: 'scout', prompt: 'remind me', at })
+    expect(chat.schedule).toEqual({ prompt: 'remind me', cron: undefined, nextRunAt: at })
+  })
+
+  it('refuses a schedule it cannot run, before any chat is made', async () => {
+    vi.mocked(createChat).mockClear()
+    const past = new Date(Date.now() - 3_600_000).toISOString()
+    await expect(scheduleBotTask({ botId: 'scout', prompt: '', cron: '0 9 * * *' })).rejects.toThrow('Write what')
+    await expect(scheduleBotTask({ botId: 'scout', prompt: 'x' })).rejects.toThrow('either cron')
+    await expect(scheduleBotTask({ botId: 'scout', prompt: 'x', at: past })).rejects.toThrow('in the past')
+    await expect(scheduleBotTask({ botId: 'gone', prompt: 'x', cron: '0 9 * * *' })).rejects.toThrow('Bot not found')
+    expect(createChat).not.toHaveBeenCalled()
+  })
+})
+
+describe('@bot', () => {
+  function asked(): Array<[string, string]> {
+    const sent: Array<[string, string]> = []
+    stub.chats.set('project-chat', {
+      id: 'project-chat',
+      projectId: 'p1',
+      title: 'Auth',
+      messages: [{ id: 'u1', role: 'user', content: 'review the login', createdAt: '' }]
+    } as unknown as Chat)
+    vi.mocked(createChat).mockReset()
+    vi.mocked(createChat).mockImplementationOnce(async (projectId, input) => {
+      const chat = { id: 'scout-run', projectId, title: '', messages: [], ...input } as unknown as Chat
+      stub.chats.set(chat.id, chat)
+      return structuredClone(chat)
+    })
+    registerChatTools({
+      send: async (chatId, content) => {
+        sent.push([chatId, content])
+        const chat = stub.chats.get(chatId)!
+        chat.messages.push({ id: 'a1', role: 'assistant', content: 'Looks fine.', createdAt: '' })
+        return { chat, done: Promise.resolve(structuredClone(chat)) }
+      },
+      emit: () => {},
+      isStreaming: () => false
+    })
+    return sent
+  }
+
+  it("runs the bot in the project's folder and posts its answer in the project chat", async () => {
+    const sent = asked()
+    await askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+
+    expect(vi.mocked(createChat).mock.lastCall).toEqual([
+      'p1',
+      { botId: 'scout', agent: 'claude', title: 'Project: review the login' }
+    ])
+    expect(stub.chats.get('scout-run')!.replyTo).toBe('project-chat')
+    expect(sent).toEqual([['scout-run', 'review the login']])
+    expect(stub.chats.get('project-chat')!.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'Looks fine.',
+      fromBot: { botId: 'scout', name: 'Scout', runChatId: 'scout-run' }
+    })
+  })
+
+  it('posts why the bot could not answer', async () => {
+    asked()
+    vi.mocked(createChat).mockReset()
+    await askBot({ botId: 'gone', fromChatId: 'project-chat', content: 'hello' })
+    expect(createChat).not.toHaveBeenCalled()
+    expect(stub.chats.get('project-chat')!.messages.at(-1)).toMatchObject({
+      content: 'Could not answer: Bot not found',
+      fromBot: { botId: 'gone', runChatId: '' }
+    })
   })
 })

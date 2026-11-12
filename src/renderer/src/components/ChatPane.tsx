@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   Attachment,
+  Bot,
+  BotMention,
   Chat,
   ChatContext,
   ChatPlan,
@@ -43,6 +45,7 @@ import {
   reasoningEffortLabel,
   type ChatAgent
 } from '../../../shared/types'
+import { BotAvatar, useBots } from '../bots'
 import { useChatProgress } from '../progress'
 import { VoiceBlob } from '../voice/VoiceBlob'
 import { useVoice } from '../voice/VoiceProvider'
@@ -86,7 +89,9 @@ type SlashRun = {
     chatId: string,
     content: string,
     attachments?: Attachment[],
-    mentions?: FileMention[]
+    mentions?: FileMention[],
+    conversation?: string,
+    bots?: BotMention[]
   ) => Promise<boolean>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
   saveSettings: (input: { model?: string; claudeModel?: string; effort?: string | null }) => Promise<void>
@@ -112,7 +117,7 @@ async function copyText(text: string): Promise<boolean> {
 function conversationMarkdown(messages: Message[]): string {
   return messages
     .map((message) => {
-      const who = message.role === 'user' ? 'You' : 'Agent'
+      const who = message.role === 'user' ? 'You' : (message.fromBot?.name ?? 'Agent')
       const extras = (message.mentions ?? []).map((item) => `@${item.path}`).join(' ')
       return `## ${who}\n\n${plainReply(message.content)}${extras ? `\n\n${extras}` : ''}`
     })
@@ -294,6 +299,10 @@ export function ChatPane(): React.JSX.Element {
   const activeProject = projects.find(
     (project) => project.id === (activeChat?.projectId ?? activeProjectId)
   )
+  const { bots } = useBots()
+  const activeBot = activeChat?.botId ? bots.find((bot) => bot.id === activeChat.botId) : undefined
+  // A new tab next to a bot's chat opens in the project the sidebar is on.
+  const newTabProject = activeProject ?? projects.find((project) => project.id === activeProjectId)
   const stream = activeChatId ? streams[activeChatId] : undefined
   const streamingNow = stream?.status === 'streaming'
   const progress = useChatProgress(activeChat?.id ?? null, Boolean(streamingNow))
@@ -306,10 +315,13 @@ export function ChatPane(): React.JSX.Element {
             <IconButton icon="sidebar" label="Show sidebar" onClick={() => setShowSidebar(true)} />
           </div>
         )}
-        <Icon name="folder" className="text-faint" />
+        {activeBot ? <BotAvatar bot={activeBot} size={16} /> : <Icon name="folder" className="text-faint" />}
         <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
-          <span className="max-w-[200px] truncate text-muted" title={activeProject?.path ?? undefined}>
-            {activeProject?.name ?? 'No project'}
+          <span
+            className="max-w-[200px] truncate text-muted"
+            title={(activeBot && !activeProject ? activeBot.folder : activeProject?.path) ?? undefined}
+          >
+            {activeBot?.name ?? activeProject?.name ?? 'No project'}
           </span>
           {activeChat && (
             <>
@@ -343,7 +355,7 @@ export function ChatPane(): React.JSX.Element {
         onOpen={(id) => void openChat(id)}
         onClose={closeTab}
         onNew={() => {
-          if (activeProject) void createChat(activeProject.id)
+          if (newTabProject) void createChat(newTabProject.id)
           else setShowNewProject(true)
         }}
       />
@@ -366,6 +378,7 @@ export function ChatPane(): React.JSX.Element {
             agent={normalizeChatAgent(activeChat.agent)}
             projectId={activeChat.projectId}
             projectName={activeProject?.name ?? 'this project'}
+            botName={activeBot?.name}
             index={indexes[activeChat.projectId]}
             streaming={Boolean(streamingNow)}
             progress={progress.label}
@@ -398,10 +411,11 @@ export function ChatPane(): React.JSX.Element {
             projectId={activeChat.projectId}
             chatId={activeChat.id}
             hasFolder={Boolean(activeProject?.path)}
+            bots={activeBot ? [] : bots}
             drafts={drafts}
             restorers={restorers}
-            onSend={(text, attachments, mentions) =>
-              sendMessage(activeChat.id, text, attachments, mentions)
+            onSend={(text, attachments, mentions, asked) =>
+              sendMessage(activeChat.id, text, attachments, mentions, undefined, asked)
             }
             onSlash={(def, args, draft) =>
               runSlash({
@@ -702,19 +716,22 @@ function TabBar({
   onClose: (id: string) => void
   onNew: () => void
 }): React.JSX.Element {
+  const { bots } = useBots()
   const tabs = useMemo(() => {
     const projectById = new Map(projects.map((project) => [project.id, project]))
+    // A bot's chat is named after its bot.
+    const nameById = new Map<string, string>([...projects, ...bots].map((item) => [item.id, item.name]))
     return new Map(
       chats.map((chat) => [
         chat.id,
         {
           title: chat.title,
-          projectName: projectById.get(chat.projectId)?.name ?? 'Project',
+          projectName: nameById.get(chat.botId ?? chat.projectId) ?? 'Project',
           color: resolveProjectColor(projectById.get(chat.projectId) ?? { id: chat.projectId })
         }
       ])
     )
-  }, [chats, projects])
+  }, [chats, projects, bots])
 
   return (
     <div className="relative flex h-10 shrink-0 items-end bg-canvas px-3 before:absolute before:inset-x-0 before:bottom-0 before:h-px before:bg-line">
@@ -784,17 +801,27 @@ function AgentTile({ agent, size = 28 }: { agent: ChatAgent; size?: number }): R
 function EmptyHero({
   agent,
   projectName,
+  botName,
   children
 }: {
   agent: ChatAgent
   projectName: string
+  botName?: string
   children?: React.ReactNode
 }): React.JSX.Element {
   return (
     <div className="flex flex-col items-center text-center">
       <AgentTile agent={agent} size={40} />
       <h1 className="mt-4 text-[20px] font-semibold tracking-tight text-ink">
-        What should we build in <span className="text-accent">{projectName}</span>?
+        {botName ? (
+          <>
+            What should <span className="text-accent">{botName}</span> do?
+          </>
+        ) : (
+          <>
+            What should we build in <span className="text-accent">{projectName}</span>?
+          </>
+        )}
       </h1>
       {children}
     </div>
@@ -943,6 +970,7 @@ function MessageList({
   agent,
   projectId,
   projectName,
+  botName,
   index,
   streaming,
   progress,
@@ -959,6 +987,8 @@ function MessageList({
   agent: ChatAgent
   projectId: string
   projectName: string
+  /** Set for a bot's chat, which works in the bot's folder rather than a project. */
+  botName?: string
   index: ProjectIndex | undefined
   streaming: boolean
   progress: string
@@ -981,14 +1011,16 @@ function MessageList({
     !(plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()))
 
   let lastDay = ''
+  const { bots } = useBots()
+  const { openChat } = useWorkspace()
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       {empty ? (
         <div className="mx-auto flex w-[min(720px,100%-40px)] flex-col gap-8 py-16">
-          <EmptyHero agent={agent} projectName={projectName}>
+          <EmptyHero agent={agent} projectName={projectName} botName={botName}>
             <div className="mt-6 flex flex-wrap justify-center gap-2">
-              {SUGGESTIONS.map((text) => (
+              {(botName ? [] : SUGGESTIONS).map((text) => (
                 <button
                   key={text}
                   type="button"
@@ -1001,7 +1033,7 @@ function MessageList({
               ))}
             </div>
           </EmptyHero>
-          <ProjectOrientation projectId={projectId} index={index} />
+          {!botName && <ProjectOrientation projectId={projectId} index={index} />}
         </div>
       ) : (
         <div className="mx-auto flex w-[min(720px,100%-40px)] flex-col gap-7 py-8">
@@ -1012,8 +1044,17 @@ function MessageList({
             const divider = day && day !== lastDay ? dayLabel(date) : null
             if (day) lastDay = day
             const side = message.kind === 'btw' ? 'btw' : message.kind === 'steer' ? 'steer' : null
+            const fromBot = message.fromBot
+            const answeringBot = fromBot ? bots.find((bot) => bot.id === fromBot.botId) : undefined
             const extras = (
               <>
+                {message.bots && message.bots.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {message.bots.map((bot) => (
+                      <BotChip key={bot.id} mention={bot} />
+                    ))}
+                  </div>
+                )}
                 {message.mentions && message.mentions.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {message.mentions.map((mention) => (
@@ -1061,10 +1102,27 @@ function MessageList({
                     </div>
                   </article>
                 ) : (
-                  <article className="flex gap-3">
-                    <AgentTile agent={agent} />
+                  <article className="flex gap-3" data-testid={fromBot ? 'bot-answer' : undefined}>
+                    {answeringBot ? <BotAvatar bot={answeringBot} size={28} /> : <AgentTile agent={agent} />}
                     <div className="min-w-0 flex-1">
-                      <AssistantHeader agent={agent} meta={side === 'btw' ? 'side answer' : undefined} />
+                      {fromBot ? (
+                        <div className="flex h-7 items-center gap-2">
+                          <span className="text-[13px] font-semibold text-ink">{answeringBot?.name ?? fromBot.name}</span>
+                          <span className="text-[11px] text-faint">bot</span>
+                          {fromBot.runChatId && (
+                            <button
+                              type="button"
+                              data-testid="bot-answer-run"
+                              className="text-[11px] text-muted underline-offset-2 hover:text-ink hover:underline"
+                              onClick={() => void openChat(fromBot.runChatId)}
+                            >
+                              Open run
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <AssistantHeader agent={agent} meta={side === 'btw' ? 'side answer' : undefined} />
+                      )}
                       <div className="mt-1 text-[14.5px] leading-[1.65]">
                         {message.content ? <AgentReply text={message.content} chatId={chatId} /> : null}
                         {message.kind === 'btw' && !message.content ? <span className="cursor" /> : null}
@@ -1675,7 +1733,31 @@ function MentionChip({
   )
 }
 
-type ComposerDraft = { value: string; attachments: Attachment[]; mentions: FileMention[] }
+function BotChip({ mention, onRemove }: { mention: BotMention; onRemove?: () => void }): React.JSX.Element {
+  const { bots } = useBots()
+  const bot = bots.find((item) => item.id === mention.id)
+  return (
+    <span
+      data-testid="bot-chip"
+      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-accent-line bg-canvas py-0.5 pr-2 pl-0.5 text-[11px] text-ink"
+    >
+      {bot ? <BotAvatar bot={bot} size={16} /> : null}
+      <span className="truncate">@{bot?.name ?? mention.name}</span>
+      {onRemove && (
+        <button
+          type="button"
+          className="text-muted hover:text-ink"
+          onClick={onRemove}
+          aria-label={`Remove ${mention.name}`}
+        >
+          ×
+        </button>
+      )}
+    </span>
+  )
+}
+
+type ComposerDraft = { value: string; attachments: Attachment[]; mentions: FileMention[]; bots: BotMention[] }
 
 /** A failed send's text, put back ahead of what was typed since. */
 function joinText(sent: string, typed: string): string {
@@ -1696,6 +1778,7 @@ function Composer({
   projectId,
   chatId,
   hasFolder,
+  bots,
   history,
   drafts,
   restorers,
@@ -1717,11 +1800,13 @@ function Composer({
   projectId: string
   chatId: string
   hasFolder: boolean
+  /** Bots that can be asked with @. Empty in a bot's own chat. */
+  bots: Bot[]
   history: string[]
   drafts: React.RefObject<Map<string, ComposerDraft>>
   /** By chat: puts a failed send back in the composer showing that chat now. */
   restorers: React.RefObject<Map<string, (sent: ComposerDraft) => void>>
-  onSend: (text: string, attachments: Attachment[], mentions: FileMention[]) => Promise<boolean>
+  onSend: (text: string, attachments: Attachment[], mentions: FileMention[], bots: BotMention[]) => Promise<boolean>
   onSlash: (def: SlashDef, args: string, draft: { attachments: Attachment[]; mentions: FileMention[] }) => Promise<string | null>
   onStop: () => void
   onMode: (mode: PermissionMode) => void
@@ -1740,6 +1825,7 @@ function Composer({
     () => drafts.current.get(chatId)?.attachments ?? []
   )
   const [mentions, setMentions] = useState<FileMention[]>(() => drafts.current.get(chatId)?.mentions ?? [])
+  const [askedBots, setAskedBots] = useState<BotMention[]>(() => drafts.current.get(chatId)?.bots ?? [])
   const [hits, setHits] = useState<FileHit[]>([])
   const [hitsQuery, setHitsQuery] = useState<string | null>(null)
   const [hitIndex, setHitIndex] = useState(0)
@@ -1823,9 +1909,10 @@ function Composer({
   )
 
   useEffect(() => {
-    if (!value && attachments.length === 0 && mentions.length === 0) drafts.current.delete(chatId)
-    else drafts.current.set(chatId, { value, attachments, mentions })
-  }, [attachments, chatId, drafts, mentions, value])
+    if (!value && attachments.length === 0 && mentions.length === 0 && askedBots.length === 0)
+      drafts.current.delete(chatId)
+    else drafts.current.set(chatId, { value, attachments, mentions, bots: askedBots })
+  }, [askedBots, attachments, chatId, drafts, mentions, value])
 
   // A send that fails after its chat was switched away and back lands in this composer, not the old one.
   useEffect(() => {
@@ -1833,6 +1920,7 @@ function Composer({
       setValue((typed) => joinText(sent.value, typed))
       setAttachments((typed) => joinBy(sent.attachments, typed, (item) => item.id))
       setMentions((typed) => joinBy(sent.mentions, typed, (item) => item.path))
+      setAskedBots((typed) => joinBy(sent.bots, typed, (item) => item.id))
     }
     const live = restorers.current
     live.set(chatId, put)
@@ -1852,7 +1940,7 @@ function Composer({
     }
     load()
     const unsub = window.workbench.onChatEvent((event) => {
-      if (event.chatId !== chatId) return
+      if (!('chatId' in event) || event.chatId !== chatId) return
       if (event.type === 'commands') {
         seq++
         setAnnounced(event.commands)
@@ -1962,6 +2050,7 @@ function Composer({
       if (def.kind === 'prompt' || def.kind === 'agent' || def.id === 'new' || def.id === 'delete') {
         setAttachments([])
         setMentions([])
+        setAskedBots([])
       }
       if (notice) setPasteError(notice)
     } catch (error) {
@@ -1983,10 +2072,37 @@ function Composer({
         ? {
             value: joinText(sent.value, typed.value),
             attachments: joinBy(sent.attachments, typed.attachments, (item) => item.id),
-            mentions: joinBy(sent.mentions, typed.mentions, (item) => item.path)
+            mentions: joinBy(sent.mentions, typed.mentions, (item) => item.path),
+            bots: joinBy(sent.bots, typed.bots, (item) => item.id)
           }
         : sent
     )
+  }
+
+  const botHits = useMemo(() => {
+    if (!mention || commandOpen) return []
+    const q = mention.query.trim().toLowerCase()
+    return bots.filter((bot) => !askedBots.some((item) => item.id === bot.id) && bot.name.toLowerCase().includes(q))
+  }, [askedBots, bots, commandOpen, mention])
+  /** Bots first, then files. */
+  const pickCount = botHits.length + hits.length
+
+  function pickBot(bot: Bot): void {
+    const caret = ref.current?.selectionStart ?? value.length
+    const at = mentionAt(value, caret)
+    const nextText = at ? value.slice(0, at.start) + value.slice(caret) : value
+    setAskedBots((existing) => [...existing, { id: bot.id, name: bot.name }])
+    setValue(nextText)
+    setMention(null)
+    setHits([])
+    setHistoryIndex(null)
+    requestAnimationFrame(() => {
+      const el = ref.current
+      if (!el) return
+      const pos = at ? at.start : nextText.length
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    })
   }
 
   function pickHit(hit: FileHit): void {
@@ -2050,13 +2166,14 @@ function Composer({
     }
     const text = value.trim()
     if (!text && attachments.length === 0 && mentions.length === 0) return
-    const sent: ComposerDraft = { value, attachments, mentions }
-    void onSend(text, attachments, mentions).then((ok) => {
+    const sent: ComposerDraft = { value, attachments, mentions, bots: askedBots }
+    void onSend(text, attachments, mentions, askedBots).then((ok) => {
       if (!ok) restore(sent)
     })
     setValue('')
     setAttachments([])
     setMentions([])
+    setAskedBots([])
     setMention(null)
     setCommand(null)
     setHits([])
@@ -2175,8 +2292,15 @@ function Composer({
             </div>
           </div>
         )}
-        {(attachments.length > 0 || mentions.length > 0) && (
+        {(attachments.length > 0 || mentions.length > 0 || askedBots.length > 0) && (
           <div className="mb-3 flex flex-wrap gap-2">
+            {askedBots.map((item) => (
+              <BotChip
+                key={item.id}
+                mention={item}
+                onRemove={() => setAskedBots((current) => current.filter((bot) => bot.id !== item.id))}
+              />
+            ))}
             {mentions.map((item) => (
               <MentionChip
                 key={item.path}
@@ -2242,14 +2366,41 @@ function Composer({
             )}
           </div>
         )}
-        {mention && hasFolder && !command && (
-          <div className="absolute inset-x-0 bottom-full z-10 mb-2 max-h-56 overflow-y-auto rounded-[8px] border border-line-strong bg-raised py-1 shadow-xl">
-            {hits.length === 0 ? (
+        {mention && (hasFolder || botHits.length > 0) && !command && (
+          <div
+            data-testid="mention-menu"
+            className="absolute inset-x-0 bottom-full z-10 mb-2 max-h-56 overflow-y-auto rounded-[8px] border border-line-strong bg-raised py-1 shadow-xl"
+          >
+            {botHits.map((bot, index) => (
+              <button
+                key={`bot:${bot.id}`}
+                type="button"
+                data-testid="mention-bot"
+                className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left ${
+                  index === hitIndex ? 'bg-hover' : 'hover:bg-hover'
+                }`}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  pickBot(bot)
+                }}
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <BotAvatar bot={bot} size={16} />
+                  <span className="truncate text-[12px] text-ink">{bot.name}</span>
+                </span>
+                <span className="shrink-0 font-mono text-[10px] text-muted">bot</span>
+              </button>
+            ))}
+            {!hasFolder ? null : hits.length === 0 ? (
+              botHits.length > 0 ? null : (
               <div className="px-3 py-2 text-[12px] text-muted">
                 {mention.query ? 'No matching files' : 'Type to search files'}
               </div>
+              )
             ) : (
-              hits.map((hit, index) => (
+              hits.map((hit, fileIndex) => {
+                const index = botHits.length + fileIndex
+                return (
                 <button
                   key={`${hit.kind}:${hit.path}`}
                   type="button"
@@ -2266,7 +2417,8 @@ function Composer({
                     {hit.kind === 'folder' ? 'folder' : 'file'}
                   </span>
                 </button>
-              ))
+                )
+              })
             )}
           </div>
         )}
@@ -2327,20 +2479,22 @@ function Composer({
                 return
               }
             }
-            if (mention && hits.length > 0) {
+            if (mention && pickCount > 0) {
               if (event.key === 'ArrowDown') {
                 event.preventDefault()
-                setHitIndex((current) => (current + 1) % hits.length)
+                setHitIndex((current) => (current + 1) % pickCount)
                 return
               }
               if (event.key === 'ArrowUp') {
                 event.preventDefault()
-                setHitIndex((current) => (current - 1 + hits.length) % hits.length)
+                setHitIndex((current) => (current - 1 + pickCount) % pickCount)
                 return
               }
               if (event.key === 'Enter' || event.key === 'Tab') {
                 event.preventDefault()
-                if (hitsQuery === mention.query) pickHit(hits[hitIndex] ?? hits[0])
+                const index = hitIndex < pickCount ? hitIndex : 0
+                if (index < botHits.length) pickBot(botHits[index])
+                else if (hitsQuery === mention.query) pickHit(hits[index - botHits.length] ?? hits[0])
                 return
               }
             }

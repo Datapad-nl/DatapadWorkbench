@@ -11,11 +11,13 @@ export type PermissionParams = {
   sessionId?: string
   options?: PermissionOption[]
   toolCall?: {
+    toolCallId?: string
     title?: string
     kind?: string
     name?: string
     rawInput?: unknown
     locations?: Array<{ path?: string }>
+    _meta?: unknown
   }
 }
 

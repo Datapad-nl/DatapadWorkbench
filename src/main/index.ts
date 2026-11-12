@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell } from 'electron'
+import { app, autoUpdater, BrowserWindow, dialog, shell } from 'electron'
 import { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { startUpdater, stopUpdater } from './updater'
@@ -17,9 +17,10 @@ import {
   sweepWorktreeProcesses,
   sweepWorktreeProcessesSync
 } from './worktreeProcs'
-import { registerIpc } from './ipc'
+import { openBotFromTray, openFromNotice, registerIpc } from './ipc'
 import { hasRunningTurns, stopAllTurnsAndWait } from './grok'
 import { startScheduler } from './chatTools'
+import { openedAtLogin, startTray } from './tray'
 import { startPrWatcher } from './pullRequests'
 import {
   ensureStore,
@@ -45,7 +46,39 @@ if (is.dev) {
   app.commandLine.appendSwitch('remote-debugging-port', '9333')
 }
 
-function createWindow(): void {
+// Closing the window keeps the app in the tray, so opening it again on Windows or Linux shows that
+// window instead of starting a second app. macOS does this itself, and a dev build may run next to
+// the installed app.
+const secondInstance = app.isPackaged && process.platform !== 'darwin' && !app.requestSingleInstanceLock()
+if (secondInstance) app.quit()
+
+/** Set once the app quits for real; until then closing the window only hides it. */
+let quitting = false
+let appWindow: BrowserWindow | null = null
+
+/** Brings the window back, or makes a new one if it is gone. */
+function showWindow(): void {
+  if (!appWindow) {
+    createWindow()
+    return
+  }
+  if (appWindow.isMinimized()) appWindow.restore()
+  appWindow.show()
+  appWindow.focus()
+}
+
+/** Bots keep running with the window closed: hide it, and on macOS leave the Dock for the menu bar. */
+function hideWindow(window: BrowserWindow): void {
+  if (window.isFullScreen()) {
+    window.once('leave-full-screen', () => hideWindow(window))
+    window.setFullScreen(false)
+    return
+  }
+  window.hide()
+  app.dock?.hide()
+}
+
+function createWindow(hidden = false): void {
   const state = loadWindowState()
   const mainWindow = new BrowserWindow({
     width: state.width,
@@ -89,7 +122,22 @@ function createWindow(): void {
   trackWindowState(mainWindow)
   attachContextMenu(mainWindow)
 
+  appWindow = mainWindow
+  mainWindow.on('closed', () => {
+    if (appWindow === mainWindow) appWindow = null
+  })
+  mainWindow.on('close', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    hideWindow(mainWindow)
+  })
+  mainWindow.on('show', () => void app.dock?.show())
+
   mainWindow.on('ready-to-show', () => {
+    if (hidden) {
+      if (state.isMaximized) mainWindow.once('show', () => mainWindow.maximize())
+      return
+    }
     if (state.isMaximized) mainWindow.maximize()
     mainWindow.show()
   })
@@ -136,6 +184,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  if (secondInstance) return
   loadDotEnv()
   augmentPath()
   app.setName('Datapad Workbench')
@@ -163,7 +212,20 @@ app.whenReady().then(async () => {
   killOrphanCodegraphInits()
   void sweepWorktreeProcesses()
   startWorktreeReaper()
-  createWindow()
+  const hidden = openedAtLogin()
+  if (hidden) app.dock?.hide()
+  createWindow(hidden)
+  startTray({
+    show: showWindow,
+    openChat: (chatId) => {
+      showWindow()
+      openFromNotice(chatId)
+    },
+    openBot: (botId) => {
+      showWindow()
+      openBotFromTray(botId)
+    }
+  })
   const movedTo = unreadableProjectsMovedTo()
   if (movedTo) void warnUnreadableProjects(movedTo)
   // It can also break while the app runs; the sidebar would empty with no word why.
@@ -172,9 +234,8 @@ app.whenReady().then(async () => {
   const { active } = await getThemeState()
   applyWindowChrome(active)
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
+  app.on('activate', showWindow)
+  app.on('second-instance', showWindow)
 })
 
 /** The project list starts empty after projects.json failed to parse. Say so, and where the old file went. */
@@ -195,7 +256,13 @@ async function warnUnreadableProjects(movedTo: string): Promise<void> {
 
 let turnsSaved = false
 
+// The update closes the windows before it quits the app.
+autoUpdater.on('before-quit-for-update', () => {
+  quitting = true
+})
+
 app.on('before-quit', (event) => {
+  quitting = true
   // Running turns save what they streamed before the agents go. A stuck turn holds the quit 3s at most.
   if (!turnsSaved && hasRunningTurns()) {
     event.preventDefault()

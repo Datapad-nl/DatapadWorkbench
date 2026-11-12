@@ -1,9 +1,16 @@
-import type { Chat, ChatAgent, ChatEvent } from "../shared/types";
+import type {
+  Attachment,
+  Chat,
+  ChatAgent,
+  ChatEvent,
+  FileMention,
+} from "../shared/types";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
 import { nextCronRun } from "../shared/cron";
 import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
+import { getBot } from "./bots";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { id, now } from "./ids";
 import {
@@ -26,6 +33,8 @@ import {
 type SendTurn = (
   chatId: string,
   content: string,
+  attachments?: Attachment[],
+  mentions?: FileMention[],
 ) => Promise<{ chat: Chat; done: Promise<Chat | null> }>;
 
 let sendTurn: SendTurn | null = null;
@@ -91,6 +100,11 @@ function localTime(iso: string | null | undefined): string | undefined {
   return iso ? new Date(iso).toString() : undefined;
 }
 
+/** Chats of the same project, or of the same bot. */
+function sameOwner(a: Pick<Chat, "projectId" | "botId">, b: Pick<Chat, "projectId" | "botId">): boolean {
+  return a.projectId === b.projectId && (a.botId ?? null) === (b.botId ?? null);
+}
+
 function clip(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max)}…`;
 }
@@ -109,6 +123,8 @@ async function openChat(
     title,
     agent: worker?.agent ?? agentOf(input.agent),
     ...(worker ? { model: worker.model, parentChatId: from.id } : {}),
+    // A bot's chat starts chats of the same bot.
+    botId: from.botId,
   });
   emit?.({ type: "chat", chatId: chat.id, chat });
   return chat;
@@ -117,16 +133,95 @@ async function openChat(
 export async function send(
   chatId: string,
   content: string,
+  attachments?: Attachment[],
+  mentions?: FileMention[],
 ): Promise<{ done: Promise<Chat | null> }> {
   if (!sendTurn) throw new Error("Datapad Workbench is still starting.");
-  return sendTurn(chatId, content);
+  return sendTurn(chatId, content, attachments, mentions);
+}
+
+/**
+ * A bot asked with @ in a project chat. The bot runs in a chat of its own, in the project's folder,
+ * next to the project's agent, and its answer is posted in the project chat once it is done.
+ */
+export async function askBot(input: {
+  botId: string;
+  fromChatId: string;
+  content: string;
+  attachments?: Attachment[];
+  mentions?: FileMention[];
+}): Promise<void> {
+  let name = "The bot";
+  let runChatId = "";
+  try {
+    const caller = await getChat(input.fromChatId);
+    if (caller.botId) throw new Error("A bot is asked from a project chat.");
+    const bot = await getBot(input.botId);
+    name = bot.name;
+    const project = (await listProjects()).find(
+      (item) => item.id === caller.projectId,
+    );
+    const firstLine =
+      input.content.trim().split("\n")[0] ||
+      input.mentions?.[0]?.path ||
+      "Question";
+    const created = await createChat(caller.projectId, {
+      botId: bot.id,
+      agent: bot.agent,
+      title: `${project?.name ?? "Project"}: ${clip(firstLine, 50)}`,
+    });
+    runChatId = created.id;
+    const run = await mutateChat(created.id, (latest) => {
+      latest.replyTo = caller.id;
+    });
+    emitChat(run);
+    const { done } = await send(
+      run.id,
+      input.content,
+      input.attachments,
+      input.mentions,
+    );
+    const finished = await done;
+    const reply = finished?.messages.at(-1);
+    await postBotAnswer(
+      input,
+      name,
+      runChatId,
+      !finished
+        ? "The run was deleted before it answered."
+        : reply?.role === "assistant"
+          ? plainReply(reply.content) || "(empty answer)"
+          : "(no answer)",
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await postBotAnswer(input, name, runChatId, `Could not answer: ${reason}`).catch(
+      () => {},
+    );
+  }
+}
+
+async function postBotAnswer(
+  input: { botId: string; fromChatId: string },
+  name: string,
+  runChatId: string,
+  content: string,
+): Promise<void> {
+  const chat = await mutateChat(input.fromChatId, (latest) => {
+    latest.messages.push({
+      id: id(),
+      role: "assistant",
+      content,
+      fromBot: { botId: input.botId, name, runChatId },
+      createdAt: now(),
+    });
+  });
+  emitChat(chat);
 }
 
 export async function listProjectChats(from: unknown): Promise<unknown> {
   const caller = await callerChat(from);
-  const chats = (await listChats()).filter(
-    (chat) => chat.projectId === caller.projectId,
-  );
+  const chats = (await listChats()).filter((chat) => sameOwner(chat, caller));
   return {
     chats: chats.map((chat) => ({
       id: chat.id,
@@ -154,9 +249,7 @@ export async function listProjectChats(from: unknown): Promise<unknown> {
 async function findProjectChat(caller: Chat, value: unknown): Promise<Chat> {
   const wanted = typeof value === "string" ? value.trim() : "";
   if (!wanted) throw new Error("Pass a chat id or title.");
-  const chats = (await listChats()).filter(
-    (chat) => chat.projectId === caller.projectId,
-  );
+  const chats = (await listChats()).filter((chat) => sameOwner(chat, caller));
   const lower = wanted.toLowerCase();
   const match =
     chats.find((chat) => chat.id === wanted) ??
@@ -231,6 +324,7 @@ export async function handoffChat(input: {
     `# Handoff from "${caller.title}"\n\n${summary}${next ? `\n\n## Next\n\n${next}` : ""}\n`,
   );
   const created = await createChat(caller.projectId, {
+    botId: caller.botId,
     title:
       typeof input.title === "string" && input.title.trim()
         ? clip(input.title.trim(), 80)
@@ -482,6 +576,51 @@ export async function waitForDelegate(input: {
   };
 }
 
+function optionalText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** When a schedule first runs: the next time `cron` comes up, or once `at`. */
+function firstRun(cron: string | undefined, at: string | undefined): Date {
+  if (Boolean(cron) === Boolean(at))
+    throw new Error("Pass either cron (repeating) or at (once).");
+  if (cron) {
+    const next = nextCronRun(cron, new Date());
+    if (!next) throw new Error(`“${cron}” never comes up.`);
+    return next;
+  }
+  const next = new Date(at!);
+  if (Number.isNaN(next.getTime()))
+    throw new Error(`Cannot read “${at}” as a date and time.`);
+  if (next.getTime() < Date.now() - 60_000)
+    throw new Error(`${next.toString()} is in the past.`);
+  return next;
+}
+
+/** A schedule on a bot's page. It runs in a chat of its own, on the bot's agent. */
+export async function scheduleBotTask(input: {
+  botId?: unknown;
+  prompt?: unknown;
+  cron?: unknown;
+  at?: unknown;
+}): Promise<Chat> {
+  const bot = await getBot(String(input.botId ?? ""));
+  const prompt = optionalText(input.prompt);
+  if (!prompt) throw new Error("Write what the bot should do.");
+  const cron = optionalText(input.cron);
+  const next = firstRun(cron, optionalText(input.at));
+  const chat = await createChat("", {
+    botId: bot.id,
+    title: `Scheduled: ${clip(prompt.split("\n")[0], 50)}`,
+    agent: bot.agent,
+  });
+  const saved = await mutateChat(chat.id, (latest) => {
+    latest.schedule = { prompt, cron, nextRunAt: next.toISOString() };
+  });
+  emitChat(saved);
+  return saved;
+}
+
 export async function scheduleTask(input: {
   from?: unknown;
   prompt?: unknown;
@@ -501,19 +640,7 @@ export async function scheduleTask(input: {
     typeof input.at === "string" && input.at.trim()
       ? input.at.trim()
       : undefined;
-  if (Boolean(cron) === Boolean(at))
-    throw new Error("Pass either cron (repeating) or at (once).");
-  let next: Date | null;
-  if (cron) {
-    next = nextCronRun(cron, new Date());
-    if (!next) throw new Error(`“${cron}” never comes up.`);
-  } else {
-    next = new Date(at!);
-    if (Number.isNaN(next.getTime()))
-      throw new Error(`Cannot read “${at}” as a date and time.`);
-    if (next.getTime() < Date.now() - 60_000)
-      throw new Error(`${next.toString()} is in the past.`);
-  }
+  const next = firstRun(cron, at);
   const chat = await openChat(
     caller,
     input,

@@ -9,6 +9,41 @@ export type Project = {
   removedAt?: string
 }
 
+/** A configured agent with its own instructions and skills, kept apart from projects. */
+export type Bot = {
+  id: string
+  name: string
+  agent: ChatAgent
+  /** Model for the bot's agent. Empty means the agent's default. */
+  model: string
+  /** Reasoning effort for the bot's chats. Empty follows the setting. */
+  effort: ReasoningEffort | ''
+  instructions: string
+  /** Tools the bot may use without asking, one name each. */
+  allowedTools: string[]
+  /** File name of the avatar in the bot's folder, or null for initials. */
+  avatar: string | null
+  /** The bot's folder: its avatar, and its skills as a plugin. */
+  folder: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type UpdateBotInput = {
+  id: string
+  name?: string
+  agent?: ChatAgent
+  model?: string
+  effort?: string | null
+  instructions?: string
+  allowedTools?: string[]
+}
+
+/** One of a bot's own skills, `skills/<name>/SKILL.md` in its folder. */
+export type BotSkill = { name: string; description: string; body: string }
+/** `previousName` is null for a new skill. */
+export type SaveBotSkillInput = { botId: string; previousName: string | null; name: string; description: string; body: string }
+
 export type Attachment = {
   id: string
   mimeType: string
@@ -33,7 +68,22 @@ export type Message = {
   kind?: 'btw' | 'steer'
   attachments?: Attachment[]
   mentions?: FileMention[]
+  /** Bots the user asked with @ in this message. */
+  bots?: BotMention[]
+  /** Set on a bot's answer posted in a project chat. */
+  fromBot?: BotAnswer
   createdAt: string
+}
+
+export type BotMention = { id: string; name: string }
+
+export type BotAnswer = {
+  botId: string
+  name: string
+  /** The bot's own chat the answer comes from. */
+  runChatId: string
+  /** Set once the project's agent got the answer with a prompt. */
+  delivered?: boolean
 }
 
 export type PermissionMode = 'ask' | 'accept' | 'plan'
@@ -140,7 +190,12 @@ export function chatAgentLabel(agent: ChatAgent): string {
 
 export type Chat = {
   id: string
+  /** Empty for a chat of a bot, which works in the bot's folder. A bot's run asked with @ works in this project. */
   projectId: string
+  /** The bot this chat belongs to: it runs with the bot's instructions and skills. */
+  botId?: string
+  /** A bot's run asked with @: the project chat its answer is posted in. */
+  replyTo?: string
   title: string
   /** Which coding agent runs this chat. Missing means Grok. */
   agent?: ChatAgent
@@ -440,6 +495,8 @@ export type ChatEvent =
   | { type: 'aside-done'; chatId: string; chat: Chat }
   /** The user clicked a notification for this chat. */
   | { type: 'open'; chatId: string }
+  /** The user picked this bot in the menu bar menu. */
+  | { type: 'open-bot'; botId: string }
   /** The slash commands the chat's agent offers, as it announced them. */
   | { type: 'commands'; chatId: string; commands: AgentCommand[] }
   /** How full the context window of the chat's session is. */
