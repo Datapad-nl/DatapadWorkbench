@@ -1027,7 +1027,7 @@ export function Sidebar(): React.JSX.Element | null {
             void createBot('New bot')
               .then((bot) => {
                 setBotsCollapsed(false)
-                openBot(bot.id)
+                openBot(bot.id, 'settings')
               })
               .catch((caught: unknown) => window.alert(errorText(caught, 'Could not create the bot')))
           }

@@ -59,6 +59,7 @@ import {
   delegateTask,
   handoffChat,
   markBotRead,
+  newBotChat,
   nudgeWorker,
   registerChatTools,
   scheduleBotTask,
@@ -477,6 +478,32 @@ describe("the bot's chat", () => {
     const remade = await botChat('scout')
     expect(remade.id).not.toBe(first.id)
     expect(stub.scout.chatId).toBe(remade.id)
+  })
+
+  it("follows the bot's agent: a fresh chat switches, a started one is kept and a new chat made", async () => {
+    const events = botChats()
+    stub.chats.set('old', { id: 'old', projectId: '', agent: 'grok', messages: [], grokSessionId: null } as unknown as Chat)
+    stub.scout.chatId = 'old'
+    const switched = await botChat('scout')
+    expect(switched).toMatchObject({ id: 'old', agent: 'claude' })
+    expect(vi.mocked(createChat)).not.toHaveBeenCalled()
+    expect(events.map((event) => event.type)).toEqual(['chat'])
+
+    stub.chats.set('old', { ...stub.chats.get('old')!, agent: 'grok', grokSessionId: 's1' })
+    const fresh = await botChat('scout')
+    expect(fresh.id).not.toBe('old')
+    expect(fresh.agent).toBe('claude')
+    expect(stub.scout.chatId).toBe(fresh.id)
+    expect(stub.chats.has('old')).toBe(true)
+  })
+
+  it('/new gives the bot a fresh chat and keeps the old one', async () => {
+    botChats()
+    const first = await botChat('scout')
+    const next = await newBotChat('scout')
+    expect(next.id).not.toBe(first.id)
+    expect(stub.scout.chatId).toBe(next.id)
+    expect(stub.chats.has(first.id)).toBe(true)
   })
 
   it('is marked read', async () => {

@@ -270,12 +270,30 @@ export function botChat(botId: string): Promise<Chat> {
 async function findOrMakeBotChat(botId: string): Promise<Chat> {
   const bot = await getBot(botId);
   const existing = bot.chatId ? await getChat(bot.chatId).catch(() => null) : null;
-  if (existing) return existing;
+  if (existing && normalizeChatAgent(existing.agent) === bot.agent) return existing;
+  // The bot's agent was changed in Settings. A chat that has not started switches to it; a started
+  // one belongs to its agent's session, so it is kept and the bot gets a new chat.
+  if (existing && !existing.grokSessionId && existing.messages.length === 0) {
+    const switched = await mutateChat(existing.id, (chat) => {
+      chat.agent = bot.agent;
+    });
+    emitChat(switched);
+    return switched;
+  }
+  return makeBotChat(bot);
+}
+
+async function makeBotChat(bot: Bot): Promise<Chat> {
   const chat = await createChat("", { botId: bot.id, agent: bot.agent, title: bot.name });
   const saved = await setBotChat(bot.id, chat.id);
   emitChat(chat);
   emit?.({ type: "bot", bot: saved });
   return chat;
+}
+
+/** A fresh chat for the bot's Chat tab, as /new does for a project. The old chat is kept. */
+export async function newBotChat(botId: string): Promise<Chat> {
+  return makeBotChat(await getBot(botId));
 }
 
 /** A new message in the bot's own chat: one more unread, and the window and the system are told. */

@@ -122,6 +122,7 @@ import {
   forgetBotRun,
   isBotRun,
   markBotRead,
+  newBotChat,
   registerChatTools,
   scheduleBotTask,
   stopSchedule
@@ -461,6 +462,7 @@ export function registerIpc(): void {
     (await grokCommands(null).catch(() => [])).map((command) => command.name)
   )
   ipcMain.handle('bot:chat', (_event, botId: string) => botChat(String(botId)))
+  ipcMain.handle('bot:newChat', (_event, botId: string) => newBotChat(String(botId)))
   ipcMain.handle('bot:markRead', (_event, botId: string) => markBotRead(String(botId)))
   ipcMain.handle('bot:schedule', (_event, input: { botId: string; prompt: string; cron?: string; at?: string }) =>
     scheduleBotTask(input ?? {})

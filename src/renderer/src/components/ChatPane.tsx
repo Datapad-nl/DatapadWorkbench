@@ -82,7 +82,10 @@ type SlashRun = {
   messages: Message[]
   /** The chat this one handed its work to, if it did. */
   handoffTo: string | null
+  /** Set in a bot's chat, which has no project: /new gives the bot a fresh chat. */
+  botId: string | null
   createChat: (projectId: string) => Promise<void>
+  newBotChat: (botId: string) => Promise<void>
   deleteChat: (chatId: string) => Promise<void>
   renameChat: (chatId: string, title: string) => Promise<void>
   sendMessage: (
@@ -146,7 +149,8 @@ async function runSlash(input: SlashRun): Promise<string | null> {
   }
   switch (def.id) {
     case 'new':
-      await input.createChat(input.projectId)
+      if (input.botId) await input.newBotChat(input.botId)
+      else await input.createChat(input.projectId)
       return null
     case 'rewind':
       input.openRewind()
@@ -264,6 +268,7 @@ export function ChatPane({
     openChat,
     closeTab,
     createChat,
+    newBotChat,
     deleteChat,
     renameChat,
     setChatAgent,
@@ -479,7 +484,9 @@ export function ChatPane({
                   : null,
                 messages: activeChat.messages,
                 handoffTo: activeChat.handoffTo ?? null,
+                botId: activeChat.botId ?? null,
                 createChat,
+                newBotChat,
                 deleteChat,
                 renameChat,
                 sendMessage,

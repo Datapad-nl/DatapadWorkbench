@@ -69,8 +69,16 @@ function tail(path: string): string {
   return buf.toString('utf8')
 }
 
-function lastLine(text: string): string | null {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+/** Terminal colour and cursor codes, which a log keeps but the chat cannot show. */
+// eslint-disable-next-line no-control-regex -- matching escape codes is the point
+const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g
+
+export function lastLine(text: string): string | null {
+  const lines = text
+    .replace(ANSI, '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
   return lines.length > 0 ? lines[lines.length - 1]! : null
 }
 

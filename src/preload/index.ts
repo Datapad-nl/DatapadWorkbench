@@ -75,6 +75,8 @@ const api = {
   grokCommandNames: (): Promise<string[]> => ipcRenderer.invoke('bot:grokCommandNames'),
   /** The bot's own chat for its Chat tab, made the first time. */
   openBotChat: (botId: string): Promise<Chat> => ipcRenderer.invoke('bot:chat', botId),
+  /** A fresh chat for the bot's Chat tab; the old one is kept. */
+  newBotChat: (botId: string): Promise<Chat> => ipcRenderer.invoke('bot:newChat', botId),
   /** The user has seen the bot's chat: its unread count goes back to 0. */
   markBotRead: (botId: string): Promise<Bot> => ipcRenderer.invoke('bot:markRead', botId),
   /** `cron` repeats; `at` (an ISO time) runs once. */

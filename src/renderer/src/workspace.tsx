@@ -152,6 +152,8 @@ type WorkspaceContextValue = {
   indexProject: (projectId: string) => Promise<void>
   getOrientation: (projectId: string) => Promise<OrientationCard>
   createChat: (projectId: string) => Promise<void>
+  /** A fresh chat on the bot's Chat tab; the old one is kept. */
+  newBotChat: (botId: string) => Promise<void>
   deleteChat: (chatId: string) => Promise<void>
   renameChat: (chatId: string, title: string) => Promise<void>
   setChatAgent: (chatId: string, agent: ChatAgent) => Promise<void>
@@ -801,9 +803,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     setBotTab(tab)
   }, [])
 
-  // The bot's own chat is made the first time its window opens.
+  // The bot's own chat is made the first time its Chat tab shows, and asked for again each time,
+  // so it is on the agent the bot's Settings chose.
   useEffect(() => {
-    if (!activeBotId) return
+    if (!activeBotId || botTab !== 'chat') return
     let live = true
     window.workbench
       .openBotChat(activeBotId)
@@ -817,7 +820,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     return () => {
       live = false
     }
-  }, [activeBotId])
+  }, [activeBotId, botTab])
 
   // The project's tabs stay as they are under the bot's Chat tab; only the chat on screen changes.
   const shownChatId =
@@ -884,6 +887,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     },
     [refreshAfterChange]
   )
+
+  const newBotChat = useCallback(async (botId: string) => {
+    const chat = await window.workbench.newBotChat(botId)
+    setChatsById((current) => ({ ...current, [chat.id]: chat }))
+    setBotChat({ botId, chatId: chat.id })
+    // From a scheduled run's chat too, the new chat shows on the bot's Chat tab.
+    setActiveBotId(botId)
+    setBotTab('chat')
+  }, [])
 
   const deleteChat = useCallback(
     async (chatId: string) => {
@@ -1115,6 +1127,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       indexProject,
       getOrientation,
       createChat,
+      newBotChat,
       deleteChat,
       renameChat,
       setChatAgent,
@@ -1168,6 +1181,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       indexProject,
       getOrientation,
       createChat,
+      newBotChat,
       deleteChat,
       renameChat,
       setChatAgent,
