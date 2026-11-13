@@ -18,6 +18,8 @@ type FakeProc = EventEmitter & {
 const fake = vi.hoisted(() => ({
   procs: [] as FakeProc[],
   sessions: 0,
+  /** What Claude Code answers a steer: `injected` while a turn runs, `promptRequired` when idle. */
+  steerOutcome: 'injected',
   /** The bot of each chat, by chat id. */
   bots: {} as Record<string, { agent: string; model: string; effort: string; allowedTools?: string[] }>
 }))
@@ -49,12 +51,17 @@ function fakeAgent(command: string, args: string[]): FakeProc {
         continue
       }
       proc.calls.push({ method: message.method, params: message.params })
+      // Like the real adapters, only Claude Code offers steering into a running turn.
       const result =
         message.method === 'initialize'
-          ? { authMethods: [{ id: 'cached_token' }] }
+          ? command === 'claude-acp'
+            ? { _meta: { steering: { supported: true } } }
+            : { authMethods: [{ id: 'cached_token' }] }
           : message.method === 'session/new'
             ? { sessionId: `s${++fake.sessions}` }
-            : {}
+            : message.method === '_session/steering'
+              ? { outcome: fake.steerOutcome }
+              : {}
       proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`)
     }
   })
@@ -84,7 +91,16 @@ vi.mock('./store', () => ({
   skipNewSession: <T,>(value: T) => value
 }))
 
-import { abortAgent, agentGeneration, agentKey, newSession, promptSession, stopAgents } from './acp'
+import {
+  abortAgent,
+  agentGeneration,
+  agentKey,
+  newSession,
+  promptSession,
+  sessionSupportsSteering,
+  steerSession,
+  stopAgents
+} from './acp'
 import { bindPermissionSession, cancelAllPermissions, pendingPermissionRequests } from './permissions'
 
 afterEach(() => {
@@ -92,6 +108,7 @@ afterEach(() => {
   stopAgents()
   fake.procs.length = 0
   fake.bots = {}
+  fake.steerOutcome = 'injected'
 })
 
 function configCalls(proc: FakeProc): Array<[unknown, unknown]> {
@@ -190,5 +207,33 @@ describe('agent processes for bots', () => {
     await vi.waitFor(() => expect(pendingPermissionRequests()).toHaveLength(1))
     expect(own.replies).toEqual([{ jsonrpc: '2.0', id: 901, result: { outcome: { outcome: 'selected', optionId: 'yes' } } }])
     expect(pendingPermissionRequests()[0]).toMatchObject({ chatId: 'chat-7', title: expect.stringContaining('notes.md') })
+  })
+})
+
+describe('steering a running turn', () => {
+  it('sends a steer into the running turn on Claude Code, so nothing is cancelled', async () => {
+    const sessionId = await newSession('/project', null, 'claude', 'chat-8')
+    expect(sessionSupportsSteering(sessionId)).toBe(true)
+    const image = { mimeType: 'image/png', data: 'AAAA' }
+    await expect(steerSession(sessionId, 'Use the other file.', [image])).resolves.toBe('injected')
+    const [claude] = fake.procs
+    const steer = claude.calls.find((call) => call.method === '_session/steering')
+    expect(steer?.params).toEqual({
+      sessionId,
+      prompt: [{ type: 'text', text: 'Use the other file.' }, { type: 'image', ...image }],
+      _meta: { steering: { idleBehavior: 'promptRequired' } }
+    })
+    expect(claude.calls.some((call) => call.method === 'session/cancel')).toBe(false)
+  })
+
+  it('reports a steer that found no running turn, so it can go out as a prompt of its own', async () => {
+    fake.steerOutcome = 'promptRequired'
+    const sessionId = await newSession('/project', null, 'claude', 'chat-9')
+    await expect(steerSession(sessionId, 'Also check the tests.')).resolves.toBe('idle')
+  })
+
+  it('does not steer Grok, which does not offer it', async () => {
+    const sessionId = await newSession('/project', null, 'grok', 'chat-10')
+    expect(sessionSupportsSteering(sessionId)).toBe(false)
   })
 })

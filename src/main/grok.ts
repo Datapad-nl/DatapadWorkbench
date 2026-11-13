@@ -41,7 +41,9 @@ import {
   grokCommands,
   resolveExitPlan,
   sessionCommands,
+  sessionSupportsSteering,
   setAcpSessionMode,
+  steerSession,
   type AgentKey,
   type SessionUpdate
 } from './acp'
@@ -528,13 +530,47 @@ export function stopStream(chatId: string): boolean {
 }
 
 /**
- * Cancel the running prompt so a queued steer goes out as soon as the agent stops, instead of
- * after the whole task. A turn still preparing is cancelled once its prompt is sent. If the agent
- * ignores the cancel, the steer waits for the turn to end.
+ * Bring the queued steers to the running turn now, instead of after the whole task. An agent that
+ * takes steering (Claude Code) gets them in its running turn. Any other agent's prompt is cancelled,
+ * and the steers go out as soon as it stops. A turn still preparing gets them once its prompt is sent.
  */
 function interruptForSteer(turn: Turn): void {
   const sessionId = turn.sessionId
   if (turn.cancelled || turn.phase !== 'streaming' || !sessionId) return
+  if (sessionSupportsSteering(sessionId)) steerIntoTurn(turn, sessionId)
+  else cancelForSteer(turn, sessionId)
+}
+
+/**
+ * Send the queued steers into the running turn. A cancel would also stop Claude Code's subagents
+ * and background tasks. If the turn had already ended, the steers wait for the follow-up turn; if
+ * the agent refuses them, the turn is cancelled for them after all.
+ */
+function steerIntoTurn(turn: Turn, sessionId: string): void {
+  const notes = takeAsideSteers(turn.chatId)
+  if (notes.length === 0) return
+  const images = notes.flatMap((note) => note.attachments)
+  void steerSession(sessionId, steerPrompt(notes), images).then(
+    (outcome) => {
+      if (outcome === 'idle') requeueSteers(turn, sessionId, notes, false)
+    },
+    () => requeueSteers(turn, sessionId, notes, true)
+  )
+}
+
+/** Put steers the running turn did not take back in the queue, ahead of any sent since. */
+function requeueSteers(turn: Turn, sessionId: string, notes: SteerNote[], cancel: boolean): void {
+  const kept = notes.filter((note) => !conversationEnded(note.conversation))
+  if (kept.length > 0) asideSteers.set(turn.chatId, [...kept, ...(asideSteers.get(turn.chatId) ?? [])])
+  // The turn has ended and drained its queue already: they go out as a turn of their own.
+  if (turns.get(turn.chatId) !== turn) drainAsideSteers(turn.chatId)
+  // Otherwise the turn drains them when it ends; a refused steer cancels it so that is soon.
+  else if (cancel) cancelForSteer(turn, sessionId)
+}
+
+/** Cancel the running prompt, keeping its session, so the queued steers follow as soon as it stops. */
+function cancelForSteer(turn: Turn, sessionId: string): void {
+  if (turn.cancelled) return
   turn.cancelled = true
   turn.steered = true
   // The agent must not start new tool calls or wait on answers for the cancelled prompt.

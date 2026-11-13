@@ -200,6 +200,8 @@ type Conn = {
   /** Counts spawns, so a timer can tell the process it meant from a respawn. */
   generation: number
   ready: Promise<void> | null
+  /** The agent takes `_session/steering`: a message added to the running turn without cancelling it. */
+  steering: boolean
   nextId: number
   pending: Map<number, Pending>
   liveSessions: Set<string>
@@ -223,6 +225,7 @@ function makeConn(agent: ChatAgent, pluginDir: string | null = null): Conn {
     proc: null,
     generation: 0,
     ready: null,
+    steering: false,
     nextId: 1,
     pending: new Map(),
     liveSessions: new Set(),
@@ -803,10 +806,12 @@ function connCall(conn: Conn): Call {
   return <T>(method: string, params: unknown, timeoutMs: number) => request<T>(conn, method, params, timeoutMs)
 }
 
-async function handshake(agent: ChatAgent, call: Call, clientName: string): Promise<void> {
+/** Starts the session protocol. Resolves to whether the agent takes `_session/steering`. */
+async function handshake(agent: ChatAgent, call: Call, clientName: string): Promise<boolean> {
   const init = await call<{
     authMethods?: Array<{ id: string }>
     agentCapabilities?: { loadSession?: boolean }
+    _meta?: { steering?: { supported?: boolean } }
   }>(
     'initialize',
     {
@@ -821,8 +826,9 @@ async function handshake(agent: ChatAgent, call: Call, clientName: string): Prom
     30_000
   )
 
+  const steering = init._meta?.steering?.supported === true
   // Claude Code signs in from the user's `claude auth login`. Its adapter has no authenticate step.
-  if (agent === 'claude') return
+  if (agent === 'claude') return steering
 
   const methods = new Set((init.authMethods ?? []).map((method) => method.id))
   const apiKey = await getApiKey()
@@ -837,6 +843,7 @@ async function handshake(agent: ChatAgent, call: Call, clientName: string): Prom
   }
 
   await call('authenticate', { methodId, _meta: { headless: true } }, 30_000)
+  return steering
 }
 
 /** Drop everything waiting on one agent's sessions. The other agent keeps running. */
@@ -957,7 +964,7 @@ export async function ensureAgent(agent: ChatAgent = 'grok', pluginDir?: string 
   const ready = (async () => {
     child = await spawnAgent(agent, conn.pluginDir)
     attachProcess(conn, child)
-    await handshake(
+    conn.steering = await handshake(
       agent,
       (method, params, timeoutMs) => request(conn, method, params, timeoutMs),
       'Datapad Workbench'
@@ -1354,6 +1361,35 @@ export async function promptSession(
   // Grok can send turn_completed after the prompt reply. Claude Code sends every update first.
   if (conn.agent === 'grok') await waitForTurnEnd(sessionId)
   else markTurnDone(sessionId)
+}
+
+/** Whether the agent running this session takes a steer into its running turn. */
+export function sessionSupportsSteering(sessionId: string): boolean {
+  const conn = connForSession(sessionId)
+  return conn.steering && conn.proc !== null && conn.liveSessions.has(sessionId)
+}
+
+/**
+ * Add a message to the session's running turn, without cancelling it: the agent's subagents and
+ * background tasks keep going. `injected` when the turn took it, `idle` when no turn was running.
+ */
+export async function steerSession(
+  sessionId: string,
+  text: string,
+  images: Array<{ mimeType: string; data: string }> = []
+): Promise<'injected' | 'idle'> {
+  const conn = connForSession(sessionId)
+  const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
+  if (text.trim()) prompt.push({ type: 'text', text })
+  for (const image of images) prompt.push({ type: 'image', mimeType: image.mimeType, data: image.data })
+  if (prompt.length === 0) throw new Error('Message is empty')
+  const result = await request<{ outcome?: string }>(
+    conn,
+    '_session/steering',
+    { sessionId, prompt, _meta: { steering: { idleBehavior: 'promptRequired' } } },
+    30_000
+  )
+  return result?.outcome === 'injected' ? 'injected' : 'idle'
 }
 
 export function cancelSession(sessionId: string): void {
