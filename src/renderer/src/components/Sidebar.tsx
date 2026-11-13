@@ -787,6 +787,12 @@ export function Sidebar(): React.JSX.Element | null {
     return grouped
   }, [chats])
 
+  // A bot is working while any of its chats runs a turn: its own chat, a schedule or an @ run.
+  const streams = useStreamStatuses()
+  const workingBots = new Set(
+    chats.filter((chat) => chat.botId && streams[chat.id]?.status === 'streaming').map((chat) => chat.botId)
+  )
+
   // While searching, a bot shows when its name matches or when any of its scheduled chats does.
   const shownBots = bots
     .map((bot) => {
@@ -1072,10 +1078,17 @@ export function Sidebar(): React.JSX.Element | null {
                   >
                     <BotAvatar bot={bot} size={18} />
                     <span className="truncate text-[13px]">{bot.name}</span>
+                    {workingBots.has(bot.id) && (
+                      <span
+                        data-testid="bot-working"
+                        className="streaming-dot ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                        title="Working"
+                      />
+                    )}
                     {unread > 0 && (
                       <span
                         data-testid="bot-unread"
-                        className="ml-auto flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-[5px] text-[11px] font-bold text-accent-ink tabular-nums"
+                        className={`${workingBots.has(bot.id) ? 'ml-1.5' : 'ml-auto'} flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-[5px] text-[11px] font-bold text-accent-ink tabular-nums`}
                         title={`${unread} new`}
                       >
                         {unread}
