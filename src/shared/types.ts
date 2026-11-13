@@ -43,6 +43,10 @@ export type UpdateBotInput = {
 export type BotSkill = { name: string; description: string; body: string }
 /** `previousName` is null for a new skill. */
 export type SaveBotSkillInput = { botId: string; previousName: string | null; name: string; description: string; body: string }
+/** A skill listed on skills.sh. `source` is `owner/repo` on GitHub, or the domain that publishes it. */
+export type SkillListing = { id: string; source: string; skill: string; installs: number }
+/** A listed skill's SKILL.md and the paths of all its files, to look at before adding it to a bot. */
+export type SkillPreview = BotSkill & { source: string; skill: string; files: string[] }
 
 export type Attachment = {
   id: string

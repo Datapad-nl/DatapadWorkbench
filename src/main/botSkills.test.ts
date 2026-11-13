@@ -10,7 +10,7 @@ vi.mock('electron', () => ({
 }))
 
 import { createBot } from './bots'
-import { listBotSkills, removeBotSkill, saveBotSkill } from './botSkills'
+import { addBotSkill, listBotSkills, removeBotSkill, safeSkillPath, saveBotSkill } from './botSkills'
 
 beforeEach(() => {
   stub.dir = mkdtempSync(join(tmpdir(), 'wb-bot-skills-'))
@@ -76,6 +76,27 @@ describe('bot skills', () => {
     // Saving under its own name edits it.
     await saveBotSkill({ ...base, previousName: 'taken', name: 'taken', description: 'Changed.' })
     expect((await listBotSkills(bot.id)).find((skill) => skill.name === 'taken')?.description).toBe('Changed.')
+  })
+
+  it('adds a fetched skill with all its files, refusing paths outside its folder', async () => {
+    const bot = await createBot('Scribe')
+    const file = (path: string, text: string): { path: string; data: Buffer } => ({ path, data: Buffer.from(text) })
+    const added = await addBotSkill(bot.id, 'grill-me', [
+      file('SKILL.md', '---\nname: grill-me\ndescription: Ask hard questions.\n---\nGrill.\n'),
+      file('references/notes.md', 'notes')
+    ])
+    expect(added).toEqual({ name: 'grill-me', description: 'Ask hard questions.', body: 'Grill.\n' })
+    expect(readFileSync(join(bot.folder, 'skills', 'grill-me', 'references', 'notes.md'), 'utf8')).toBe('notes')
+    expect((await listBotSkills(bot.id)).map((skill) => skill.name)).toEqual(['grill-me'])
+
+    await expect(addBotSkill(bot.id, 'grill-me', [file('SKILL.md', 'x')])).rejects.toThrow(/already a skill/)
+    await expect(addBotSkill(bot.id, 'other', [file('notes.md', 'x')])).rejects.toThrow(/no SKILL.md/)
+    await expect(addBotSkill(bot.id, '../other', [file('SKILL.md', 'x')])).rejects.toThrow(/not a name/)
+    for (const path of ['../evil.md', '/etc/evil', 'a/../../evil', 'a\\evil', 'C:/evil']) {
+      await expect(addBotSkill(bot.id, 'other', [file('SKILL.md', 'x'), file(path, 'x')])).rejects.toThrow(/outside/)
+    }
+    expect(existsSync(join(bot.folder, 'skills', 'other'))).toBe(false)
+    expect(safeSkillPath('./a//b.md')).toBe('a/b.md')
   })
 
   it('removes a skill and its folder', async () => {

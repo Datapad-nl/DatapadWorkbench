@@ -99,7 +99,8 @@ import {
   getClaudeOptions,
   grokCommands
 } from './acp'
-import { listBotSkills, removeBotSkill, saveBotSkill } from './botSkills'
+import { addBotSkill, listBotSkills, removeBotSkill, saveBotSkill } from './botSkills'
+import { downloadSkill, previewSkill, searchSkills } from './skillsDirectory'
 import { fetchClaudeUsage } from './claudeUsage'
 import {
   onPermissionDenied,
@@ -395,6 +396,11 @@ export function registerIpc(): void {
   ipcMain.handle('bot:skills', (_event, botId: string) => listBotSkills(String(botId)))
   ipcMain.handle('bot:saveSkill', (_event, input: SaveBotSkillInput) => saveBotSkill(input))
   ipcMain.handle('bot:removeSkill', (_event, botId: string, name: string) => removeBotSkill(String(botId), String(name)))
+  ipcMain.handle('skills:search', (_event, query: string) => searchSkills(String(query ?? '')))
+  ipcMain.handle('skills:preview', (_event, source: string, skill: string) => previewSkill(String(source), String(skill)))
+  ipcMain.handle('bot:addSkill', async (_event, botId: string, source: string, skill: string) =>
+    addBotSkill(String(botId), String(skill), await downloadSkill(String(source), String(skill)))
+  )
   // Grok names a bot's skills without the bot's name, so one can hide a global command of the same name.
   ipcMain.handle('bot:grokCommandNames', async () =>
     (await grokCommands(null).catch(() => [])).map((command) => command.name)

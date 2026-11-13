@@ -32,6 +32,8 @@ import type {
   PlanVerdict,
   PublicSettings,
   SaveBotSkillInput,
+  SkillListing,
+  SkillPreview,
   UpdateBotInput,
   UpdateProjectInput,
   UpdateState,
@@ -65,6 +67,10 @@ const api = {
   listBotSkills: (botId: string): Promise<BotSkill[]> => ipcRenderer.invoke('bot:skills', botId),
   saveBotSkill: (input: SaveBotSkillInput): Promise<BotSkill> => ipcRenderer.invoke('bot:saveSkill', input),
   removeBotSkill: (botId: string, name: string): Promise<void> => ipcRenderer.invoke('bot:removeSkill', botId, name),
+  searchSkills: (query: string): Promise<SkillListing[]> => ipcRenderer.invoke('skills:search', query),
+  previewSkill: (source: string, skill: string): Promise<SkillPreview> => ipcRenderer.invoke('skills:preview', source, skill),
+  addBotSkill: (botId: string, source: string, skill: string): Promise<BotSkill> =>
+    ipcRenderer.invoke('bot:addSkill', botId, source, skill),
   grokCommandNames: (): Promise<string[]> => ipcRenderer.invoke('bot:grokCommandNames'),
   /** `cron` repeats; `at` (an ISO time) runs once. */
   scheduleBot: (input: { botId: string; prompt: string; cron?: string; at?: string }): Promise<Chat> =>

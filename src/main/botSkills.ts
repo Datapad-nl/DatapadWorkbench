@@ -1,6 +1,6 @@
 import { shell } from 'electron'
-import { mkdir, readdir, readFile, rename, rm, stat } from 'fs/promises'
-import { join } from 'path'
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'fs/promises'
+import { dirname, join } from 'path'
 import type { BotSkill, SaveBotSkillInput } from '../shared/types'
 import { botFolder, getBot } from './bots'
 import { writeFileAtomic } from './storeIo'
@@ -47,7 +47,7 @@ function entryValue(entry: Entry | undefined): string {
   return value
 }
 
-function readSkill(dir: string, text: string): BotSkill {
+export function readSkill(dir: string, text: string): BotSkill {
   const { entries, body } = splitSkill(text)
   const find = (key: string): Entry | undefined => entries.find((entry) => entry.key === key)
   return { name: entryValue(find('name')) || dir, description: entryValue(find('description')), body }
@@ -59,7 +59,7 @@ export async function listBotSkills(botId: string): Promise<BotSkill[]> {
   const dirs = await readdir(root, { withFileTypes: true }).catch(() => [])
   const skills: BotSkill[] = []
   for (const dir of dirs) {
-    if (!dir.isDirectory()) continue
+    if (!dir.isDirectory() || dir.name.startsWith('.')) continue
     const text = await readFile(join(root, dir.name, 'SKILL.md'), 'utf8').catch(() => null)
     if (text !== null) skills.push({ ...readSkill(dir.name, text), name: dir.name })
   }
@@ -106,6 +106,45 @@ export async function saveBotSkill(input: SaveBotSkillInput): Promise<BotSkill> 
   const body = input.body.replace(/^\s*\n/, '')
   await writeFileAtomic(file, `---\n${frontmatter.join('\n')}\n---\n\n${body.endsWith('\n') ? body : `${body}\n`}`)
   return { name, description, body }
+}
+
+/** A file of a skill, its path relative to the skill's folder. */
+export type SkillFile = { path: string; data: Buffer }
+
+/** A relative path that stays inside the skill's folder, with forward slashes; null for any other. */
+export function safeSkillPath(path: string): string | null {
+  if (!path || path.includes('\0') || path.includes('\\') || path.startsWith('/') || /^[A-Za-z]:/.test(path)) return null
+  const parts = path.split('/').filter((part) => part !== '' && part !== '.')
+  if (parts.length === 0 || parts.includes('..')) return null
+  return parts.join('/')
+}
+
+/** Adds a skill fetched from elsewhere, all its files as they came, under a name not yet taken. */
+export async function addBotSkill(botId: string, name: string, files: SkillFile[]): Promise<BotSkill> {
+  await getBot(botId)
+  if (!SKILL_NAME.test(name) || name.length > MAX_NAME) throw new Error(`"${name}" is not a name a skill can have.`)
+  const paths = files.map((file) => safeSkillPath(file.path))
+  if (paths.some((path) => path === null)) throw new Error('The skill has a file outside its own folder.')
+  const skillMd = files[paths.indexOf('SKILL.md')]
+  if (!skillMd) throw new Error('The skill has no SKILL.md.')
+
+  const target = join(skillsDir(botId), name)
+  if (await exists(target)) throw new Error(`There is already a skill named ${name}.`)
+  // Written next to the skills, then moved in whole, so a failed write leaves no half skill behind.
+  const partial = join(skillsDir(botId), `.${name}.partial`)
+  await rm(partial, { recursive: true, force: true })
+  try {
+    for (const [index, file] of files.entries()) {
+      const path = join(partial, paths[index] as string)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, file.data)
+    }
+    await rename(partial, target)
+  } catch (error) {
+    await rm(partial, { recursive: true, force: true })
+    throw error
+  }
+  return { ...readSkill(name, skillMd.data.toString('utf8')), name }
 }
 
 /** Moves the skill's folder, with any scripts or files next to SKILL.md, to the Trash. */
