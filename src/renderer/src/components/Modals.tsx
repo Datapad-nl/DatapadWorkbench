@@ -762,9 +762,10 @@ export function SettingsModal(): React.JSX.Element | null {
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="text-[12px] font-medium text-ink">Subagents</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">
-                Type /conduct and a job to make a chat the conductor: it plans, gives each task to a subagent in
-                its own chat, and checks what comes back. These are Claude Code models, and a subagent with a
-                model runs on Claude Code.
+                Type /conduct and a job to make a chat the conductor: it plans, writes each task with the checks it
+                must pass, gives it to a subagent in its own chat, and checks what comes back against them. It does
+                not change files itself. These are Claude Code models, and a subagent with a model runs on Claude
+                Code.
               </p>
               <div className="mt-3 grid grid-cols-2 gap-3">
                 {(

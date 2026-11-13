@@ -259,7 +259,11 @@ export function startBrowserAgentServer(): Promise<{ url: string; token: string 
   return starting
 }
 
-/** Claude Code settings that ask the app before each Agent tool call of `chatId`, so Settings holds for its own agents too. */
+/**
+ * Claude Code settings that ask the app before each Agent tool call of `chatId`, so Settings holds for its own
+ * agents too, and before each file edit, which a conductor chat is refused. The app decides at the call, so a
+ * chat that becomes a conductor mid-session is held to it.
+ */
 export async function agentHookSettings(chatId: string): Promise<Record<string, unknown>> {
   const { url, token } = await startBrowserAgentServer()
   const hook = {
@@ -267,7 +271,7 @@ export async function agentHookSettings(chatId: string): Promise<Record<string, 
     url: `${url}/hooks/agent?chat=${encodeURIComponent(chatId)}`,
     headers: { Authorization: `Bearer ${token}` }
   }
-  return { hooks: { PreToolUse: [{ matcher: 'Agent|Task', hooks: [hook] }] } }
+  return { hooks: { PreToolUse: [{ matcher: 'Agent|Task|Edit|Write|MultiEdit|NotebookEdit', hooks: [hook] }] } }
 }
 
 /** The `browser` server, and the `workbench` chat tools (visuals, delegate, other chats) for `chatId`. */

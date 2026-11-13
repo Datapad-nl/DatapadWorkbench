@@ -26,7 +26,9 @@ const fake = vi.hoisted(() => ({
     { id?: string; agent: string; model: string; effort: string; allowedTools?: string[]; mcpServers?: string[] }
   >,
   /** The MCP servers in Settings. */
-  mcp: {} as Record<string, unknown>
+  mcp: {} as Record<string, unknown>,
+  /** Chats made conductor with /conduct, by id. */
+  conductors: new Set<string>()
 }))
 
 /** An ACP agent that answers every request and gives each session/new a fresh id. */
@@ -89,6 +91,7 @@ vi.mock('./store', () => ({
   claudeModelFor: async () => '',
   getApiKey: async () => null,
   getClaudeModel: async () => '',
+  getChat: async (chatId: string) => ({ id: chatId, conductor: fake.conductors.has(chatId) }),
   getEffort: async () => null,
   getMaxSubagents: async () => 2,
   getMcpServers: async () => fake.mcp,
@@ -117,6 +120,7 @@ afterEach(() => {
   fake.procs.length = 0
   fake.bots = {}
   fake.mcp = {}
+  fake.conductors.clear()
   fake.steerOutcome = 'injected'
 })
 
@@ -244,6 +248,46 @@ describe('agent processes for bots', () => {
     await vi.waitFor(() => expect(pendingPermissionRequests()).toHaveLength(1))
     expect(own.replies).toEqual([{ jsonrpc: '2.0', id: 901, result: { outcome: { outcome: 'selected', optionId: 'yes' } } }])
     expect(pendingPermissionRequests()[0]).toMatchObject({ chatId: 'chat-7', title: expect.stringContaining('notes.md') })
+  })
+})
+
+describe('conductor chats', () => {
+  it('tells a conductor its role with every session, in place of the Agent rule', async () => {
+    fake.conductors.add('boss')
+    await newSession('/project', null, 'claude', 'boss')
+    await newSession('/project', null, 'claude', 'chat-1')
+    await newSession('/project', null, 'grok', 'boss')
+    const [claude, grok] = fake.procs
+    const prompts = claude.calls
+      .filter((call) => call.method === 'session/new')
+      .map((call) => (call.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text)
+    expect(prompts[0]).toContain('You are the conductor of this job')
+    expect(prompts[0]).not.toContain('Do a lookup whose target you already know')
+    expect(prompts[1]).not.toContain('You are the conductor')
+    expect(prompts[1]).toContain('Do a lookup whose target you already know')
+    const grokNew = grok.calls.find((call) => call.method === 'session/new')
+    expect((grokNew?.params._meta as { rules: string }).rules).toContain('You are the conductor of this job')
+  })
+
+  it("refuses a conductor's own file edits, even when its mode lets edits through", async () => {
+    fake.conductors.add('boss')
+    const sessionId = await newSession('/project', null, 'grok', 'boss')
+    bindPermissionSession(sessionId, 'boss', 'accept')
+    const [own] = fake.procs
+    const send = (message: Record<string, unknown>): void => {
+      own.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`)
+    }
+    const options = [
+      { optionId: 'yes', kind: 'allow_once', name: 'Allow' },
+      { optionId: 'no', kind: 'reject_once', name: 'Reject' }
+    ]
+    send({ id: 801, method: 'session/request_permission', params: { sessionId, options, toolCall: { toolCallId: 'r1', title: 'npm test', kind: 'execute' } } })
+    send({ id: 802, method: 'session/request_permission', params: { sessionId, options, toolCall: { toolCallId: 'e1', title: 'notes.md', kind: 'edit' } } })
+    await vi.waitFor(() => expect(own.replies).toHaveLength(2))
+    expect(own.replies).toEqual([
+      { jsonrpc: '2.0', id: 801, result: { outcome: { outcome: 'selected', optionId: 'yes' } } },
+      { jsonrpc: '2.0', id: 802, result: { outcome: { outcome: 'selected', optionId: 'no' } } }
+    ])
   })
 })
 

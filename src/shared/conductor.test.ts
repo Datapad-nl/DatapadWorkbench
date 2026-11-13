@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { agentToolRule, conductorPrompt, normalizeMaxSubagents } from './conductor'
+import {
+  MAX_NUDGES,
+  agentToolRule,
+  conductorPrompt,
+  conductorRule,
+  isFileEditTool,
+  normalizeMaxSubagents
+} from './conductor'
 
 describe('conductorPrompt', () => {
   it('lets the conductor pick a model per worker when Settings fixes none', () => {
@@ -18,6 +25,22 @@ describe('conductorPrompt', () => {
   it('tells the conductor how many workers may run at once', () => {
     expect(conductorPrompt('ship it', '', 3)).toContain('At most 3 workers run at the same time')
     expect(conductorPrompt('ship it', '', 1)).toContain('At most 1 worker runs at the same time')
+  })
+
+  it('keeps the conductor off the work and has it check each task against its spec', () => {
+    const rule = conductorRule('', 4)
+    expect(rule).toContain('You do not write code or change files yourself')
+    expect(rule).toContain('acceptance criteria')
+    expect(rule).toContain('criterion by criterion')
+    expect(rule).toContain(`After ${MAX_NUDGES} nudges on the same failed criterion`)
+    expect(conductorPrompt('ship it', '', 4).startsWith(rule)).toBe(true)
+  })
+})
+
+describe('isFileEditTool', () => {
+  it('names the Claude Code tools that change files', () => {
+    for (const name of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) expect(isFileEditTool(name)).toBe(true)
+    for (const name of ['Read', 'Bash', 'Agent', undefined]) expect(isFileEditTool(name)).toBe(false)
   })
 })
 

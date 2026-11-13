@@ -225,6 +225,23 @@ describe('workers', () => {
       expect(await agentHook('nested', { tool_use_id: 'n2', agent_id: 'inner' })).toEqual({})
     })
 
+    it("refuses a conductor's own file edits and lets its agents' and other chats' edits through", async () => {
+      own()
+      chat('boss', { conductor: true })
+      chat('plain')
+      const edit = { tool_name: 'Edit', tool_use_id: 'e1' }
+      expect(await agentHook('boss', edit)).toMatchObject({
+        hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: expect.stringContaining('delegate') }
+      })
+      expect(await agentHook('boss', { ...edit, tool_name: 'Write' })).toMatchObject(DENIED)
+      expect(await agentHook('boss', { ...edit, agent_id: 'inner' })).toEqual({})
+      expect(await agentHook('plain', edit)).toEqual({})
+      // An edit is not an agent, so it does not count toward the limit.
+      stub.maxSubagents = 1
+      expect(await agentHook('plain', { tool_name: 'Write', tool_use_id: 'e2' })).toEqual({})
+      expect(await agentHook('plain', { tool_name: 'Agent', tool_use_id: 'a1' })).toEqual({})
+    })
+
     it('drops the model a call asks for when Settings fixes one, and keeps it otherwise', async () => {
       own()
       const call = { tool_input: { prompt: 'rename the flag', model: 'opus' } }

@@ -208,7 +208,7 @@ const WORKBENCH_TOOLS = [
   {
     name: 'delegate',
     description:
-      'Hand a self-contained task to another agent in a new chat in this project, wait for it to finish, and return its final answer. The child chat shows in the sidebar so the user can follow it. The child starts with no context: put everything it needs in the brief (goal, files, what is already ruled out, what to return). Use it for independent work, or for a second opinion from the other agent.',
+      'Hand a self-contained task to another agent in a new chat in this project, wait for it to finish, and return its final answer. The child chat shows in the sidebar so the user can follow it. The child starts with no context: put everything it needs in the brief (goal, files, what is already ruled out, the acceptance criteria its work must pass, what to return). Use it for independent work, or for a second opinion from the other agent.',
     inputSchema: {
       type: 'object',
       properties: {

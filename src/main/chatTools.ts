@@ -7,6 +7,7 @@ import type {
   FileMention,
 } from "../shared/types";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
+import { CONDUCTOR_EDIT_REFUSED, isFileEditTool } from "../shared/conductor";
 import { nextCronRun } from "../shared/cron";
 import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
@@ -498,13 +499,27 @@ async function runningSubagents(chatId: string): Promise<number> {
 }
 
 /**
- * Answers Claude Code's question before an Agent tool call of `chatId`: refuses the call past
- * the limit in Settings, and drops the model it asked for when Settings fixes one for every subagent.
+ * Answers Claude Code's question before an Agent tool call or a file edit of `chatId`. Refuses a
+ * conductor's own edit; refuses an Agent call past the limit in Settings, and drops the model it
+ * asked for when Settings fixes one for every subagent.
  */
 export async function agentHook(
   chatId: string,
   body: Record<string, unknown>,
 ): Promise<unknown> {
+  if (isFileEditTool(body.tool_name)) {
+    // An agent the conductor started does the work, so its edits go through.
+    if (!chatId || body.agent_id) return {};
+    const chat = await getChat(chatId).catch(() => null);
+    if (!chat?.conductor) return {};
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: CONDUCTOR_EDIT_REFUSED,
+      },
+    };
+  }
   const callId = typeof body.tool_use_id === "string" ? body.tool_use_id : "";
   // An agent of an agent is not in the chat's list, so nothing would say when it ends.
   if (!chatId || !callId || body.agent_id) return {};

@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'child_process'
 import readline from 'readline'
 import { onlyMcpServers, toAcpMcpServers } from '../shared/mcp'
-import { agentToolRule } from '../shared/conductor'
+import { agentToolRule, conductorRule } from '../shared/conductor'
 import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
 import { claudeAcpCommand } from './claudeCli'
@@ -51,6 +51,7 @@ import {
   claudeModelFor,
   getApiKey,
   getClaudeModel,
+  getChat,
   getEffort,
   getMaxSubagents,
   getMcpServers,
@@ -442,6 +443,9 @@ function request<T>(conn: Conn, method: string, params: unknown, timeoutMs: numb
   })
 }
 
+/** Tool kinds that change files. A conductor chat is refused these. */
+const FILE_CHANGE_KINDS = new Set(['edit', 'write', 'delete', 'move'])
+
 async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
   const params = (message.params ?? {}) as PermissionParams
   const sessionId = params.sessionId || fallbackSessionId()
@@ -468,6 +472,11 @@ async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
   // An edit to files another chat in the same folder changed and has not committed asks first, in any mode.
   const clash = decision !== 'deny' && requestId ? await findClash(sessionId, params) : null
   if (clash) decision = 'ask'
+  // A conductor hands every change to a worker. Claude Code is also held to this by its hook; Grok only here.
+  if (decision !== 'deny' && FILE_CHANGE_KINDS.has((params.toolCall?.kind ?? '').toLowerCase())) {
+    const chat = await getChat(chatIdForSession(sessionId) ?? '').catch(() => null)
+    if (chat?.conductor) decision = 'deny'
+  }
 
   if (decision === 'deny') noteDeniedPermission(sessionId, params)
   const result =
@@ -1012,7 +1021,11 @@ async function sessionConfig(
   const bot = await chatBot(chatId).catch(() => null)
   const servers = bot ? onlyMcpServers(await getMcpServers(), bot.mcpServers) : await getMcpServers()
   const config = { cwd, mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(servers)] }
-  if (agent !== 'claude') return { ...config, ...sessionRules(agent, rules) }
+  const subagentModel = await getSubagentModel()
+  // A conductor is told its role with every session, not only in the /conduct message.
+  const conductor = chatId ? (await getChat(chatId).catch(() => null))?.conductor : false
+  const role = conductor ? conductorRule(subagentModel, await getMaxSubagents()) : null
+  if (agent !== 'claude') return { ...config, ...sessionRules(agent, role ? `${rules}\n\n${role}` : rules) }
   // A bot's own skills come with the session, as a plugin in the bot's folder.
   const plugins = pluginDir ? { plugins: [{ type: 'local', path: pluginDir }] } : {}
   if (!chatId) {
@@ -1022,8 +1035,8 @@ async function sessionConfig(
     return { ...config, ...session, _meta: { claudeCode: { ...meta, options: plugins } } }
   }
   // Claude Code starts agents of its own with its Agent tool. Settings holds for those too.
-  const subagentModel = await getSubagentModel()
-  const session = sessionRules(agent, `${rules}\n\n${agentToolRule(subagentModel, await getMaxSubagents())}`)
+  // A conductor gets its role instead: the Agent rule has a chat do small work itself.
+  const session = sessionRules(agent, `${rules}\n\n${role ?? agentToolRule(subagentModel, await getMaxSubagents())}`)
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
   return {
     ...config,
