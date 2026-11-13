@@ -1055,10 +1055,10 @@ function CopyAction({ text }: { text: string }): React.JSX.Element {
   )
 }
 
-function AssistantHeader({ agent, meta }: { agent: ChatAgent; meta?: string }): React.JSX.Element {
+function AssistantHeader({ agent, bot, meta }: { agent: ChatAgent; bot?: Bot; meta?: string }): React.JSX.Element {
   return (
     <div className="flex h-7 items-center gap-2">
-      <span className="text-[13px] font-semibold text-ink">{chatAgentLabel(agent)}</span>
+      <span className="text-[13px] font-semibold text-ink">{bot ? bot.name : chatAgentLabel(agent)}</span>
       {meta && <span className="text-[11px] tabular-nums text-faint">{meta}</span>}
     </div>
   )
@@ -1083,7 +1083,7 @@ function MessageList({
   onSuggest,
   newMessageId
 }: {
-  chat: { messages: Message[] }
+  chat: { messages: Message[]; botId?: string }
   chatId: string
   agent: ChatAgent
   projectId: string
@@ -1115,6 +1115,8 @@ function MessageList({
   let lastDay = ''
   const { bots } = useBots()
   const { openChat } = useWorkspace()
+  // In a bot's chat the replies are the bot's, under its own name and avatar.
+  const chatBot = chat.botId ? bots.find((bot) => bot.id === chat.botId) : undefined
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
@@ -1147,7 +1149,7 @@ function MessageList({
             if (day) lastDay = day
             const side = message.kind === 'btw' ? 'btw' : message.kind === 'steer' ? 'steer' : null
             const fromBot = message.fromBot
-            const answeringBot = fromBot ? bots.find((bot) => bot.id === fromBot.botId) : undefined
+            const answeringBot = fromBot ? bots.find((bot) => bot.id === fromBot.botId) : chatBot
             const extras = (
               <>
                 {message.bots && message.bots.length > 0 && (
@@ -1229,7 +1231,7 @@ function MessageList({
                           )}
                         </div>
                       ) : (
-                        <AssistantHeader agent={agent} meta={side === 'btw' ? 'side answer' : undefined} />
+                        <AssistantHeader agent={agent} bot={chatBot} meta={side === 'btw' ? 'side answer' : undefined} />
                       )}
                       <div className="mt-1 text-[14.5px] leading-[1.65]">
                         {message.content ? <AgentReply text={message.content} chatId={chatId} /> : null}
@@ -1254,7 +1256,7 @@ function MessageList({
               </div>
             )
           })}
-          {streaming && <LiveReply chatId={chatId} agent={agent} progress={progress} bottom={bottom} />}
+          {streaming && <LiveReply chatId={chatId} agent={agent} bot={chatBot} progress={progress} bottom={bottom} />}
           {error && <div className="text-[13px] text-danger">{error}</div>}
           {plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()) && (
             <PlanCard key={chatId} plan={plan} chatId={chatId} canApprove={canApprove} onApprove={onApprove} />
@@ -1270,11 +1272,13 @@ function MessageList({
 function LiveReply({
   chatId,
   agent,
+  bot,
   progress,
   bottom
 }: {
   chatId: string
   agent: ChatAgent
+  bot?: Bot
   progress: string
   bottom: React.RefObject<HTMLDivElement | null>
 }): React.JSX.Element {
@@ -1285,9 +1289,9 @@ function LiveReply({
 
   return (
     <article className="flex gap-3">
-      <AgentTile agent={agent} />
+      {bot ? <BotAvatar bot={bot} size={28} /> : <AgentTile agent={agent} />}
       <div className="min-w-0 flex-1">
-        <AssistantHeader agent={agent} />
+        <AssistantHeader agent={agent} bot={bot} />
         <div className="mt-1 text-[14.5px] leading-[1.65]">
           {draft ? <AgentReply text={draft} chatId={chatId} live /> : null}
         </div>
