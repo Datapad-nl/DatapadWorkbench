@@ -1289,7 +1289,8 @@ async function startSteer(
   content: string,
   attachments: Attachment[],
   mentions: FileMention[],
-  conversation: string | undefined
+  conversation: string | undefined,
+  bots: BotMention[]
 ): Promise<Chat> {
   const question = stripBtwPrefix(promptForMentions(content, mentions))
   if (!question && attachments.length === 0) throw new Error('Message is empty')
@@ -1304,6 +1305,7 @@ async function startSteer(
       kind: 'steer',
       attachments: attachments.length > 0 ? attachments : undefined,
       mentions: mentions.length > 0 ? mentions : undefined,
+      bots: bots.length > 0 ? bots : undefined,
       createdAt: now()
     })
   })
@@ -1316,7 +1318,7 @@ async function startSteer(
     title: 'Steer',
     detail: question || 'Screenshot'
   })
-  queueAsideSteer(chatId, { text: question, attachments, messageId, conversation })
+  queueAsideSteer(chatId, { text: promptForBotsAsked(question, bots), attachments, messageId, conversation })
   drainAsideSteers(chatId)
   return started
 }
@@ -1327,10 +1329,11 @@ export async function startAside(
   content: string,
   attachments: Attachment[] = [],
   mentions: FileMention[] = [],
-  conversation?: string
+  conversation?: string,
+  bots: BotMention[] = []
 ): Promise<Chat> {
   if (!content.trim().startsWith(BTW_PREFIX)) {
-    return startSteer(chatId, content, attachments, mentions, conversation)
+    return startSteer(chatId, content, attachments, mentions, conversation, bots)
   }
   const question = stripBtwPrefix(promptForMentions(content, mentions))
   if (!question && attachments.length === 0) throw new Error('Message is empty')
@@ -1344,6 +1347,7 @@ export async function startAside(
       kind: 'btw',
       attachments: attachments.length > 0 ? attachments : undefined,
       mentions: mentions.length > 0 ? mentions : undefined,
+      bots: bots.length > 0 ? bots : undefined,
       createdAt: now()
     })
     chat.messages.push({

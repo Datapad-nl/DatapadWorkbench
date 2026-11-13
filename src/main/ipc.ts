@@ -582,6 +582,7 @@ export function registerIpc(): void {
         typeof bot.name === 'string' &&
         all.findIndex((item) => item?.id === bot.id) === index
     )
+    const asked = bots.map((bot) => ({ id: bot.id, name: bot.name }))
     // After the project chat's turn is reserved, so a Stop sent right away still finds it.
     const askBots = (): void => {
       for (const bot of bots) {
@@ -605,7 +606,8 @@ export function registerIpc(): void {
         input.content,
         input.attachments ?? [],
         input.mentions ?? [],
-        conversation
+        conversation,
+        asked
       )
       askBots()
       return started
@@ -617,7 +619,7 @@ export function registerIpc(): void {
       input.content,
       input.attachments ?? [],
       input.mentions ?? [],
-      bots.map((bot) => ({ id: bot.id, name: bot.name }))
+      asked
     )
     done.catch(() => {})
     askBots()
