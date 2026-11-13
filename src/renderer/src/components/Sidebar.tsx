@@ -11,6 +11,7 @@ import { IndexStatus } from './OrientationCard'
 const WIDTH_KEY = 'workbench.sidebarWidth'
 const COLLAPSED_KEY = 'workbench.collapsedProjects'
 const BLURRED_KEY = 'workbench.blurredProjects'
+const BOTS_COLLAPSED_KEY = 'workbench.botsCollapsed'
 const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 180
 const MAX_WIDTH = 520
@@ -456,16 +457,38 @@ function SectionLabel({
   label,
   onAdd,
   addLabel,
-  addTestId
+  addTestId,
+  open,
+  onToggle
 }: {
   label: string
   onAdd?: () => void
   addLabel?: string
   addTestId?: string
+  /** With onToggle, the label folds the section open and shut. */
+  open?: boolean
+  onToggle?: () => void
 }): React.JSX.Element {
   return (
     <div className="mt-3 mb-1 flex h-6 items-center justify-between pr-1 pl-2">
-      <span className="text-[11px] font-semibold text-faint">{label}</span>
+      {onToggle ? (
+        <button
+          className="flex items-center gap-1 text-[11px] font-semibold text-faint hover:text-ink"
+          aria-expanded={open}
+          title={open ? `Collapse ${label.toLowerCase()}` : `Expand ${label.toLowerCase()}`}
+          onClick={onToggle}
+        >
+          {label}
+          <Icon
+            name="chevron"
+            size={10}
+            strokeWidth={1.6}
+            className={`transition-transform ${open ? 'rotate-90' : ''}`}
+          />
+        </button>
+      ) : (
+        <span className="text-[11px] font-semibold text-faint">{label}</span>
+      )}
       {onAdd && <IconButton icon="plus" label={addLabel ?? 'Add'} size={22} onClick={onAdd} testId={addTestId} />}
     </div>
   )
@@ -609,6 +632,7 @@ export function Sidebar(): React.JSX.Element | null {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => readFlags(COLLAPSED_KEY))
   // Names hidden for screen recordings; kept across restarts.
   const [blurred, setBlurred] = useState<Record<string, boolean>>(() => readFlags(BLURRED_KEY))
+  const [botsCollapsed, setBotsCollapsed] = useState(() => localStorage.getItem(BOTS_COLLAPSED_KEY) === 'true')
   const [width, setWidth] = useState(readWidth)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [menu, setMenu] = useState<{ projectId: string; top: number; left: number } | null>(null)
@@ -624,6 +648,10 @@ export function Sidebar(): React.JSX.Element | null {
   useEffect(() => {
     localStorage.setItem(COLLAPSED_KEY, JSON.stringify(collapsed))
   }, [collapsed])
+
+  useEffect(() => {
+    localStorage.setItem(BOTS_COLLAPSED_KEY, String(botsCollapsed))
+  }, [botsCollapsed])
 
   useEffect(() => {
     localStorage.setItem(BLURRED_KEY, JSON.stringify(blurred))
@@ -774,6 +802,8 @@ export function Sidebar(): React.JSX.Element | null {
       : null
   ].filter(Boolean)
   const accountName = account ?? (plans.length ? 'Signed in' : 'Not signed in')
+  // A search shows matching bots even in a collapsed section, as it does in a collapsed project.
+  const botsOpen = Boolean(needle) || !botsCollapsed
 
   function renderProject(project: Project, projectChats: ChatSummary[]): React.JSX.Element {
     // Only a worktree whose parent project is not in the sidebar still shows as its own row.
@@ -980,13 +1010,18 @@ export function Sidebar(): React.JSX.Element | null {
           label="Bots"
           onAdd={() =>
             void createBot('New bot')
-              .then((bot) => openBot(bot.id))
+              .then((bot) => {
+                setBotsCollapsed(false)
+                openBot(bot.id)
+              })
               .catch((caught: unknown) => window.alert(errorText(caught, 'Could not create the bot')))
           }
           addLabel="New bot"
           addTestId="new-bot"
+          open={botsOpen}
+          onToggle={() => setBotsCollapsed((current) => !current)}
         />
-        {bots.length === 0 ? (
+        {!botsOpen ? null : bots.length === 0 ? (
           <div className="px-2 pb-1 text-[12px] text-faint">No bots yet.</div>
         ) : (
           shownBots.map(({ bot, chats: botChats }) => {
