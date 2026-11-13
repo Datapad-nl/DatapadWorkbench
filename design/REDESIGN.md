@@ -1,6 +1,6 @@
 # Workbench UI redesign: implementation instructions
 
-Reference: [redesign-mockup.png](redesign-mockup.png) (source: [redesign-mockup.html](redesign-mockup.html), 1600×1000 at 2x).
+Reference: a 1600×1000 mockup, since removed from the repo because it showed private project names.
 
 This document tells you how to turn the current UI into the mockup. It changes layout, hierarchy and styling. It does **not** add backend features: where the mockup shows data the app may not have (token counts, context %, model name), show it only if the data already exists, otherwise leave that element out.
 
@@ -178,7 +178,7 @@ Each of these must look intentional in all three themes:
 
 ## 11. Done when
 
-- [ ] The running app matches `redesign-mockup.png` at 1600×1000 with the default theme.
+- [ ] The running app matches the mockup at 1600×1000 with the default theme.
 - [ ] No uppercase letter-spaced labels remain.
 - [ ] No two chats in the sidebar read "Grok session".
 - [ ] Every right pane can be opened, closed and reordered from the title bar.
