@@ -31,6 +31,11 @@ describe('linkNotes', () => {
     expect(linkNotes('[[Missing|gone]] and [[src]]', 'Home.md', nodes)).toBe('gone and src')
   })
 
+  it('drops Obsidian comments outside code', () => {
+    const body = 'Intro\n\n%% datapad-workbench:start %%\n\nText %%inline\nnote%% end\n\n`%% kept %%`'
+    expect(linkNotes(body, 'Home.md', nodes)).toBe('Intro\n\n\n\nText  end\n\n`%% kept %%`')
+  })
+
   it('leaves code and embeds as written', () => {
     const body = '`[[Architecture]]`\n\n```\n[[Architecture]]\n```\n\n![[Architecture]]'
     expect(linkNotes(body, 'Home.md', nodes)).toBe(body)
