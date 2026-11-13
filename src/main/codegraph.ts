@@ -269,11 +269,16 @@ async function ensureBin(projectId: string, path: string): Promise<string | null
 
 async function readStatusJson(bin: string, path: string): Promise<StatusJson | null> {
   const result = await run(bin, ['status', '--json', path], { cwd: path, timeoutMs: 20_000 })
+  let status: StatusJson
   try {
-    return JSON.parse(result.stdout.trim()) as StatusJson
+    status = JSON.parse(result.stdout.trim()) as StatusJson
   } catch {
     return null
   }
+  // The CLI reports the index of a parent folder too, such as one of all of /tmp. That index is
+  // not the project's, and reading it as one sends every workspace refresh back to the slow CLI.
+  if (status.initialized && !existsSync(join(path, '.codegraph'))) return { initialized: false }
+  return status
 }
 
 function fromStatus(projectId: string, status: StatusJson | null, fallback: IndexState): ProjectIndex {

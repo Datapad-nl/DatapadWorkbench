@@ -13,7 +13,8 @@ vi.mock('os', async (importOriginal) => {
 
 // A stand-in CLI. It logs each command, reports .codegraph as the index, and init creates it.
 // A fail-init file next to it fails the next init, and slow-status holds back the next status
-// answer, read before the wait. In the folder, slow-init slows init down,
+// answer, read before the wait. A parent-index file reports an index for any folder, as the real
+// CLI does for a folder inside an indexed one. In the folder, slow-init slows init down,
 // count sets the reported file count, and sync makes next-count the count.
 const FAKE_CLI = `#!/bin/sh
 echo "$1" >> "$(dirname "$0")/calls.log"
@@ -21,7 +22,7 @@ case "$1" in
   status)
     if [ -f "$(dirname "$0")/hang" ]; then trap '' TERM; echo started >> "$(dirname "$0")/calls.log"; sleep 3; fi
     count=3; if [ -f "$3/count" ]; then count=$(cat "$3/count"); fi
-    if [ -d "$3/.codegraph" ]; then out="{\\"initialized\\":true,\\"fileCount\\":$count,\\"nodeCount\\":9,\\"languages\\":[\\"typescript\\"]}"
+    if [ -d "$3/.codegraph" ] || [ -f "$(dirname "$0")/parent-index" ]; then out="{\\"initialized\\":true,\\"fileCount\\":$count,\\"nodeCount\\":9,\\"languages\\":[\\"typescript\\"]}"
     else out='{"initialized":false}'; fi
     if [ -f "$(dirname "$0")/slow-status" ]; then rm "$(dirname "$0")/slow-status"; sleep 1.5; fi
     echo "$out" ;;
@@ -115,6 +116,15 @@ describe('readIndex', () => {
     expect((await readIndex(project('a'))).state).toBe('indexed')
     await rm(join(folder, '.codegraph'), { recursive: true })
     expect((await readIndex(project('a'))).state).toBe('not-indexed')
+  })
+
+  it('does not count a parent folder’s index as the project’s, and keeps that answer', async () => {
+    await installFakeCli()
+    await writeFile(join(root, 'bin', 'parent-index'), '')
+    const { readIndex } = await import('./codegraph')
+    expect((await readIndex(project('a'))).state).toBe('not-indexed')
+    expect((await readIndex(project('a'))).state).toBe('not-indexed')
+    expect((await calls()).filter((call) => call === 'status')).toHaveLength(1)
   })
 
   it('looks for a missing CLI again after a while', async () => {
