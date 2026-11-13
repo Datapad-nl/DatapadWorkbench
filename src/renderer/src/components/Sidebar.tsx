@@ -516,7 +516,8 @@ function ChatRow({
   worktreeBranch
 }: {
   chat: ChatSummary
-  project: Project
+  /** None for a bot's chat. */
+  project?: Project
   /** Branch of the worktree project this chat runs in, when it is folded under its parent. */
   worktreeBranch?: string | null
 }): React.JSX.Element {
@@ -537,7 +538,7 @@ function ChatRow({
         <button
           className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2 text-left"
           title={chat.title}
-          data-project={project.id}
+          data-project={project?.id}
           onClick={() => void openChat(chat.id)}
         >
           <span className="truncate text-[12.5px]">{chat.title}</span>
@@ -775,8 +776,28 @@ export function Sidebar(): React.JSX.Element | null {
       .filter((item): item is { project: Project; chats: ChatSummary[] } => item !== null)
   }, [projects, ownerOf, chatsByProject, needle, contentHits])
 
-  // Bots filter by name. Their chats are reached from the bot's window, not listed here.
-  const shownBots = needle ? bots.filter((bot) => bot.name.toLowerCase().includes(needle)) : bots
+  // A bot's scheduled chats list under the bot; its other chats are reached from the bot's window.
+  const schedulesByBot = useMemo(() => {
+    const grouped: Record<string, ChatSummary[]> = {}
+    for (const chat of chats) {
+      if (!chat.botId || !chat.schedule) continue
+      grouped[chat.botId] ??= []
+      grouped[chat.botId].push(chat)
+    }
+    return grouped
+  }, [chats])
+
+  // While searching, a bot shows when its name matches or when any of its scheduled chats does.
+  const shownBots = bots
+    .map((bot) => {
+      const all = schedulesByBot[bot.id] ?? []
+      if (!needle) return { bot, schedules: all }
+      const nameHit = bot.name.toLowerCase().includes(needle)
+      const hits = all.filter((chat) => chat.title.toLowerCase().includes(needle) || contentHits.has(chat.id))
+      if (!nameHit && hits.length === 0) return null
+      return { bot, schedules: nameHit && hits.length === 0 ? all : hits }
+    })
+    .filter((item): item is { bot: (typeof bots)[number]; schedules: ChatSummary[] } => item !== null)
 
   const menuProject = menu ? (projects.find((item) => item.id === menu.projectId) ?? null) : null
 
@@ -1012,33 +1033,65 @@ export function Sidebar(): React.JSX.Element | null {
         {!botsOpen ? null : bots.length === 0 ? (
           <div className="px-2 pb-1 text-[12px] text-faint">No bots yet.</div>
         ) : (
-          shownBots.map((bot) => {
+          shownBots.map(({ bot, schedules }) => {
             const active = activeBotId === bot.id
             const unread = bot.unread ?? 0
+            const open = schedules.length > 0 && (needle ? true : !collapsed[bot.id])
             return (
               <div key={bot.id} className="mb-px">
-                <button
-                  data-testid="bot-row"
-                  className={`flex h-[30px] w-full items-center gap-2 rounded-[7px] px-2 text-left ${
+                <div
+                  className={`flex h-[30px] items-center gap-1.5 rounded-[7px] pr-2 ${
                     active
                       ? 'bg-raised text-ink shadow-[inset_0_0_0_1px_var(--color-line-strong)]'
                       : 'text-ink-2 hover:bg-hover hover:text-ink'
                   }`}
-                  title={bot.name}
-                  onClick={() => openBot(bot.id)}
                 >
-                  <BotAvatar bot={bot} size={18} />
-                  <span className="truncate text-[13px]">{bot.name}</span>
-                  {unread > 0 && (
-                    <span
-                      data-testid="bot-unread"
-                      className="ml-auto flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-[5px] text-[11px] font-bold text-accent-ink tabular-nums"
-                      title={`${unread} new`}
+                  {schedules.length > 0 ? (
+                    <button
+                      data-testid="bot-schedules-toggle"
+                      className="flex h-[30px] w-5 shrink-0 items-center justify-center rounded-sm pl-1 text-faint hover:text-ink"
+                      aria-expanded={open}
+                      title={open ? 'Hide schedules' : 'Show schedules'}
+                      onClick={() => toggleProject(bot.id)}
                     >
-                      {unread}
-                    </span>
+                      <Icon
+                        name="chevron"
+                        size={12}
+                        strokeWidth={1.6}
+                        className={`transition-transform ${open ? 'rotate-90' : ''}`}
+                      />
+                    </button>
+                  ) : (
+                    <span className="w-5 shrink-0" />
                   )}
-                </button>
+                  <button
+                    data-testid="bot-row"
+                    className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
+                    title={bot.name}
+                    onClick={() => openBot(bot.id)}
+                  >
+                    <BotAvatar bot={bot} size={18} />
+                    <span className="truncate text-[13px]">{bot.name}</span>
+                    {unread > 0 && (
+                      <span
+                        data-testid="bot-unread"
+                        className="ml-auto flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-[5px] text-[11px] font-bold text-accent-ink tabular-nums"
+                        title={`${unread} new`}
+                      >
+                        {unread}
+                      </span>
+                    )}
+                  </button>
+                </div>
+                {open && (
+                  <div className="mb-1 pl-[26px]">
+                    <div className="ml-[9px] border-l border-line pl-2">
+                      {schedules.map((chat) => (
+                        <ChatRow key={chat.id} chat={chat} />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )
           })

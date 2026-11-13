@@ -402,6 +402,7 @@ export function ChatPane({
         />
       ) : (
         <>
+          <ScheduleBar chat={activeChat} />
           <MessageList
             chat={activeChat}
             chatId={activeChat.id}
@@ -573,6 +574,67 @@ function ContextChip({ context }: { context: ChatContext }): React.JSX.Element {
       <span className="font-sans text-faint">ctx</span>
       {contextLabel(context)}
     </span>
+  )
+}
+
+function scheduleTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+}
+
+/** Above the messages of a scheduled chat: when it runs, what it sends, and a way to stop it. */
+function ScheduleBar({ chat }: { chat: Chat }): React.JSX.Element | null {
+  const schedule = chat.schedule
+  if (!schedule) return null
+  return (
+    <div className="mx-auto mt-2 w-[min(var(--chat-width,720px),100%-40px)] shrink-0" data-testid="schedule-bar">
+      <details className="group rounded-[8px] border border-line-strong bg-raised px-3 py-2 text-[12.5px]">
+        <summary className="flex cursor-pointer list-none items-center gap-2 [&::-webkit-details-marker]:hidden">
+          <Icon name="clock" size={13} className="shrink-0 text-muted" />
+          <span className="min-w-0 truncate text-muted">
+            {schedule.cron ? (
+              <>
+                Repeats <span className="font-mono text-ink">{schedule.cron}</span>
+              </>
+            ) : (
+              'Runs once'
+            )}
+            {schedule.nextRunAt && (
+              <>
+                {' · next '}
+                <span className="text-ink">{scheduleTime(schedule.nextRunAt)}</span>
+              </>
+            )}
+            {schedule.lastRunAt && ` · last ${scheduleTime(schedule.lastRunAt)}`}
+          </span>
+          <div className="flex-1" />
+          <span className="shrink-0 text-faint group-open:hidden">Show prompt</span>
+          <span className="hidden shrink-0 text-faint group-open:inline">Hide prompt</span>
+          <button
+            type="button"
+            data-testid="schedule-stop"
+            className="shrink-0 font-medium text-muted hover:text-danger"
+            onClick={(event) => {
+              event.preventDefault()
+              if (!confirm('Stop this schedule? The chat stays.')) return
+              window.workbench
+                .stopSchedule(chat.id)
+                .catch((caught: unknown) => window.alert(errorText(caught, 'Could not stop the schedule')))
+            }}
+          >
+            Stop
+          </button>
+        </summary>
+        <div className="mt-2 max-h-48 overflow-y-auto border-t border-line pt-2 whitespace-pre-wrap wrap-anywhere text-ink-2">
+          {schedule.prompt}
+        </div>
+      </details>
+    </div>
   )
 }
 
