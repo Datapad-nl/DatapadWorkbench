@@ -21,7 +21,12 @@ const fake = vi.hoisted(() => ({
   /** What Claude Code answers a steer: `injected` while a turn runs, `promptRequired` when idle. */
   steerOutcome: 'injected',
   /** The bot of each chat, by chat id. */
-  bots: {} as Record<string, { agent: string; model: string; effort: string; allowedTools?: string[] }>
+  bots: {} as Record<
+    string,
+    { id?: string; agent: string; model: string; effort: string; allowedTools?: string[]; mcpServers?: string[] }
+  >,
+  /** The MCP servers in Settings. */
+  mcp: {} as Record<string, unknown>
 }))
 
 /** An ACP agent that answers every request and gives each session/new a fresh id. */
@@ -86,7 +91,7 @@ vi.mock('./store', () => ({
   getClaudeModel: async () => '',
   getEffort: async () => null,
   getMaxSubagents: async () => 2,
-  getMcpServers: async () => ({}),
+  getMcpServers: async () => fake.mcp,
   getSubagentModel: async () => null,
   skipNewSession: <T,>(value: T) => value
 }))
@@ -95,8 +100,11 @@ import {
   abortAgent,
   agentGeneration,
   agentKey,
+  loadSession,
   newSession,
   promptSession,
+  reloadBotSessions,
+  sessionNeedsReload,
   sessionSupportsSteering,
   steerSession,
   stopAgents
@@ -108,6 +116,7 @@ afterEach(() => {
   stopAgents()
   fake.procs.length = 0
   fake.bots = {}
+  fake.mcp = {}
   fake.steerOutcome = 'injected'
 })
 
@@ -177,6 +186,34 @@ describe('agent processes for bots', () => {
     const created = fake.procs[0].calls.find((call) => call.method === 'session/new')
     const options = (created?.params._meta as { claudeCode: { options: Record<string, unknown> } }).claudeCode.options
     expect(options.plugins).toEqual([{ type: 'local', path: BOT }])
+  })
+
+  it('gives a bot only the MCP servers on its page, and keeps Claude Code\'s own servers out', async () => {
+    fake.mcp = { github: { command: 'gh-mcp' }, notes: { type: 'http', url: 'https://notes.test/mcp' } }
+    fake.bots['chat-8'] = { id: 'b1', agent: 'claude', model: '', effort: '', mcpServers: ['notes'] }
+    await newSession('/project', null, 'claude', 'chat-8', BOT)
+    await newSession('/project', null, 'claude', 'chat-1')
+    const [botNew, plainNew] = fake.procs[0].calls.filter((call) => call.method === 'session/new')
+    const names = (call: Call): string[] => (call.params.mcpServers as Array<{ name: string }>).map((server) => server.name)
+    const options = (call: Call): Record<string, unknown> =>
+      (call.params._meta as { claudeCode: { options: Record<string, unknown> } }).claudeCode.options
+    expect(names(botNew)).toEqual(['notes'])
+    expect(options(botNew).strictMcpConfig).toBe(true)
+    // A project's chat keeps every server, and Claude Code's own config.
+    expect(names(plainNew)).toEqual(['github', 'notes'])
+    expect(options(plainNew).strictMcpConfig).toBeUndefined()
+  })
+
+  it("loads a bot's live chats again on their next turn after its MCP servers changed", async () => {
+    fake.bots['chat-9'] = { id: 'b2', agent: 'grok', model: '', effort: '', mcpServers: [] }
+    fake.bots['chat-10'] = { id: 'b3', agent: 'grok', model: '', effort: '', mcpServers: [] }
+    const changed = await newSession('/project', null, 'grok', 'chat-9', BOT)
+    const other = await newSession('/project', null, 'grok', 'chat-10', '/data/bots/other')
+    await reloadBotSessions('b2')
+    expect(sessionNeedsReload(changed)).toBe(true)
+    expect(sessionNeedsReload(other)).toBe(false)
+    await loadSession(changed, '/project', null, 'grok', 'chat-9', BOT)
+    expect(sessionNeedsReload(changed)).toBe(false)
   })
 
   it("lets a bot run the tools on its list without asking, and asks for the rest", async () => {

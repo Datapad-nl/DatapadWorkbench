@@ -41,6 +41,7 @@ import {
   grokCommands,
   resolveExitPlan,
   sessionCommands,
+  sessionNeedsReload,
   sessionSupportsSteering,
   setAcpSessionMode,
   steerSession,
@@ -821,7 +822,7 @@ async function resolveSession(chat: Chat, project: Project | undefined): Promise
       chat = withPlan
     }
     bind(sessionId)
-    if (hasLiveSession(sessionId)) return { chat, sessionId }
+    if (hasLiveSession(sessionId) && !sessionNeedsReload(sessionId)) return { chat, sessionId }
     try {
       await loadSession(sessionId, cwd, await chatRules(chat, project), agent, chat.id, pluginDir)
       return { chat, sessionId }

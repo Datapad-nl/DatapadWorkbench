@@ -94,6 +94,7 @@ import {
   abortAgent,
   agentKey,
   applyBotToLiveSessions,
+  reloadBotSessions,
   applyClaudeModelToLiveSessions,
   applyEffortToLiveSessions,
   fetchUsage,
@@ -404,8 +405,10 @@ export function registerIpc(): void {
   ipcMain.handle('bot:list', () => listBots())
   ipcMain.handle('bot:create', (_event, name: unknown) => createBot(typeof name === 'string' ? name : ''))
   ipcMain.handle('bot:update', async (_event, input: UpdateBotInput) => {
+    const before = await getBot(input.id).catch(() => null)
     const bot = await updateBot(input)
     await applyBotToLiveSessions(bot.id)
+    if (before && before.mcpServers.join('\n') !== bot.mcpServers.join('\n')) await reloadBotSessions(bot.id)
     return bot
   })
   ipcMain.handle('bot:delete', async (_event, botId: string) => {

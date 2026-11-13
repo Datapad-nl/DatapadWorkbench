@@ -31,6 +31,7 @@ type Draft = {
   effort: string
   instructions: string
   allowedTools: string
+  mcpServers: string
 }
 
 function draftOf(bot: Bot): Draft {
@@ -40,7 +41,8 @@ function draftOf(bot: Bot): Draft {
     model: bot.model,
     effort: bot.effort,
     instructions: bot.instructions,
-    allowedTools: bot.allowedTools.join('\n')
+    allowedTools: bot.allowedTools.join('\n'),
+    mcpServers: bot.mcpServers.join('\n')
   }
 }
 
@@ -151,7 +153,9 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
     const name = tool[draft.agent]
     return name ? [{ name, label: tool.label }] : []
   })
-  const serverTools = [...WORKBENCH_MCP_SERVERS, ...mcpNames].map((server) => ({
+  const servers = draft.mcpServers ? draft.mcpServers.split('\n') : []
+  // Only the servers the bot gets can have their tools approved.
+  const serverTools = [...WORKBENCH_MCP_SERVERS, ...mcpNames.filter((name) => servers.includes(name))].map((server) => ({
     name: mcpServerTool(server),
     label: server
   }))
@@ -160,6 +164,14 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
 
   function setAllowed(tools: string[]): void {
     edit({ allowedTools: [...new Set(tools)].join('\n') })
+  }
+
+  function setServer(name: string, on: boolean): void {
+    edit({
+      mcpServers: (on ? [...servers, name] : servers.filter((item) => item !== name)).join('\n'),
+      // A server the bot no longer gets has no tools left to approve.
+      ...(on ? {} : { allowedTools: allowed.filter((tool) => tool !== mcpServerTool(name)).join('\n') })
+    })
   }
 
   function addOtherTool(): void {
@@ -194,7 +206,8 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
           model: draft.model,
           effort: draft.effort || null,
           instructions: draft.instructions,
-          allowedTools: allowed
+          allowedTools: allowed,
+          mcpServers: servers
         }),
       'Could not save the bot'
     )
@@ -320,6 +333,36 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
               className={`${field} resize-y leading-5`}
             />
           </label>
+
+          <div data-testid="bot-mcp-servers">
+            <div className="text-[12px] text-muted">Connectors (MCP servers) it can use</div>
+            <div className="mt-1 rounded-lg border border-line bg-canvas px-3 py-2">
+              {mcpNames.length === 0 ? (
+                <div className="py-1 text-[12px] text-faint">No MCP servers are switched on in Settings.</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-x-4">
+                  {mcpNames.map((name) => (
+                    <label
+                      key={name}
+                      className="flex min-w-0 cursor-pointer items-center gap-2 py-1 text-[12.5px] text-ink-2 hover:text-ink"
+                    >
+                      <input
+                        type="checkbox"
+                        className="shrink-0 accent-accent"
+                        checked={servers.includes(name)}
+                        onChange={(event) => setServer(name, event.target.checked)}
+                      />
+                      <span className="truncate">{name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <span className="mt-1 block text-[11px] text-faint">
+              Only these, from Settings, next to the Workbench&apos;s own browser and workbench servers.
+              {draft.agent === 'claude' && ' The servers in your own Claude Code config are left out.'}
+            </span>
+          </div>
 
           <div data-testid="bot-allowed-tools">
             <div className="text-[12px] text-muted">Tools it may use without asking</div>

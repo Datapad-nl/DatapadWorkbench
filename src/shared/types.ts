@@ -21,6 +21,8 @@ export type Bot = {
   instructions: string
   /** Tools the bot may use without asking, one name each. */
   allowedTools: string[]
+  /** Names of the MCP servers from Settings this bot's chats get. The Workbench's own servers come always. */
+  mcpServers: string[]
   /** File name of the avatar in the bot's folder, or null for initials. */
   avatar: string | null
   /** The bot's folder: its avatar, and its skills as a plugin. */
@@ -41,6 +43,7 @@ export type UpdateBotInput = {
   effort?: string | null
   instructions?: string
   allowedTools?: string[]
+  mcpServers?: string[]
 }
 
 /** One of a bot's own skills, `skills/<name>/SKILL.md` in its folder. */

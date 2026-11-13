@@ -1,6 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'child_process'
 import readline from 'readline'
-import { toAcpMcpServers } from '../shared/mcp'
+import { onlyMcpServers, toAcpMcpServers } from '../shared/mcp'
 import { agentToolRule } from '../shared/conductor'
 import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
@@ -1008,7 +1008,10 @@ async function sessionConfig(
   const rules = extraRules?.trim()
     ? `${BROWSER_SESSION_RULE}\n\n${extraRules.trim()}`
     : BROWSER_SESSION_RULE
-  const config = { cwd, mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(await getMcpServers())] }
+  // A bot's chats get only the servers chosen on its page.
+  const bot = await chatBot(chatId).catch(() => null)
+  const servers = bot ? onlyMcpServers(await getMcpServers(), bot.mcpServers) : await getMcpServers()
+  const config = { cwd, mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(servers)] }
   if (agent !== 'claude') return { ...config, ...sessionRules(agent, rules) }
   // A bot's own skills come with the session, as a plugin in the bot's folder.
   const plugins = pluginDir ? { plugins: [{ type: 'local', path: pluginDir }] } : {}
@@ -1031,7 +1034,9 @@ async function sessionConfig(
         options: {
           settings: await agentHookSettings(chatId),
           ...(subagentModel ? { env: { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } } : {}),
-          ...plugins
+          ...plugins,
+          // Claude Code also loads servers of its own: ~/.claude.json, .mcp.json, plugins. A bot gets none of those.
+          ...(bot ? { strictMcpConfig: true } : {})
         }
       }
     }
@@ -1206,6 +1211,24 @@ export async function applyBotToLiveSessions(botId: string): Promise<void> {
   )
 }
 
+/** Live sessions to open again on their next turn, so the agent takes their new MCP servers. */
+const sessionsToReload = new Set<string>()
+
+/** After a bot's MCP servers changed: each live chat of the bot loads its session again on its next turn. */
+export async function reloadBotSessions(botId: string): Promise<void> {
+  const sessions = [...conns.values()].flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
+  await Promise.all(
+    sessions.map(async (sessionId) => {
+      const bot = await chatBot(sessionChatIds.get(sessionId)).catch(() => null)
+      if (bot?.id === botId) sessionsToReload.add(sessionId)
+    })
+  )
+}
+
+export function sessionNeedsReload(sessionId: string): boolean {
+  return sessionsToReload.has(sessionId)
+}
+
 /** `pluginDir` is a bot's folder: the session loads the bot's own skills from it. */
 export async function newSession(
   cwd: string,
@@ -1238,6 +1261,7 @@ export async function loadSession(
   await ensureAgent(agent, pluginDir)
   const conn = connFor(agent, pluginDir)
   bindSession(sessionId, conn)
+  sessionsToReload.delete(sessionId)
   const result = await request<unknown>(
     conn,
     'session/load',

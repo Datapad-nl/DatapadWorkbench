@@ -72,6 +72,11 @@ export function parseMcpServers(text: string): McpServers {
   return servers
 }
 
+/** Just the servers named in `names`, as a bot gets them. */
+export function onlyMcpServers(servers: McpServers, names: readonly string[]): McpServers {
+  return Object.fromEntries(Object.entries(servers).filter(([name]) => names.includes(name)))
+}
+
 function pairs(record: Record<string, string> | undefined): NameValue {
   return Object.entries(record ?? {}).map(([name, value]) => ({ name, value }))
 }

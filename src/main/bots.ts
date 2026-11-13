@@ -42,7 +42,15 @@ export function isBotFolder(path: string): boolean {
 
 function withFolder(bot: StoredBot): Bot {
   // Bots saved before effort was a setting follow the global one. Those saved before the bot's chat have none yet.
-  return { ...bot, effort: bot.effort ?? '', chatId: bot.chatId ?? null, unread: bot.unread ?? 0, folder: botFolder(bot.id) }
+  // Those saved before MCP servers were chosen per bot get none, until they are switched on.
+  return {
+    ...bot,
+    effort: bot.effort ?? '',
+    mcpServers: bot.mcpServers ?? [],
+    chatId: bot.chatId ?? null,
+    unread: bot.unread ?? 0,
+    folder: botFolder(bot.id)
+  }
 }
 
 async function loadBots(): Promise<StoredBot[]> {
@@ -115,6 +123,7 @@ export async function createBot(name: string): Promise<Bot> {
       effort: '',
       instructions: '',
       allowedTools: [],
+      mcpServers: [],
       avatar: null,
       createdAt: timestamp,
       updatedAt: timestamp
@@ -150,6 +159,7 @@ export async function updateBot(input: UpdateBotInput): Promise<Bot> {
       effort: input.effort !== undefined ? (normalizeReasoningEffort(input.effort) ?? '') : (current.effort ?? ''),
       instructions: input.instructions !== undefined ? String(input.instructions) : current.instructions,
       allowedTools: input.allowedTools !== undefined ? cleanTools(input.allowedTools) : current.allowedTools,
+      mcpServers: input.mcpServers !== undefined ? cleanTools(input.mcpServers) : (current.mcpServers ?? []),
       updatedAt: now()
     }
     if (next.name !== current.name) await writePluginFolder(next)

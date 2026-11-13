@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseMcpServers, toAcpMcpServers } from './mcp'
+import { onlyMcpServers, parseMcpServers, toAcpMcpServers } from './mcp'
 
 describe('parseMcpServers', () => {
   it('reads the mcpServers wrapper or the bare object', () => {
@@ -38,5 +38,13 @@ describe('toAcpMcpServers', () => {
       { type: 'stdio', name: 'local', command: 'node', args: [], env: [{ name: 'A', value: '1' }] },
       { type: 'http', name: 'remote', url: 'https://x/mcp', headers: [{ name: 'Authorization', value: 'Bearer t' }] }
     ])
+  })
+})
+
+describe('onlyMcpServers', () => {
+  it('keeps the named servers and drops the rest, and names that are not there', () => {
+    const servers = parseMcpServers(JSON.stringify({ a: { command: 'a' }, b: { url: 'https://b.test' } }))
+    expect(onlyMcpServers(servers, ['b', 'gone'])).toEqual({ b: servers.b })
+    expect(onlyMcpServers(servers, [])).toEqual({})
   })
 })
