@@ -1121,7 +1121,7 @@ function MessageList({
                 {message.role === 'user' ? (
                   <article className="group flex flex-col items-end">
                     {side && <div className="mb-1 text-[11px] text-faint">{side}</div>}
-                    <div className="max-w-[560px] rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-4 py-2.5 text-[14.5px] leading-[1.6] whitespace-pre-wrap text-ink">
+                    <div className="max-w-[560px] rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-4 py-2.5 text-[14.5px] leading-[1.6] whitespace-pre-wrap wrap-anywhere text-ink">
                       {message.content}
                     </div>
                     <div className="flex max-w-[560px] flex-col items-end">{extras}</div>
