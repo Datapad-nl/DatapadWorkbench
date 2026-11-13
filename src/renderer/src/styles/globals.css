@@ -93,6 +93,11 @@ textarea {
   -webkit-app-region: no-drag;
 }
 
+/* The chat's text column. Settings → Appearance sets it; see chatWidth.ts. */
+:root {
+  --chat-width: 720px;
+}
+
 /* In the base layer so a utility such as `outline-none` can still turn it off. */
 @layer base {
   :where(button, a, input, textarea, select, [tabindex]):focus-visible {

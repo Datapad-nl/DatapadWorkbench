@@ -442,7 +442,7 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
   ]
 
   return (
-    <div className="mx-auto mb-2 w-[min(720px,100%-40px)] shrink-0" data-testid="subagents-panel">
+    <div className="mx-auto mb-2 w-[min(var(--chat-width),100%-40px)] shrink-0" data-testid="subagents-panel">
       <div className="rounded-[8px] border border-line-strong bg-raised">
         <button
           type="button"

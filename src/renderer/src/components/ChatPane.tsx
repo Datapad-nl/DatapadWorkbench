@@ -657,7 +657,7 @@ function HandoffBar(props: {
     const forward = Boolean(chat.handoffTo)
     const other = chatsById[linked]
     return (
-      <div className="mx-auto mb-2 w-[min(720px,100%-40px)] shrink-0" data-testid="handoff-bar">
+      <div className="mx-auto mb-2 w-[min(var(--chat-width),100%-40px)] shrink-0" data-testid="handoff-bar">
         <div className="flex items-center gap-2 rounded-[8px] border border-line-strong bg-raised px-3 py-2 text-[12.5px]">
           <span className="text-muted">
             {forward ? 'The work goes on in a new chat with a fresh context.' : 'This chat continues an earlier one from its handoff.'}
@@ -673,7 +673,7 @@ function HandoffBar(props: {
   const key = `${chat.id}:${props.context?.size ? Math.floor((props.context.used / props.context.size) * 10) : Math.floor((props.context?.used ?? 0) / 50_000)}`
   if (props.busy || !handoffAdvised(props.context) || dismissed === key) return null
   return (
-    <div className="mx-auto mb-2 w-[min(720px,100%-40px)] shrink-0" data-testid="handoff-offer">
+    <div className="mx-auto mb-2 w-[min(var(--chat-width),100%-40px)] shrink-0" data-testid="handoff-offer">
       <div className="flex items-center gap-2 rounded-[8px] border border-accent-line bg-accent-soft px-3 py-2 text-[12.5px]">
         <span className="text-ink">
           The context of this chat is {contextLabel(props.context!)} full, and every turn sends all of it again.
@@ -1131,7 +1131,7 @@ function MessageList({
           {!botName && <ProjectOrientation projectId={projectId} index={index} />}
         </div>
       ) : (
-        <div className="mx-auto flex w-[min(720px,100%-40px)] flex-col gap-7 py-8">
+        <div className="mx-auto flex w-[min(var(--chat-width),100%-40px)] flex-col gap-7 py-8">
           {chat.messages.map((message) => {
             const checkpoint = checkpoints.find((item) => item.messageId === message.id)
             const date = new Date(message.createdAt)
@@ -1183,10 +1183,10 @@ function MessageList({
                 {message.role === 'user' ? (
                   <article className="group flex flex-col items-end">
                     {side && <div className="mb-1 text-[11px] text-faint">{side}</div>}
-                    <div className="max-w-[560px] rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-4 py-2.5 text-[14.5px] leading-[1.6] whitespace-pre-wrap wrap-anywhere text-ink">
+                    <div className="max-w-[max(560px,78%)] rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-4 py-2.5 text-[14.5px] leading-[1.6] whitespace-pre-wrap wrap-anywhere text-ink">
                       {message.content}
                     </div>
-                    <div className="flex max-w-[560px] flex-col items-end">{extras}</div>
+                    <div className="flex max-w-[max(560px,78%)] flex-col items-end">{extras}</div>
                     <div className="mt-1 flex h-5 items-center gap-1 text-[11px] tabular-nums text-faint">
                       {checkpoint && (
                         <button
@@ -2342,7 +2342,7 @@ function Composer({
 
   return (
     <div className="shrink-0 pt-2 pb-[18px]">
-      <div className="mx-auto w-[min(720px,100%-40px)]">
+      <div className="mx-auto w-[min(var(--chat-width),100%-40px)]">
         {question && (
           <QuestionCard
             key={question.requestId}

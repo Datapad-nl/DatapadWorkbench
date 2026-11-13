@@ -19,6 +19,7 @@ import {
   VOICE_LANGUAGES
 } from '../../../shared/types'
 import { MAX_SUBAGENTS_CHOICES } from '../../../shared/conductor'
+import { CHAT_WIDTHS, readChatWidth, saveChatWidth } from '../chatWidth'
 import { useVoice } from '../voice/VoiceProvider'
 import {
   isSpeaking,
@@ -540,6 +541,7 @@ export function SettingsModal(): React.JSX.Element | null {
   const [busy, setBusy] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
+  const [chatWidth, setChatWidth] = useState(readChatWidth)
   const voices = listVoices()
   const voice = settings?.voice ?? DEFAULT_VOICE
 
@@ -993,6 +995,31 @@ export function SettingsModal(): React.JSX.Element | null {
               Switch a built-in look, or edit every surface, typeface, and radius. Save as a theme
               file you can load later.
             </p>
+            <div className="mt-4 flex shrink-0 items-center justify-between gap-3 rounded-lg border border-line bg-canvas px-3 py-2.5">
+              <div>
+                <div className="text-[12px] font-medium text-ink">Chat width</div>
+                <div className="text-[11px] text-muted">How wide messages and the composer may grow.</div>
+              </div>
+              <div data-testid="settings-chat-width" className="flex rounded-md bg-surface p-0.5">
+                {CHAT_WIDTHS.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    aria-pressed={chatWidth === option.id}
+                    title={option.id === 'full' ? 'Fill the chat pane' : option.width}
+                    className={`rounded px-2.5 py-1 text-[11px] ${
+                      chatWidth === option.id ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+                    }`}
+                    onClick={() => {
+                      saveChatWidth(option.id)
+                      setChatWidth(option.id)
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
               <ThemeEditor />
             </div>
