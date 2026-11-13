@@ -1,0 +1,676 @@
+{
+  "modules": {
+    "design": {
+      "signature": "5936c9f22bf98519",
+      "about": "Holds the planned redesign of the Workbench UI: a mockup and written instructions for turning the current interface into it. The instructions cover layout, hierarchy and styling.",
+      "files": {
+        "redesign-mockup.html": "HTML source of the redesign mockup.",
+        "redesign-mockup.png": "Image of the redesign mockup that the instructions refer to.",
+        "REDESIGN.md": "Instructions for changing the current UI's layout, hierarchy and styling into the mockup."
+      }
+    },
+    "docs": {
+      "signature": "d8d6658749383d5e",
+      "about": "Project documentation outside the code: a note on the tools that chats inside the Workbench still lack, in the order to build them, and the app screenshot shown in the README.",
+      "files": {
+        "agent-tools.md": "Lists the tools agents still lack, in the order to build them.",
+        "screenshot.png": "Screenshot of the app, shown in the README."
+      }
+    },
+    "preview": {
+      "signature": "1720109fee225892",
+      "about": "Groups preview material for the app. Its only content is a subagents folder, with no files of its own at this level, so nothing here shows what the rest of the project uses it for.",
+      "files": {}
+    },
+    "resources": {
+      "signature": "866b0d98cddbe5df",
+      "about": "Holds the app's icon artwork, which the packaging step and the main process use. The app icon comes in macOS, Windows and PNG/SVG formats, and template images serve as the menu bar (tray) icon that stays visible while the app runs without a window. A mac subfolder holds further macOS-specific resources.",
+      "files": {
+        "icon.icns": "macOS app icon used when building the app bundle.",
+        "icon.ico": "Windows app icon used for the installer and executable.",
+        "icon.png": "PNG app icon, for window icons and Linux builds.",
+        "icon.svg": "Vector source artwork for the app icon.",
+        "trayTemplate.png": "Menu bar tray icon template image at standard resolution.",
+        "trayTemplate.svg": "Vector source artwork for the menu bar tray icon.",
+        "trayTemplate@2x.png": "Retina (2x) version of the menu bar tray icon template."
+      }
+    },
+    "scripts": {
+      "signature": "8e93a32c1deeccd3",
+      "about": "Development helper scripts. On macOS it registers the dev Electron build as a proper \"Datapad Workbench\" app bundle under its bundle ID, so the app has the right name and identity while developing. It replaces shells left under the app's old name and never overwrites a release build installed from GitHub Releases.",
+      "files": {
+        "register-mac-app.mjs": "Registers the dev Electron shell as a macOS app; skips real release installs."
+      }
+    },
+    "src": {
+      "signature": "65077f22c5fe2728",
+      "about": "The whole application source, split along Electron's process boundaries. The main process owns persistence, agents and IPC, the preload bridges it to the UI, the renderer draws the React interface, and shared holds the types and helpers both sides use.",
+      "files": {}
+    },
+    "src/main": {
+      "signature": "9cd37a1de44c6a6d",
+      "about": "The Electron main process. It runs chats through Grok and Claude Code agents over ACP, handling permissions, questions, checkpoints, git worktrees and activity tracking. It also stores projects, chats, themes and settings, and runs the BrowserPane with its MCP tools, the knowledge vault, bot skills, updates and notifications. The renderer reaches all of this through IPC handlers registered here.",
+      "files": {
+        "acp.ts": "ACP session update types, agent process keys and waiting for a previous turn.",
+        "activity.ts": "Tracks running turns, notices and permission events as an activity snapshot for the UI.",
+        "annotatePicker.ts": "Scripts injected into the browser page to pick, cancel and clean up element annotations.",
+        "attention.ts": "Shows system notifications and the Dock badge for chats that need the user in background.",
+        "botSkills.ts": "Lists, saves, adds and trashes a bot's Agent Skills stored as SKILL.md folders.",
+        "browser-mcp.mjs": "Stdio MCP server exposing BrowserPane tools and workbench chat tools to agents.",
+        "browser.ts": "Manages the BrowserPane web contents, URL sanitizing, console log and browser state.",
+        "browserAgent.ts": "Local HTTP server backing the browser MCP, plus MCP server and hook configs per chat.",
+        "browserDrive.ts": "Serialized browser actions: navigate, back, forward, reload, screenshot, snapshot and element targeting.",
+        "chatTools.ts": "Chat tools for agents: sending to chats, asking bots, listing and reading project chats.",
+        "checkpoints.ts": "Copies files before tools change them and saves per-turn checkpoints for restoring.",
+        "claudeCli.ts": "Finds the Claude CLI, its ACP adapter command and probes sign-in and subscription.",
+        "claudeSessions.ts": "Lists Claude Code JSONL sessions for project folders and reads their message history.",
+        "claudeUsage.ts": "Fetches and parses Claude Code plan usage limits from its local /usage command, cached.",
+        "codegraph.ts": "Locates the codegraph binary, reads and syncs project indexes and reports index changes.",
+        "contextMenu.ts": "Native right-click menu with spelling, links, editing, search and quoting selection into composer.",
+        "env.ts": "Loads environment variables from a .env file.",
+        "files.ts": "Searches a project's files by name with a cached, bounded directory walk.",
+        "git.ts": "Chat worktrees, isolation decisions, uncommitted path checks and git snapshots for the git pane.",
+        "gitLock.ts": "Serializes the app's git writes per repository using the shared .git directory.",
+        "grok.ts": "Runs chat turns on agents: streaming state, stopping, slash commands and live chat events.",
+        "grokCli.ts": "Finds the grok binary and probes its version, channel, models and status, cached.",
+        "ids.ts": "Generates ids, timestamps and chat titles from prompts.",
+        "index.ts": "App entry: creates the window, tray behavior, single instance, startup and clean quitting.",
+        "intake.ts": "Project intake: decides when to run it, schedules it and turns answers into session rules.",
+        "intakeQuestions.ts": "Generates project intake questions from a project scan, with fallback questions.",
+        "ipc.ts": "Registers IPC handlers, sends turns, forwards chat and index events and notifications.",
+        "jsonl.ts": "Streams rows of large JSONL files chunk by chunk.",
+        "knowledge.ts": "Maintains, rebuilds, reads and opens a project's knowledge vault folder.",
+        "mcpRegistry.ts": "Searches the official MCP Registry for servers the Workbench can run.",
+        "media.ts": "Custom workbench-media protocol serving chat media files and opening them.",
+        "mediaFiles.ts": "Resolves a media source path safely to a real file inside allowed roots.",
+        "moduleSummaries.ts": "Outlines source files, signs modules and batches module briefs for vault summaries.",
+        "permissions.ts": "Permission types, per-session modes and clash detection for edits to files other chats hold.",
+        "projectIcon.ts": "Finds a project's own icon or logo and returns it as a small data URL.",
+        "projectScan.ts": "Scans a project folder for its stack, dependencies and other findings.",
+        "pullRequests.ts": "Links GitHub PRs to chats, reads their status and watches them for changes.",
+        "questions.ts": "Parses agent questions to the user and emits prompt and settled events.",
+        "sessions.ts": "Reads Grok sessions from disk: listing, history, plans and plan approval state.",
+        "skillsDirectory.ts": "Searches skills.sh, previews and downloads skills from GitHub or a site's .well-known index.",
+        "store.ts": "Persistent store for projects, chats, handoffs, MCP servers, theme and related settings.",
+        "storeIo.ts": "Keyed locks, atomic file writes and JSON reads that move corrupt files aside.",
+        "taskProgress.ts": "Finds the latest output line a running shell task wrote, for progress display.",
+        "themes.ts": "Lists, resolves, activates, saves, deletes and imports UI themes.",
+        "updater.ts": "Checks GitHub releases in the background, downloads updates and installs them on quit.",
+        "visuals.ts": "Stores and serves agent-drawn HTML visuals via a sandboxed workbench-visual protocol.",
+        "voice.ts": "Voice model status, voice file protocol and microphone access permission.",
+        "windowState.ts": "Loads and saves the window's size and position.",
+        "worktreeProcs.ts": "Finds and kills processes left running inside chat worktrees, on a periodic reaper.",
+        "youtube.ts": "Fetches a YouTube video's captions and formats them as a timestamped transcript."
+      }
+    },
+    "src/preload": {
+      "signature": "7131a8873055a57e",
+      "about": "The bridge between the UI and the main process. It defines the API object the renderer calls on `window`, and its type, so UI code reaches main-process features without direct access to Electron.",
+      "files": {
+        "index.d.ts": "Declares the Workbench API on the global `Window` type.",
+        "index.ts": "Builds the API object exposed to the renderer and exports its type."
+      }
+    },
+    "src/renderer": {
+      "signature": "ab97407c42f016f2",
+      "about": "Holds the renderer side of the app, the React UI shown in the window. Its code lives in the `src` folder.",
+      "files": {}
+    },
+    "src/renderer/src": {
+      "signature": "574fffb8a8cd5ead",
+      "about": "The React UI of the Workbench. It lays out the sidebar, chats and resizable right panes (git, browser, activity, knowledge), and keeps chat and stream state in a shared workspace context. Small helpers handle diffs, vault note links and spoken progress cues.",
+      "files": {
+        "App.tsx": "Root component laying out the workspace with resizable activity, browser, git and knowledge panes.",
+        "env.d.ts": "Type declarations for the injected app version and ?url imports.",
+        "lineDiff.ts": "Computes a side-by-side line diff between two texts.",
+        "main.tsx": "Mounts the App in React StrictMode.",
+        "noteLinks.ts": "Resolves vault wiki-links to note links and strips Obsidian comments outside code.",
+        "progress.ts": "Works out a chat's running progress and when to speak a still-working cue.",
+        "streamStatus.ts": "Gets each chat's streaming status and error without its reply text.",
+        "workspace.tsx": "Workspace context provider holding chats, pending requests, streams and stream statuses."
+      }
+    },
+    "src/renderer/src/components": {
+      "signature": "4f361ec4517b126c",
+      "about": "The React components that make up the Workbench window: the project sidebar, the chat pane with agent replies, and the right-hand panes for the browser, git, the knowledge graph and agent activity. It also holds the modals for new projects, settings, usage and MCP servers, the theme editor, and shared pieces such as icons, the Markdown renderer and the toggle. The renderer app composes these into the full interface, drawing on shared types, the theme and the voice module.",
+      "files": {
+        "ActivityApp.tsx": "Shows the agent activity feed grouped into turns, with cleaned tool names and formatted output.",
+        "AgentReply.tsx": "Renders an agent reply, folding earlier steps away and showing visual blocks.",
+        "BrowserPane.tsx": "The built-in browser pane, with page annotation and a queue of notes to send.",
+        "ChatPane.tsx": "The chat view: messages, live streaming reply, composer with images, PR chip and pane toggles.",
+        "CodeDiff.tsx": "Renders a side-by-side code diff from an activity event.",
+        "GitPane.tsx": "Shows the project's git state: changed files and a colored commit graph.",
+        "GraphPane.tsx": "Draws the knowledge vault as a force-directed graph of notes and shows their content.",
+        "icons.tsx": "Line icons, agent glyphs and a square icon button that follow the theme.",
+        "Markdown.tsx": "Memoized Markdown renderer with GFM, local media and embedded visual frames.",
+        "McpSettings.tsx": "Settings view to add, edit, rename and browse MCP servers from the registry.",
+        "Modals.tsx": "New project, settings and usage modals, including voice options and agent sign-in status.",
+        "OrientationCard.tsx": "Shows a project's index status and orientation, with an action to start indexing.",
+        "ReorderGrip.tsx": "A drag handle that reorders items by pointer movement.",
+        "Sidebar.tsx": "Resizable sidebar listing projects, worktrees and chats, with project icons and scheduled-run times.",
+        "StatusBar.tsx": "Bottom bar showing usage percentage, time until reset and index status.",
+        "ThemeEditor.tsx": "Editor for theme colors with pickers and a live mock preview.",
+        "Toggle.tsx": "A reusable on/off toggle switch."
+      }
+    },
+    "src/renderer/src/theme": {
+      "signature": "ce9ed1dd35ad66dd",
+      "about": "Applies a theme file to the running interface and syncs the font stylesheet links it needs. A React provider holds the current theme state and exposes it through the useTheme hook, which components such as the theme editor use to read and change the theme.",
+      "files": {
+        "apply.ts": "Applies a theme file to the document and syncs its font links.",
+        "ThemeProvider.tsx": "React context provider holding theme state, exposed through the useTheme hook."
+      }
+    },
+    "src/renderer/src/voice": {
+      "signature": "864a3adac773a261",
+      "about": "Gives the app voice input and output that run locally: Whisper speech recognition and Supertonic text-to-speech on onnxruntime-web, each in a web worker. A React provider tracks the voice status and exposes listening and speaking to the interface through useVoice, while helper functions turn Markdown replies into speakable text, pick the speech language and drop echoes of the user's request. The settings modal and chat components use it to read replies aloud and take dictation.",
+      "files": {
+        "asideTts.worker.ts": "Worker that queues speech synthesis tasks, letting status lines jump ahead of reply sentences.",
+        "asr.worker.ts": "Worker that transcribes audio to text, one request at a time.",
+        "engine.ts": "Voice list and helpers for speakable text, language choice and dropping user echoes.",
+        "ortAssets.ts": "Exports the bundled URLs of the onnxruntime-web module and WASM files.",
+        "supertonic.ts": "Loads the Supertonic 3 model and synthesizes mono PCM audio from text.",
+        "VoiceBlob.tsx": "An animated blob of rings that visualizes voice activity.",
+        "VoiceProvider.tsx": "React context provider managing listening, transcribing and speaking state, exposed through useVoice.",
+        "whisper.ts": "Loads and shares the Whisper recognition pipeline for the worker and UI-thread fallback."
+      }
+    },
+    "src/shared": {
+      "signature": "934d3cb00da2c586",
+      "about": "Types and small pure helpers used by both the main process and the UI. It defines the data shapes for projects, chats, themes and MCP servers, and logic such as slash command parsing, cron schedules, media and YouTube URL handling, and project colors.",
+      "files": {
+        "cron.ts": "Parses five-field cron expressions and finds the next matching local time.",
+        "mcp.ts": "MCP server types, parsing of the editor text, and conversion to ACP form.",
+        "mcpRegistry.ts": "Types for MCP Registry servers and the ways to install them.",
+        "media.ts": "Recognizes image and video sources and builds chat media URLs.",
+        "projectColor.ts": "Project color palette, hex normalizing, and picking or resolving a project's color.",
+        "slash.ts": "Slash command definitions, per-agent lists, parsing and filtering as the user types.",
+        "steps.ts": "Splits a reply at its step breaks and returns it as plain markdown.",
+        "theme.ts": "Theme file types, version, color keys and color groups.",
+        "types.ts": "Core shared types: projects, messages, attachments, file hits, permission modes, plans.",
+        "youtube.ts": "YouTube transcript types, video id parsing and watch URL building."
+      }
+    },
+    "themes": {
+      "signature": "b2c6d493c2028036",
+      "about": "The built-in appearance themes that ship with the app, one JSON file each. Users pick between them and can also import and export custom themes.",
+      "files": {
+        "brass-console.json": "Built-in theme named Brass Console.",
+        "signal-night.json": "Built-in theme named Signal Night.",
+        "warm-atelier.json": "Built-in theme named Warm Atelier."
+      }
+    }
+  },
+  "features": {
+    "signature": "d985613701b4cca5",
+    "list": [
+      {
+        "name": "Projects",
+        "about": "A project is a folder on disk that the user adds to the sidebar, and each project holds its own chats. When a project is added, the main process saves it to the store and finds the project's own icon to show as a small image. Each project gets a color from a fixed palette, and the user can change it. The sidebar lists projects with their worktrees and chats, and the user can drag them into a new order. A project's name and icon can also be blurred for screen recordings.",
+        "related": [
+          "Persistence Store",
+          "Chat Sessions over ACP",
+          "Session Import",
+          "Project Intake",
+          "Git Worktrees"
+        ],
+        "files": [
+          "src/renderer/src/components/Sidebar.tsx",
+          "src/main/store.ts",
+          "src/main/projectIcon.ts",
+          "src/shared/projectColor.ts",
+          "src/renderer/src/components/ReorderGrip.tsx",
+          "src/shared/types.ts",
+          "src/renderer/src/components/Modals.tsx"
+        ]
+      },
+      {
+        "name": "Chat Sessions over ACP",
+        "about": "Every chat runs as a session of an agent CLI, either Grok Build or Claude Code, which the app talks to over the Agent Client Protocol (ACP) on stdio. When the user sends a prompt, the main process starts or reuses the agent session for that chat and passes it the prompt, along with the project's MCP servers and rules. The ACP layer handles session updates, modes and plan-exit prompts, and keeps turns in order. Several chats can run at once, each in its own session. A new chat's title comes from its first prompt.",
+        "related": [
+          "Live Turn Streaming",
+          "Agent CLI Detection",
+          "Permission Modes",
+          "MCP Server Configuration",
+          "IPC Bridge"
+        ],
+        "files": [
+          "src/main/acp.ts",
+          "src/main/grok.ts",
+          "src/main/ipc.ts",
+          "src/main/ids.ts",
+          "src/shared/mcp.ts",
+          "src/shared/types.ts"
+        ]
+      },
+      {
+        "name": "Live Turn Streaming",
+        "about": "While a turn runs, the agent's output reaches the UI piece by piece as it is produced. The main process tracks each running turn and emits live chat events, and the IPC layer forwards them to the renderer. The workspace context keeps a stream per chat, which the chat pane draws as a reply that grows as it arrives. A separate reducer works out only each stream's status and errors, so the parts of the UI that need just that do not handle the reply text. When the app quits, turns still in progress are saved.",
+        "related": [
+          "Chat Sessions over ACP",
+          "IPC Bridge",
+          "Workspace State",
+          "Agent Replies",
+          "Progress Cues"
+        ],
+        "files": [
+          "src/main/grok.ts",
+          "src/main/ipc.ts",
+          "src/renderer/src/workspace.tsx",
+          "src/renderer/src/streamStatus.ts",
+          "src/renderer/src/components/ChatPane.tsx",
+          "src/main/index.ts"
+        ]
+      },
+      {
+        "name": "IPC Bridge",
+        "about": "The renderer has no direct access to Electron or the file system. Instead, the preload script builds an API object and exposes it on `window`, and a type declaration describes that API to the UI code. Each method on the object calls an IPC handler that the main process registers. Events go the other way: the main process pushes them to the renderer over IPC, for example chat streams and notices.",
+        "related": [
+          "Live Turn Streaming",
+          "Persistence Store",
+          "Workspace State"
+        ],
+        "files": [
+          "src/preload/index.ts",
+          "src/preload/index.d.ts",
+          "src/main/ipc.ts",
+          "src/main/index.ts"
+        ]
+      },
+      {
+        "name": "Persistence Store",
+        "about": "Projects, chats, MCP servers and the theme choice are saved as JSON files in the app's userData/workbench folder. Writes go through a keyed lock and are atomic, so two writes to one file cannot interleave and a crash cannot leave a half-written file. If a JSON file cannot be read, it is moved aside instead of breaking the app, and on startup the app warns about projects it could not read. The window's size and position are saved separately, so it reopens where it was.",
+        "related": [
+          "Projects",
+          "IPC Bridge",
+          "MCP Server Configuration"
+        ],
+        "files": [
+          "src/main/store.ts",
+          "src/main/storeIo.ts",
+          "src/main/windowState.ts",
+          "src/main/index.ts",
+          "src/main/jsonl.ts"
+        ]
+      },
+      {
+        "name": "Workspace State",
+        "about": "In the renderer, a React context called the workspace holds the state that components share. It keeps the list of chats, the live reply stream of each chat, each stream's status, and the requests that are waiting for the user in each chat. Components read this state through hooks, and the context updates it as events arrive from the main process. The root App component lays out the sidebar, the chat and the right-hand panes, and remembers how wide each pane is.",
+        "related": [
+          "Live Turn Streaming",
+          "IPC Bridge",
+          "Permission Modes",
+          "Agent Questions"
+        ],
+        "files": [
+          "src/renderer/src/workspace.tsx",
+          "src/renderer/src/App.tsx",
+          "src/renderer/src/main.tsx",
+          "src/renderer/src/streamStatus.ts"
+        ]
+      },
+      {
+        "name": "Session Import",
+        "about": "Sessions that already exist on disk for a project's folder are imported into the sidebar. For Grok, the app lists the sessions under ~/.grok/sessions and reads their history, plans and sign-in state. For Claude Code, it lists the sessions for the project's folders and reads their transcripts as messages. The JSONL transcript files are read row by row in chunks, so large histories do not have to be loaded all at once.",
+        "related": [
+          "Projects",
+          "Chat Sessions over ACP",
+          "Agent CLI Detection"
+        ],
+        "files": [
+          "src/main/sessions.ts",
+          "src/main/claudeSessions.ts",
+          "src/main/jsonl.ts",
+          "src/shared/types.ts"
+        ]
+      },
+      {
+        "name": "Agent CLI Detection",
+        "about": "Before it can run chats, the app has to find the agent programs. For Grok, it looks for the Grok CLI and checks its version, release channel and the models it offers. For Claude, it looks for the Claude CLI and its ACP adapter and checks whether the user is signed in. Sign-in itself happens outside the app, through `grok login` or the Claude CLI. The settings modal shows the result for each agent.",
+        "related": [
+          "Chat Sessions over ACP",
+          "Session Import"
+        ],
+        "files": [
+          "src/main/grokCli.ts",
+          "src/main/claudeCli.ts",
+          "src/main/sessions.ts",
+          "src/renderer/src/components/Modals.tsx",
+          "src/main/env.ts"
+        ]
+      },
+      {
+        "name": "Permission Modes",
+        "about": "Each agent session has a permission mode that decides which tool calls the agent may run without asking. When the agent asks permission for a tool, the main process records the request and sends it to the renderer, where it waits in that chat's queue. The user's answer is sent back to the agent through ACP. Permission events also show up in the Activity feed.",
+        "related": [
+          "Chat Sessions over ACP",
+          "Agent Questions",
+          "Workspace State",
+          "Activity Feed",
+          "Background Attention"
+        ],
+        "files": [
+          "src/main/permissions.ts",
+          "src/main/acp.ts",
+          "src/renderer/src/workspace.tsx",
+          "src/shared/types.ts",
+          "src/main/activity.ts"
+        ]
+      },
+      {
+        "name": "Agent Questions",
+        "about": "An agent can stop in the middle of a turn to ask the user something, including asking for approval before it leaves plan mode. The main process parses these questions and announces both when one is asked and when it is settled. The renderer queues each open question with the chat it belongs to, and the user's answer goes back to the agent. A chat with an open question counts as waiting for the user.",
+        "related": [
+          "Permission Modes",
+          "Workspace State",
+          "Background Attention",
+          "Chat Sessions over ACP"
+        ],
+        "files": [
+          "src/main/questions.ts",
+          "src/main/acp.ts",
+          "src/renderer/src/workspace.tsx",
+          "src/renderer/src/components/ChatPane.tsx"
+        ]
+      },
+      {
+        "name": "BrowserPane",
+        "about": "The BrowserPane is a web browser built into the Workbench window. Web pages are opened here instead of in an external browser. The main process owns the page: it keeps its state and console log, checks the URLs it is sent to, and attaches the page to the window. The renderer shows the pane among the right-hand panes. Both the user and the agents can drive it.",
+        "related": [
+          "Browser MCP Server",
+          "Page Annotation",
+          "Chat Media and Visuals"
+        ],
+        "files": [
+          "src/main/browser.ts",
+          "src/renderer/src/components/BrowserPane.tsx",
+          "src/main/browserDrive.ts",
+          "src/main/contextMenu.ts"
+        ]
+      },
+      {
+        "name": "Browser MCP Server",
+        "about": "Agents use the BrowserPane through an MCP server that runs over stdio. The app adds this server to every chat's list of MCP servers. When an agent calls a tool such as navigate, screenshot or snapshot, the stdio server passes the call on to a local HTTP server in the main process. That server runs page actions one at a time, so two agents cannot act on the page at the same moment. The same MCP server also gives agents the Workbench's chat tools.",
+        "related": [
+          "BrowserPane",
+          "Chat-to-Chat Tools",
+          "MCP Server Configuration",
+          "Chat Sessions over ACP"
+        ],
+        "files": [
+          "src/main/browser-mcp.mjs",
+          "src/main/browserAgent.ts",
+          "src/main/browserDrive.ts",
+          "src/main/browser.ts"
+        ]
+      },
+      {
+        "name": "Page Annotation",
+        "about": "The user can annotate a web page to give an agent feedback about it. Starting an annotation injects scripts into the browser page that let the user pick an element. The user can cancel the pick, and the scripts are removed afterwards. Each finished note goes into a queue in the BrowserPane, and the queued notes are sent to the chat together.",
+        "related": [
+          "BrowserPane",
+          "Chat Sessions over ACP"
+        ],
+        "files": [
+          "src/main/annotatePicker.ts",
+          "src/renderer/src/components/BrowserPane.tsx",
+          "src/main/browser.ts"
+        ]
+      },
+      {
+        "name": "Chat-to-Chat Tools",
+        "about": "An agent can work with the other chats in its project. Through tools on the Workbench MCP server, it can list those chats, read one, start a new one, or send one a message. The calls arrive at the main process, which runs them against the store and the turn runner. Chats in a project can use this to hand work to each other.",
+        "related": [
+          "Browser MCP Server",
+          "Chat Sessions over ACP",
+          "Persistence Store"
+        ],
+        "files": [
+          "src/main/chatTools.ts",
+          "src/main/browser-mcp.mjs",
+          "src/main/browserAgent.ts",
+          "src/main/grok.ts"
+        ]
+      },
+      {
+        "name": "Git Worktrees",
+        "about": "A chat can run in its own git worktree, so its changes stay apart from the project's main checkout and from other chats. The main process creates these worktrees and works out the folder each chat should run in. All of the app's git writes go through a lock, one at a time per repository, so they cannot collide. When a worktree is removed, processes still running from its folder are found and stopped.",
+        "related": [
+          "Git Pane",
+          "Checkpoints",
+          "Projects",
+          "Pull Request Watching"
+        ],
+        "files": [
+          "src/main/git.ts",
+          "src/main/gitLock.ts",
+          "src/main/worktreeProcs.ts",
+          "src/renderer/src/components/Sidebar.tsx"
+        ]
+      },
+      {
+        "name": "Checkpoints",
+        "about": "Before an agent's tool changes a file, the app copies the file as it was. These copies make up checkpoints in the chat's history. Rewinding to a checkpoint puts the saved copies back, which undoes the agent's file changes after that point.",
+        "related": [
+          "Git Worktrees",
+          "Activity Feed",
+          "Chat Sessions over ACP"
+        ],
+        "files": [
+          "src/main/checkpoints.ts",
+          "src/main/acp.ts",
+          "src/main/git.ts"
+        ]
+      },
+      {
+        "name": "Git Pane",
+        "about": "The Git pane shows the state of the project's repository. The main process takes a git snapshot and summary of the project, and the renderer draws it: the list of changed files and a commit graph with colored branches. Changes can be shown as side-by-side diffs, which are built line by line from the old and new text.",
+        "related": [
+          "Git Worktrees",
+          "Activity Feed"
+        ],
+        "files": [
+          "src/renderer/src/components/GitPane.tsx",
+          "src/main/git.ts",
+          "src/renderer/src/lineDiff.ts",
+          "src/renderer/src/components/CodeDiff.tsx"
+        ]
+      },
+      {
+        "name": "Knowledge Vault",
+        "about": "Each project can have a knowledge vault: a folder of Markdown notes that describes how the project works. The main process builds the vault from a scan of the project and from summaries of its modules, which are made from file outlines and signatures sent off in batches, and it keeps the vault up to date. The vault can be read in the app or opened outside it. The Graph pane draws the notes as a force-directed graph and shows the content of the note the user picks.",
+        "related": [
+          "CodeGraph Index",
+          "Project Intake",
+          "Projects"
+        ],
+        "files": [
+          "src/main/knowledge.ts",
+          "src/main/moduleSummaries.ts",
+          "src/renderer/src/components/GraphPane.tsx",
+          "src/main/projectScan.ts"
+        ]
+      },
+      {
+        "name": "CodeGraph Index",
+        "about": "CodeGraph builds an index of the symbols in a project's code. The app finds the CodeGraph program, then reads and syncs each project's index. The orientation card shows whether a project is indexed, gives an orientation to the project, and offers a button to start indexing. The status bar also shows the index status.",
+        "related": [
+          "Knowledge Vault",
+          "Projects"
+        ],
+        "files": [
+          "src/main/codegraph.ts",
+          "src/renderer/src/components/OrientationCard.tsx",
+          "src/renderer/src/components/StatusBar.tsx"
+        ]
+      },
+      {
+        "name": "Project Intake",
+        "about": "When a new project is added, the app can ask the user a few questions about it. First it scans the project folder for its stack, dependencies and other findings. From that scan it generates intake questions, and it falls back to standard questions if it cannot generate them. The user's answers are turned into session rules, which the project's chats are then given.",
+        "related": [
+          "Projects",
+          "Knowledge Vault",
+          "Chat Sessions over ACP"
+        ],
+        "files": [
+          "src/main/intake.ts",
+          "src/main/intakeQuestions.ts",
+          "src/main/projectScan.ts",
+          "src/renderer/src/components/Modals.tsx"
+        ]
+      },
+      {
+        "name": "Pull Request Watching",
+        "about": "A GitHub pull request can be linked to a chat. The main process reads the pull request's status and keeps watching it for changes. The chat pane shows a PR chip with the current state.",
+        "related": [
+          "Git Worktrees",
+          "Background Attention"
+        ],
+        "files": [
+          "src/main/pullRequests.ts",
+          "src/renderer/src/components/ChatPane.tsx"
+        ]
+      },
+      {
+        "name": "Activity Feed",
+        "about": "The main process records each chat's turns, notices and permission events as activity. The Activity pane shows this feed grouped by turn. Tool names are cleaned up and tool output is formatted for reading. File edits can be shown as side-by-side code diffs, and for a shell task that is still running, the latest line of its output is shown.",
+        "related": [
+          "Permission Modes",
+          "Git Pane",
+          "Agent Replies",
+          "Checkpoints"
+        ],
+        "files": [
+          "src/main/activity.ts",
+          "src/renderer/src/components/ActivityApp.tsx",
+          "src/renderer/src/components/CodeDiff.tsx",
+          "src/main/taskProgress.ts",
+          "src/renderer/src/lineDiff.ts"
+        ]
+      },
+      {
+        "name": "Agent Replies",
+        "about": "An agent's reply is shown as Markdown, with GitHub-style formatting, local media and embedded visuals. The reply is split at its step breaks, and earlier steps are folded away so the latest one is easy to see. The Markdown renderer is memoized, so a reply that keeps growing does not make the whole message redraw.",
+        "related": [
+          "Live Turn Streaming",
+          "Chat Media and Visuals",
+          "Activity Feed"
+        ],
+        "files": [
+          "src/renderer/src/components/AgentReply.tsx",
+          "src/renderer/src/components/Markdown.tsx",
+          "src/shared/steps.ts",
+          "src/renderer/src/components/ChatPane.tsx"
+        ]
+      },
+      {
+        "name": "Chat Media and Visuals",
+        "about": "Chats can hold images, videos and pages drawn by agents. Chat media is served over a custom protocol, and a media source is only served if it resolves to a real file inside the allowed folders. The user can attach images in the composer. Agents can draw pages with `show_visual`; these are stored and shown in sandboxed frames. For a YouTube link, the app can fetch the video's captions and return them as a transcript.",
+        "related": [
+          "Agent Replies",
+          "BrowserPane",
+          "Slash Commands"
+        ],
+        "files": [
+          "src/main/media.ts",
+          "src/main/mediaFiles.ts",
+          "src/shared/media.ts",
+          "src/main/visuals.ts",
+          "src/main/youtube.ts",
+          "src/shared/youtube.ts",
+          "src/renderer/src/components/Markdown.tsx"
+        ]
+      },
+      {
+        "name": "Slash Commands",
+        "about": "Typing / in the composer starts a slash command. Each agent has its own list of commands defined in shared code. As the user types, the list is filtered to the commands that match. When the prompt is sent, it is parsed into the command and its arguments.",
+        "related": [
+          "Chat Sessions over ACP",
+          "Chat Media and Visuals"
+        ],
+        "files": [
+          "src/shared/slash.ts",
+          "src/renderer/src/components/ChatPane.tsx"
+        ]
+      },
+      {
+        "name": "MCP Server Configuration",
+        "about": "The user can add MCP servers for the agents to use, and edit or rename them in settings. Servers are typed in as text in an editor, which is parsed and saved in the store. Servers can also be found by searching the official MCP Registry, which lists the ways each one can be installed. When a chat starts, the configured servers are converted to ACP form and passed to the agent session.",
+        "related": [
+          "Chat Sessions over ACP",
+          "Persistence Store",
+          "Browser MCP Server"
+        ],
+        "files": [
+          "src/renderer/src/components/McpSettings.tsx",
+          "src/shared/mcp.ts",
+          "src/main/mcpRegistry.ts",
+          "src/shared/mcpRegistry.ts",
+          "src/main/store.ts"
+        ]
+      },
+      {
+        "name": "Background Attention",
+        "about": "When a chat that the user is not looking at needs them, for example to answer a question or a permission request, the app sends a notification and puts a badge on the Dock icon. The app keeps running when its window is closed, with a menu bar icon that lists the bots with their next scheduled run and the chats waiting for an answer. If the app was opened at login, it starts without a window.",
+        "related": [
+          "Agent Questions",
+          "Permission Modes",
+          "Scheduled Runs",
+          "Progress Cues"
+        ],
+        "files": [
+          "src/main/attention.ts",
+          "src/main/index.ts",
+          "resources/trayTemplate.png",
+          "resources/trayTemplate@2x.png",
+          "resources/trayTemplate.svg"
+        ]
+      },
+      {
+        "name": "Scheduled Runs",
+        "about": "Runs can be scheduled with five-field cron expressions. The shared cron code parses an expression and finds the next local time it matches. The sidebar shows when the next scheduled run is due, and the menu bar icon lists each bot with its next run.",
+        "related": [
+          "Background Attention",
+          "Projects"
+        ],
+        "files": [
+          "src/shared/cron.ts",
+          "src/renderer/src/components/Sidebar.tsx"
+        ]
+      },
+      {
+        "name": "Progress Cues",
+        "about": "During a long turn, the app keeps the user informed about what the agent is doing. It follows the chat's current activity and decides when there is enough progress worth announcing. These announcements can be read aloud as short status lines, which go ahead of reply sentences in the speech queue.",
+        "related": [
+          "Live Turn Streaming",
+          "Voice",
+          "Background Attention"
+        ],
+        "files": [
+          "src/renderer/src/progress.ts",
+          "src/renderer/src/voice/asideTts.worker.ts"
+        ]
+      },
+      {
+        "name": "Voice",
+        "about": "Voice input and output run locally on onnxruntime-web, each in its own web worker. For dictation, the Whisper model turns recorded audio into text, one request at a time, and can fall back to running on the UI thread. For reading replies aloud, Markdown is first turned into speakable text, the speech language is picked, and echoes of the user's own request are dropped; the Supertonic model then makes audio from the text. A React provider tracks whether the app is listening, transcribing or speaking, and an animated blob shows this. The main process reports the voice models' status and handles microphone access.",
+        "related": [
+          "Progress Cues",
+          "Agent Replies"
+        ],
+        "files": [
+          "src/renderer/src/voice/VoiceProvider.tsx",
+          "src/renderer/src/voice/engine.ts",
+          "src/renderer/src/voice/whisper.ts",
+          "src/renderer/src/voice/asr.worker.ts",
+          "src/renderer/src/voice/supertonic.ts",
+          "src/renderer/src/voice/asideTts.worker.ts",
+          "src/renderer/src/voice/ortAssets.ts",
+          "src/renderer/src/voice/VoiceBlob.tsx",
+          "src/main/voice.ts",
+          "src/renderer/src/components/Modals.tsx"
+        ]
+      }
+    ]
+  }
+}
