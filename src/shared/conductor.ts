@@ -34,12 +34,24 @@ export function conductorPrompt(job: string, workerModel: string, maxWorkers: nu
 }
 
 /**
+ * When a Claude Code session should start an agent of its own. Claude Code's own prompt leans
+ * against agents, so without this a chat rarely starts one unless the user asks.
+ */
+const AGENT_TOOL_USE =
+  'Use your Agent tool when it lets work run side by side or keeps a long search out of your context, without being asked: ' +
+  'start pieces of work that do not depend on each other as agents in the same turn and keep working while they run; ' +
+  'give a search that will take many reads, where you only need the conclusion, to an Explore agent; ' +
+  'after a change of some size, have an agent review the diff, given the code and not your conclusions; ' +
+  'and run long checks, such as the full test suite or a build, in a background agent while you go on. ' +
+  'Do a lookup whose target you already know, or a few tool calls, yourself.'
+
+/**
  * What a Claude Code session is told about the agents it starts itself with its Agent tool:
- * the model they run on, as `conductorPrompt` says for workers, and how many run at once.
+ * when to start one, the model it runs on, as `conductorPrompt` says for workers, and how many run at once.
  */
 export function agentToolRule(agentModel: string, maxAgents: number): string {
   const model = agentModel
     ? `Agents you start with your own Agent tool run on ${agentModel}, as set in Settings.`
     : 'When you start an agent with your own Agent tool, pick its model with `model`: `haiku` when a small, fast model is enough for the task, `sonnet` for routine work, `opus` for work that needs judgement, and `fable` for a really hard task, such as a bug nobody has found, a design with many parts or a long change across the codebase. Fable costs the most, so keep it for the tasks that need it. Leave `model` out only when the task needs the model you run on.'
-  return `${model} At most ${maxAgents} ${maxAgents === 1 ? 'of your agents runs' : 'of your agents run'} at the same time, as set in Settings; a start past that is refused. When there is more work than that, start the next agent when one reports back.`
+  return `${AGENT_TOOL_USE} ${model} At most ${maxAgents} ${maxAgents === 1 ? 'of your agents runs' : 'of your agents run'} at the same time, as set in Settings; a start past that is refused. When there is more work than that, start the next agent when one reports back.`
 }

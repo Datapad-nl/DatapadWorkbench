@@ -32,6 +32,14 @@ describe('normalizeMaxSubagents', () => {
 })
 
 describe('agentToolRule', () => {
+  it('tells Claude Code when to start an agent without being asked', () => {
+    for (const rule of [agentToolRule('', 2), agentToolRule('opus', 2)]) {
+      expect(rule).toContain('without being asked')
+      expect(rule).toContain('in the same turn')
+      expect(rule).toContain('review the diff')
+    }
+  })
+
   it('has Claude Code pick a model per agent when Settings fixes none', () => {
     const rule = agentToolRule('', 3)
     expect(rule).toContain('`haiku` when a small, fast model is enough')
