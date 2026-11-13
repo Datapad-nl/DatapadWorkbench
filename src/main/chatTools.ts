@@ -76,6 +76,35 @@ type Run = {
 };
 
 const runs = new Map<string, Run>();
+
+/**
+ * A turn Workbench sends a chat by itself once its running turn has ended, such as after a secret was
+ * saved. It resolves with that turn's reply, or undefined when none was sent.
+ */
+const followUps = new Map<string, Promise<Chat | null | undefined>>();
+
+export function expectFollowUp(
+  chatId: string,
+  reply: Promise<Chat | null | undefined>,
+): void {
+  followUps.set(chatId, reply);
+  void reply.finally(() => {
+    if (followUps.get(chatId) === reply) followUps.delete(chatId);
+  });
+}
+
+/** The chat's reply once the turns Workbench sent after this one have ended too. */
+async function afterFollowUps(
+  chatId: string,
+  reply: Chat | null,
+): Promise<Chat | null> {
+  for (let next = followUps.get(chatId); next && reply; next = followUps.get(chatId)) {
+    const followed = await next;
+    if (followUps.get(chatId) === next) followUps.delete(chatId);
+    if (followed !== undefined) reply = followed;
+  }
+  return reply;
+}
 /** How long a finished run waits for its caller to collect the answer. */
 const RUN_KEEP_MS = 30 * 60_000;
 
@@ -433,6 +462,7 @@ async function startRun(
   };
   const { done: finished } = await send(chat.id, content);
   run.done = finished
+    .then((first) => afterFollowUps(chat.id, first))
     .then((done) => {
       const reply = done?.messages.at(-1);
       run.answer = reply?.role === "assistant" ? plainReply(reply.content) : "";

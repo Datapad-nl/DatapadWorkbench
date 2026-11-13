@@ -1,38 +1,7 @@
-import { app } from 'electron'
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { randomBytes } from 'crypto'
-import { existsSync } from 'fs'
-import { join, sep } from 'path'
-import { getBrowserState, requestShowBrowser, stopBrowser } from './browser'
-import {
-  back,
-  click,
-  consoleLog,
-  evaluate,
-  forward,
-  navigate,
-  press,
-  reload,
-  screenshot,
-  snapshot,
-  type,
-  waitFor,
-  type Target
-} from './browserDrive'
-import { transcribeYoutube } from './youtube'
-import {
-  agentHook,
-  cancelProjectSchedule,
-  delegateTask,
-  listProjectChats,
-  nudgeWorker,
-  readProjectChat,
-  scheduleTask,
-  startProjectChat,
-  handoffChat,
-  waitForDelegate
-} from './chatTools'
-import { linkPr, prStatus, unlinkCallerPr } from './pullRequests'
+import { agentHook } from './chatTools'
+import { handleMcp, type Toolset } from './workbenchMcp'
 import type { AcpMcpServer } from '../shared/mcp'
 
 export const BROWSER_SESSION_RULE = [
@@ -51,7 +20,24 @@ export const BROWSER_SESSION_RULE = [
   'Do not mark the goal complete until the work is actually done, and do not go silent until the turn is finished.'
 ].join(' ')
 
-let started: Promise<{ url: string; token: string }> | null = null
+let started: Promise<{ url: string }> | null = null
+
+/**
+ * One token per chat, so a call acts for the chat its token was given to. The token is the only proof of
+ * who calls: nothing in a request names a chat.
+ */
+const chatTokens = new Map<string, string>()
+const tokenChats = new Map<string, string>()
+
+function tokenFor(chatId: string): string {
+  let token = chatTokens.get(chatId)
+  if (!token) {
+    token = randomBytes(24).toString('hex')
+    chatTokens.set(chatId, token)
+    tokenChats.set(token, chatId)
+  }
+  return token
+}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
@@ -78,166 +64,58 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
 }
 
-const str = (value: unknown): string | undefined => (typeof value === 'string' && value ? value : undefined)
-const num = (value: unknown): number | undefined =>
-  typeof value === 'number' && Number.isFinite(value) ? value : undefined
-
-function targetOf(body: Record<string, unknown>): Target | null {
-  const target: Target = { ref: num(body.ref), selector: str(body.selector), text: str(body.text) }
-  return target.ref == null && !target.selector && !target.text ? null : target
-}
-
-/** Tools that read or drive the open page. Each takes the JSON body and returns JSON. */
-const DRIVE: Record<string, (body: Record<string, unknown>) => Promise<unknown>> = {
-  '/screenshot': () => screenshot(),
-  '/snapshot': (body) => snapshot(num(body.maxChars)),
-  '/click': (body) => {
-    const target = targetOf(body)
-    if (!target) throw new Error('Pass ref, selector or text')
-    return click(target)
-  },
-  '/type': (body) => {
-    const field = targetOf({ ref: body.ref, selector: body.selector, text: body.field })
-    return type(field, typeof body.text === 'string' ? body.text : '', body.clear === true)
-  },
-  '/press': (body) =>
-    press(str(body.key) ?? '', Array.isArray(body.modifiers) ? body.modifiers.map(String) : []),
-  '/wait_for': (body) => waitFor(str(body.selector), str(body.text), num(body.timeoutMs)),
-  '/evaluate': async (body) => ({ result: await evaluate(str(body.expression) ?? 'undefined') }),
-  '/console': async (body) => consoleLog(str(body.level), num(body.limit)),
-  '/chats/list': (body) => listProjectChats(body.from),
-  '/chats/read': (body) => readProjectChat(body),
-  '/chats/start': (body) => startProjectChat(body),
-  '/chats/handoff': (body) => handoffChat(body),
-  '/chats/delegate': (body) => delegateTask(body),
-  '/chats/nudge': (body) => nudgeWorker(body),
-  '/chats/wait': (body) => waitForDelegate(body),
-  '/chats/schedule': (body) => scheduleTask(body),
-  '/chats/unschedule': (body) => cancelProjectSchedule(body),
-  '/pr/link': (body) => linkPr(body),
-  '/pr/status': (body) => prStatus(body),
-  '/pr/unlink': (body) => unlinkCallerPr(body)
-}
-
-function authorized(req: IncomingMessage, token: string): boolean {
+/** The chat whose token the request carries, or null. */
+function callerOf(req: IncomingMessage): { token: string; chatId: string } | null {
   const header = req.headers.authorization ?? ''
-  return header === `Bearer ${token}`
+  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : ''
+  const chatId = tokenChats.get(token)
+  return chatId === undefined ? null : { token, chatId }
 }
 
-function mcpScriptPath(): string {
-  const fromSrc = join(app.getAppPath(), 'src/main/browser-mcp.mjs')
-  // A packaged app ships the script unpacked next to the asar archive.
-  const unpacked = fromSrc.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`)
-  if (unpacked !== fromSrc && existsSync(unpacked)) return unpacked
-  if (existsSync(fromSrc)) return fromSrc
-  const fromOut = join(__dirname, 'browser-mcp.mjs')
-  if (existsSync(fromOut)) return fromOut
-  throw new Error('Workbench browser MCP script is missing')
-}
-
-async function handle(
-  req: IncomingMessage,
-  res: ServerResponse,
-  token: string
-): Promise<void> {
+async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.socket.remoteAddress && !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
     json(res, 403, { error: 'Local only' })
     return
   }
-  if (!authorized(req, token)) {
+  const caller = callerOf(req)
+  if (!caller) {
     json(res, 401, { error: 'Unauthorized' })
     return
   }
 
-  const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-  const path = url.pathname
-  const method = req.method ?? 'GET'
-
-  if (method === 'GET' && path === '/state') {
-    json(res, 200, getBrowserState())
+  const path = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+  if (req.method !== 'POST') {
+    // No stream of its own from the server: everything comes back on the POST that asked.
+    res.writeHead(405, { Allow: 'POST' }).end()
+    return
+  }
+  let body: Record<string, unknown>
+  try {
+    body = await readJson(req)
+  } catch {
+    json(res, 400, { error: 'Invalid JSON' })
     return
   }
 
-  if (method === 'POST' && path === '/navigate') {
-    let urlInput = ''
-    try {
-      const parsed = JSON.parse(await readBody(req)) as { url?: unknown }
-      urlInput = typeof parsed.url === 'string' ? parsed.url : ''
-    } catch {
-      json(res, 400, { error: 'Invalid JSON' })
-      return
-    }
-    requestShowBrowser()
-    json(res, 200, await navigate(urlInput))
+  if (path === '/hooks/agent' && caller.chatId) {
+    json(res, 200, await agentHook(caller.chatId, body))
     return
   }
-
-  if (method === 'POST' && path === '/back') {
-    requestShowBrowser()
-    json(res, 200, await back())
-    return
-  }
-  if (method === 'POST' && path === '/forward') {
-    requestShowBrowser()
-    json(res, 200, await forward())
-    return
-  }
-  if (method === 'POST' && path === '/reload') {
-    json(res, 200, await reload())
-    return
-  }
-  if (method === 'POST' && path === '/stop') {
-    json(res, 200, stopBrowser())
-    return
-  }
-
-  if (method === 'POST' && path === '/hooks/agent') {
-    json(res, 200, await agentHook(url.searchParams.get('chat') ?? '', await readJson(req)))
-    return
-  }
-
-  const drive = method === 'POST' ? DRIVE[path] : undefined
-  if (drive) {
-    let body: Record<string, unknown>
-    try {
-      body = await readJson(req)
-    } catch {
-      json(res, 400, { error: 'Invalid JSON' })
-      return
-    }
-    try {
-      json(res, 200, await drive(body))
-    } catch (error) {
-      json(res, 422, { error: error instanceof Error ? error.message : String(error) })
-    }
-    return
-  }
-
-  if (method === 'POST' && path === '/youtube/transcript') {
-    let urlInput = ''
-    let lang: string | undefined
-    try {
-      const parsed = JSON.parse(await readBody(req)) as { url?: unknown; lang?: unknown }
-      urlInput = typeof parsed.url === 'string' ? parsed.url : ''
-      lang = typeof parsed.lang === 'string' ? parsed.lang : undefined
-    } catch {
-      json(res, 400, { error: 'Invalid JSON' })
-      return
-    }
-    json(res, 200, await transcribeYoutube(urlInput, lang))
+  if (path === '/mcp/browser' || path === '/mcp/workbench') {
+    await handleMcp(res, caller, path.slice('/mcp/'.length) as Toolset, body)
     return
   }
 
   json(res, 404, { error: 'Not found' })
 }
 
-export function startBrowserAgentServer(): Promise<{ url: string; token: string }> {
+export function startBrowserAgentServer(): Promise<{ url: string }> {
   if (started) return started
-  const starting = new Promise<{ url: string; token: string }>((resolve, reject) => {
-    const token = randomBytes(24).toString('hex')
+  const starting = new Promise<{ url: string }>((resolve, reject) => {
     const server = createServer((req, res) => {
-      void handle(req, res, token).catch((error) => {
-        json(res, 500, { error: error instanceof Error ? error.message : String(error) })
+      void handle(req, res).catch((error) => {
+        if (res.headersSent) res.end()
+        else json(res, 500, { error: error instanceof Error ? error.message : String(error) })
       })
     })
     server.once('error', reject)
@@ -248,7 +126,7 @@ export function startBrowserAgentServer(): Promise<{ url: string; token: string 
         reject(new Error('Browser agent server failed to bind'))
         return
       }
-      resolve({ url: `http://127.0.0.1:${address.port}`, token })
+      resolve({ url: `http://127.0.0.1:${address.port}` })
     })
   })
   started = starting
@@ -265,35 +143,17 @@ export function startBrowserAgentServer(): Promise<{ url: string; token: string 
  * chat that becomes a conductor mid-session is held to it.
  */
 export async function agentHookSettings(chatId: string): Promise<Record<string, unknown>> {
-  const { url, token } = await startBrowserAgentServer()
-  const hook = {
-    type: 'http',
-    url: `${url}/hooks/agent?chat=${encodeURIComponent(chatId)}`,
-    headers: { Authorization: `Bearer ${token}` }
-  }
+  const { url } = await startBrowserAgentServer()
+  const hook = { type: 'http', url: `${url}/hooks/agent`, headers: { Authorization: `Bearer ${tokenFor(chatId)}` } }
   return { hooks: { PreToolUse: [{ matcher: 'Agent|Task|Edit|Write|MultiEdit|NotebookEdit', hooks: [hook] }] } }
 }
 
 /** The `browser` server, and the `workbench` chat tools (visuals, delegate, other chats) for `chatId`. */
 export async function browserMcpServers(chatId?: string): Promise<AcpMcpServer[]> {
-  const { url, token } = await startBrowserAgentServer()
-  const env = [
-    { name: 'ELECTRON_RUN_AS_NODE', value: '1' },
-    { name: 'WORKBENCH_BROWSER_URL', value: url },
-    { name: 'WORKBENCH_BROWSER_TOKEN', value: token }
-  ]
+  const { url } = await startBrowserAgentServer()
+  const headers = [{ name: 'Authorization', value: `Bearer ${tokenFor(chatId ?? '')}` }]
   return [
-    { type: 'stdio', name: 'browser', command: process.execPath, args: [mcpScriptPath()], env },
-    {
-      type: 'stdio',
-      name: 'workbench',
-      command: process.execPath,
-      args: [mcpScriptPath()],
-      env: [
-        ...env,
-        { name: 'WORKBENCH_TOOLSET', value: 'workbench' },
-        { name: 'WORKBENCH_CHAT_ID', value: chatId ?? '' }
-      ]
-    }
+    { type: 'http', name: 'browser', url: `${url}/mcp/browser`, headers },
+    { type: 'http', name: 'workbench', url: `${url}/mcp/workbench`, headers }
   ]
 }

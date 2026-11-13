@@ -22,6 +22,8 @@ import {
   acpModeIdFor,
   agentGeneration,
   agentKey,
+  grokProcEnv,
+  sessionAgentKey,
   bindExitPlanSession,
   cancelSession,
   clearQueuedExitPlanVerdict,
@@ -67,6 +69,7 @@ import {
   setSessionMode
 } from './permissions'
 import { cancelChatQuestions, cancelSessionQuestions, pendingQuestionRequests } from './questions'
+import { cancelContinuation } from './secretTools'
 import { clearGrokPlanApproval, grokBuildSignedIn, readGrokPlan } from './sessions'
 import { chatWorkingDir, isolateChatIfNeeded } from './git'
 import { projectSessionRules } from './intake'
@@ -499,6 +502,7 @@ function cancelAsides(chatId: string): void {
 
 export function stopStream(chatId: string): boolean {
   cancelAsides(chatId)
+  cancelContinuation(chatId)
   cancelChatPermissions(chatId)
   // Project intake asks in the same chat but is not part of the turn.
   cancelChatQuestions(chatId, { keepIntake: true })
@@ -955,10 +959,12 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   // A bot that was deleted takes its chats along, so this only fails while that happens.
   if (chat.botId) await step(turn, getBot(chat.botId))
   const pluginDir = chat.botId ? botFolder(chat.botId) : null
-  turn.agent = agentKey(agent, pluginDir)
+  // A project with secrets on Grok Build runs on a process of its own, which a stop must target.
+  const env = await step(turn, grokProcEnv(agent, chat.id))
+  turn.agent = agentKey(agent, pluginDir, env)
   const signInError = await step(turn, agentSignInError(agent))
   if (signInError) throw new Error(signInError)
-  await step(turn, ensureAgent(agent, pluginDir))
+  await step(turn, ensureAgent(agent, pluginDir, env))
   const project = (await step(turn, listProjects())).find((item) => item.id === chat.projectId)
 
   const followText = followUp?.text.trim() ?? ''
@@ -1052,6 +1058,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   // From here the agent owns the turn. Nothing is awaited until the prompt is sent.
   turn.phase = 'streaming'
   turn.sessionId = sessionId
+  turn.agent = sessionAgentKey(sessionId)
   turn.agentGeneration = agentGeneration(turn.agent)
   sessionTurns.set(sessionId, turn)
   clearSessionStopped(sessionId)

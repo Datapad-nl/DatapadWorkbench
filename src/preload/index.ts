@@ -32,6 +32,7 @@ import type {
   PlanVerdict,
   PublicSettings,
   SaveBotSkillInput,
+  SecretScope,
   SkillListing,
   SkillPreview,
   UpdateBotInput,
@@ -172,6 +173,9 @@ const api = {
       ipcRenderer.removeListener('update:state', wrapped)
     }
   },
+  listSecrets: (): Promise<SecretScope[]> => ipcRenderer.invoke('secrets:list'),
+  deleteSecret: (scope: string, name: string): Promise<SecretScope[]> =>
+    ipcRenderer.invoke('secrets:delete', { scope, name }),
   getThemeState: (): Promise<{ active: ThemeFile; themes: ThemeSummary[]; activeId: string }> =>
     ipcRenderer.invoke('theme:state'),
   activateTheme: (id: string): Promise<{ active: ThemeFile; themes: ThemeSummary[]; activeId: string }> =>

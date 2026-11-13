@@ -7,6 +7,7 @@ import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
 import { attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
 import { augmentPath, killOrphanCodegraphInits, stopCodegraphJobs } from './codegraph'
+import { appIndexPath, devServerUrl, isAppUrl } from './appUrl'
 import { attachContextMenu } from './contextMenu'
 import { loadDotEnv } from './env'
 import { stopGitWatchers } from './git'
@@ -39,11 +40,15 @@ import { loadWindowState, trackWindowState } from './windowState'
 // Installed builds would name this folder after the product. Keep the one `npm run dev` uses
 // so chats, projects and downloaded voice models carry over.
 app.setPath('userData', join(app.getPath('appData'), 'datapad-workbench'))
+// Named before ready: the keychain key that encrypts secrets, the API key and cookies is named after
+// the app, so dev and installed builds must share the name to read each other's data.
+app.setName('Datapad Workbench')
 
 registerVoiceScheme()
 
-if (is.dev) {
-  app.commandLine.appendSwitch('remote-debugging-port', '9333')
+// Remote debugging lets any local process drive the app, so it is only on when asked for.
+if (is.dev && process.env['WORKBENCH_REMOTE_DEBUGGING_PORT']) {
+  app.commandLine.appendSwitch('remote-debugging-port', process.env['WORKBENCH_REMOTE_DEBUGGING_PORT'])
 }
 
 // Closing the window keeps the app in the tray, so opening it again on Windows or Linux shows that
@@ -142,24 +147,18 @@ function createWindow(hidden = false): void {
     mainWindow.show()
   })
 
-  function isAppUrl(url: string): boolean {
-    if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-      return url.startsWith(process.env['ELECTRON_RENDERER_URL'])
-    }
-    try {
-      return new URL(url).protocol === 'file:'
-    } catch {
-      return false
-    }
-  }
-
   function openInAppBrowser(url: string): void {
     const clean = sanitizeUrl(url)
     if (clean) {
       void navigateBrowser(clean)
       return
     }
-    void shell.openExternal(url)
+    // Other schemes (file:, smb: and the like) could open or run something local, so only mail goes out.
+    try {
+      if (new URL(url).protocol === 'mailto:') void shell.openExternal(url)
+    } catch {
+      // Not a URL: nothing to open.
+    }
   }
 
   // Same-window <a> clicks replace the renderer unless we cancel them.
@@ -174,10 +173,11 @@ function createWindow(hidden = false): void {
     return { action: 'deny' }
   })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  const devUrl = devServerUrl()
+  if (devUrl) {
+    mainWindow.loadURL(devUrl)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(appIndexPath())
   }
 
   attachBrowser(mainWindow)
@@ -187,7 +187,6 @@ app.whenReady().then(async () => {
   if (secondInstance) return
   loadDotEnv()
   augmentPath()
-  app.setName('Datapad Workbench')
   electronApp.setAppUserModelId('com.datapad.workbench')
   if (process.platform === 'darwin') {
     app.dock?.setIcon(icon)

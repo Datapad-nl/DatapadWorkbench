@@ -1,24 +1,8 @@
-#!/usr/bin/env node
-/**
- * Stdio MCP for the Datapad Workbench BrowserPane.
- * Talks to the loopback HTTP API started by the Workbench main process.
- * Messages are newline-delimited JSON-RPC (MCP stdio), not LSP Content-Length.
- * With WORKBENCH_TOOLSET=workbench it serves the chat tools instead: visuals,
- * delegating to another agent, reading or starting other chats, scheduled tasks and
- * pull requests.
- */
+/** The tools of the Workbench's own MCP servers: `browser` drives the BrowserPane, `workbench` holds the chat tools. */
 
-const BASE = process.env.WORKBENCH_BROWSER_URL
-const TOKEN = process.env.WORKBENCH_BROWSER_TOKEN
-const CHAT_ID = process.env.WORKBENCH_CHAT_ID ?? ''
-const WORKBENCH = process.env.WORKBENCH_TOOLSET === 'workbench'
+export type McpTool = { name: string; description: string; inputSchema: Record<string, unknown> }
 
-if (!BASE || !TOKEN) {
-  console.error('WORKBENCH_BROWSER_URL and WORKBENCH_BROWSER_TOKEN are required')
-  process.exit(1)
-}
-
-const BROWSER_TOOLS = [
+export const BROWSER_TOOLS: McpTool[] = [
   {
     name: 'get_state',
     description:
@@ -190,11 +174,11 @@ const AGENT = {
   description: 'grok for Grok Build, claude for Claude Code. Defaults to the agent set in Settings.'
 }
 
-const WORKBENCH_TOOLS = [
+export const WORKBENCH_TOOLS: McpTool[] = [
   {
     name: 'show_visual',
     description:
-      'Show a visual inline in the chat: a chart, diagram, table or UI mock-up. Pass one self-contained HTML document. Inline <script> and <style> work; scripts and styles may also load from cdn.jsdelivr.net, cdnjs.cloudflare.com or unpkg.com, and fonts from Google Fonts. Nothing else on the network is reachable, and the page runs in a sandbox with no storage. Use it when a picture explains the answer better than text. The user sees it in your reply where you call it.',
+      'Show a visual inline in the chat: a chart, diagram, table or UI mock-up. Pass one self-contained HTML document. Inline <script> and <style> work; scripts and styles may also load from cdn.jsdelivr.net, cdnjs.cloudflare.com or unpkg.com, and fonts from Google Fonts. Images must be inline: data: or blob: URLs, or inline SVG. Nothing else on the network is reachable, and the page runs in a sandbox with no storage. Use it when a picture explains the answer better than text. The user sees it in your reply where you call it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -354,201 +338,19 @@ WORKBENCH_TOOLS.push(
     name: 'unlink_pr',
     description: 'Unlink the pull request from this chat and stop watching it.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  },
+  {
+    name: 'request_secret',
+    description:
+      'Ask the user for a secret, such as an API key, token or password, without it passing through you. The user types it into a password field in the chat; Datapad Workbench keeps it encrypted for this project and sets it as an environment variable in your shell from the next turn. You get the name only, never the value. Use it whenever you need a secret: never ask for one in a chat message. Use the variable as $NAME in commands and never print it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Environment variable name, e.g. STRIPE_SECRET_KEY' },
+        reason: { type: 'string', description: 'One sentence for the user: what it is for and where to find it' }
+      },
+      required: ['name'],
+      additionalProperties: false
+    }
   }
 )
-
-const TOOLS = WORKBENCH ? WORKBENCH_TOOLS : BROWSER_TOOLS
-
-async function callApi(method, path, body, signal) {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    signal
-  })
-  const text = await res.text()
-  if (!res.ok) {
-    let message = text
-    try {
-      message = JSON.parse(text).error ?? text
-    } catch {
-      // plain text error
-    }
-    throw new Error(message || `BrowserPane API ${res.status}`)
-  }
-  return text ? JSON.parse(text) : {}
-}
-
-// Tool calls in flight with their aborts, and those the client cancelled (`notifications/cancelled`).
-const running = new Map()
-const cancelled = new Set()
-
-async function delegate(path, args, requestId) {
-  const started = await callApi('POST', path, { ...args, from: CHAT_ID })
-  // A cancel ends the wait in progress rather than after it.
-  const signal = running.get(requestId)?.signal
-  while (!cancelled.has(requestId)) {
-    const result = await callApi('POST', '/chats/wait', { chatId: started.chatId, ms: 60_000 }, signal)
-    if (result.done) return { ...result, chatId: started.chatId, title: started.title, model: started.model }
-  }
-  throw new Error('Cancelled')
-}
-
-async function handleWorkbenchTool(name, args, requestId) {
-  if (name === 'show_visual') {
-    // The app picks the HTML up from the tool call itself and draws it in the chat.
-    if (!String(args?.html ?? '').trim()) throw new Error('Pass the HTML to show.')
-    return { shown: true }
-  }
-  if (name === 'delegate') return delegate('/chats/delegate', args, requestId)
-  if (name === 'nudge') return delegate('/chats/nudge', args, requestId)
-  if (name === 'list_chats') return callApi('POST', '/chats/list', { from: CHAT_ID })
-  if (name === 'read_chat') return callApi('POST', '/chats/read', { ...args, from: CHAT_ID })
-  if (name === 'start_chat') return callApi('POST', '/chats/start', { ...args, from: CHAT_ID })
-  if (name === 'handoff') return callApi('POST', '/chats/handoff', { ...args, from: CHAT_ID })
-  if (name === 'schedule_task') return callApi('POST', '/chats/schedule', { ...args, from: CHAT_ID })
-  if (name === 'cancel_schedule') return callApi('POST', '/chats/unschedule', { ...args, from: CHAT_ID })
-  if (name === 'link_pr') return callApi('POST', '/pr/link', { ...args, from: CHAT_ID })
-  if (name === 'pr_status') return callApi('POST', '/pr/status', { ...args, from: CHAT_ID })
-  if (name === 'unlink_pr') return callApi('POST', '/pr/unlink', { from: CHAT_ID })
-  throw new Error(`Unknown tool: ${name}`)
-}
-
-async function handleTool(name, args, requestId) {
-  if (WORKBENCH) return handleWorkbenchTool(name, args, requestId)
-  if (name === 'get_state') return callApi('GET', '/state')
-  if (name === 'navigate') return callApi('POST', '/navigate', { url: String(args?.url ?? '') })
-  if (name === 'back') return callApi('POST', '/back')
-  if (name === 'forward') return callApi('POST', '/forward')
-  if (name === 'reload') return callApi('POST', '/reload')
-  if (name === 'stop') return callApi('POST', '/stop')
-  const drive = ['screenshot', 'snapshot', 'click', 'type', 'press', 'wait_for', 'evaluate', 'console']
-  if (drive.includes(name)) return callApi('POST', `/${name}`, args ?? {})
-  if (name === 'transcribe_youtube') {
-    return callApi('POST', '/youtube/transcript', {
-      url: String(args?.url ?? ''),
-      lang: args?.lang ? String(args.lang) : undefined
-    })
-  }
-  throw new Error(`Unknown tool: ${name}`)
-}
-
-function snapshotText(data) {
-  const lines = [`${data.title || '(no title)'} — ${data.url}`, '', data.text || '(no text)', '', 'Elements:']
-  for (const el of data.elements ?? []) {
-    let line = `[${el.ref}] ${el.role} "${el.name}"`
-    if (el.value !== undefined) line += ` value="${el.value}"`
-    if (el.checked !== undefined) line += el.checked ? ' (checked)' : ' (unchecked)'
-    if (el.disabled) line += ' (disabled)'
-    if (el.offscreen) line += ' (scrolled out of view)'
-    lines.push(line)
-  }
-  if (!data.elements?.length) lines.push('(none)')
-  return lines.join('\n')
-}
-
-function toContent(name, data) {
-  if (name === 'screenshot') {
-    return [
-      { type: 'image', data: data.png, mimeType: 'image/png' },
-      { type: 'text', text: `${data.width}×${data.height}` }
-    ]
-  }
-  if (name === 'snapshot') return [{ type: 'text', text: snapshotText(data) }]
-  if (name === 'show_visual') return [{ type: 'text', text: 'Shown in the chat.' }]
-  if (name === 'delegate' || name === 'nudge') {
-    const head = `${data.title} (${data.chatId})${data.model ? ` on ${data.model}` : ''}${data.worktreeBranch ? ` on branch ${data.worktreeBranch}` : ''}`
-    if (data.error) return [{ type: 'text', text: `${head} stopped: ${data.error}\n\n${data.answer ?? ''}`.trim() }]
-    return [{ type: 'text', text: `${head} finished.\n\n${data.answer || '(no answer)'}` }]
-  }
-  if (name === 'read_chat' || name === 'link_pr' || name === 'pr_status') return [{ type: 'text', text: data.text }]
-  return [{ type: 'text', text: JSON.stringify(data, null, 2) }]
-}
-
-function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`)
-}
-
-function reply(id, result) {
-  send({ jsonrpc: '2.0', id, result })
-}
-
-function fail(id, message) {
-  send({
-    jsonrpc: '2.0',
-    id,
-    error: { code: -32000, message }
-  })
-}
-
-async function handle(message) {
-  const { id, method, params } = message
-  if (method === 'initialize') {
-    reply(id, {
-      protocolVersion: params?.protocolVersion ?? '2024-11-05',
-      capabilities: { tools: {} },
-      serverInfo: { name: WORKBENCH ? 'workbench' : 'workbench-browser', version: '0.1.0' }
-    })
-    return
-  }
-  if (method === 'notifications/initialized' || method === 'initialized') return
-  if (method === 'notifications/cancelled') {
-    const call = running.get(params?.requestId)
-    if (call) {
-      cancelled.add(params.requestId)
-      call.abort()
-    }
-    return
-  }
-  if (method === 'ping') {
-    reply(id, {})
-    return
-  }
-  if (method === 'tools/list') {
-    reply(id, { tools: TOOLS })
-    return
-  }
-  if (method === 'tools/call') {
-    running.set(id, new AbortController())
-    let result
-    try {
-      const data = await handleTool(params?.name, params?.arguments ?? {}, id)
-      result = { content: toContent(params?.name, data) }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      result = {
-        content: [{ type: 'text', text: message }],
-        isError: true
-      }
-    }
-    running.delete(id)
-    // A cancelled request gets no reply.
-    if (!cancelled.delete(id)) reply(id, result)
-    return
-  }
-  if (id !== undefined) fail(id, `Unknown method: ${method}`)
-}
-
-let buffer = ''
-
-process.stdin.setEncoding('utf8')
-process.stdin.on('data', (chunk) => {
-  buffer += chunk
-  while (true) {
-    const nl = buffer.indexOf('\n')
-    if (nl === -1) return
-    const line = buffer.slice(0, nl).trim()
-    buffer = buffer.slice(nl + 1)
-    if (!line) continue
-    try {
-      void handle(JSON.parse(line))
-    } catch (error) {
-      console.error(error)
-    }
-  }
-})
-
-process.stdin.on('end', () => process.exit(0))

@@ -12,6 +12,7 @@ import {
   formatGrokCli,
   normalizeChatAgent,
   type PublicSettings,
+  type SecretScope,
   type UpdateState,
   type UsageSnapshot,
   type VoiceLanguage,
@@ -416,6 +417,70 @@ function updateText(state: UpdateState): string {
     case 'error':
       return `Could not check for updates: ${state.message}`
   }
+}
+
+/** The secrets agents asked for in chats, by project or bot. Names only: values never leave the main process. */
+function SecretsSection(): React.JSX.Element | null {
+  const { projects } = useWorkspace()
+  const [scopes, setScopes] = useState<SecretScope[]>([])
+  const [botNames, setBotNames] = useState<Record<string, string>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    void Promise.all([window.workbench.listSecrets(), window.workbench.listBots()]).then(
+      ([next, bots]) => {
+        if (!live) return
+        setScopes(next)
+        setBotNames(Object.fromEntries(bots.map((bot) => [`bot:${bot.id}`, bot.name])))
+      },
+      () => {
+        // No list to show: the section stays hidden.
+      }
+    )
+    return () => {
+      live = false
+    }
+  }, [])
+
+  if (scopes.length === 0) return null
+  const label = (scope: string): string =>
+    projects.find((project) => project.id === scope)?.name ?? botNames[scope] ?? 'Removed project'
+
+  return (
+    <div data-testid="settings-secrets" className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
+      <div className="text-[12px] font-medium text-ink">Secrets</div>
+      <p className="mt-1 text-[12px] leading-5 text-muted">
+        Kept encrypted with the system keychain. Agents get them as environment variables, never the values.
+      </p>
+      <div className="mt-2 flex flex-col gap-2">
+        {scopes.map((item) => (
+          <div key={item.scope}>
+            <div className="text-[11px] text-faint">{label(item.scope)}</div>
+            {item.names.map((name) => (
+              <div key={name} className="mt-1 flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[12px] text-ink">{name}</span>
+                <button
+                  type="button"
+                  className="text-[11px] text-muted hover:text-danger"
+                  onClick={() => {
+                    setError(null)
+                    window.workbench
+                      .deleteSecret(item.scope, name)
+                      .then(setScopes)
+                      .catch((caught) => setError(errorText(caught, 'Could not delete the secret')))
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      {error && <p className="mt-2 text-[11px] leading-4 text-red-400">{error}</p>}
+    </div>
+  )
 }
 
 function UpdateSection(): React.JSX.Element {
@@ -954,6 +1019,7 @@ export function SettingsModal(): React.JSX.Element | null {
               )}
             </div>
             <UpdateSection />
+            <SecretsSection />
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="text-[12px] font-medium text-ink">Support</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">

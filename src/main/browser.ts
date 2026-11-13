@@ -42,8 +42,16 @@ export function sanitizeUrl(input: string): string | null {
   }
 }
 
+let permissionsLocked = false
+
 function guestSession(): Electron.Session {
   const ses = session.fromPartition(PARTITION)
+  // Pages in the pane are untrusted, so they get no camera, microphone, location, clipboard or the like.
+  if (!permissionsLocked) {
+    permissionsLocked = true
+    ses.setPermissionCheckHandler(() => false)
+    ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  }
   const current = ses.getUserAgent()
   const stripped = current.replace(/\sElectron\/\S+/, '')
   if (stripped !== current) ses.setUserAgent(stripped)

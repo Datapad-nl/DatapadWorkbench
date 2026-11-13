@@ -1,5 +1,5 @@
 import { normalizeMaxSubagents } from '../shared/conductor'
-import { app } from 'electron'
+import { app, safeStorage } from 'electron'
 import { mkdir, readdir, rm, stat } from 'fs/promises'
 import { join, normalize } from 'path'
 import { type McpServers, parseMcpServers } from '../shared/mcp'
@@ -48,7 +48,10 @@ type SettingsFile = {
   subagentModel?: string
   /** How many workers of one chat run at the same time. */
   maxSubagents?: number
+  /** Plain text only where the system keychain is not available; otherwise empty, see `apiKeySealed`. */
   apiKey: string
+  /** The API key encrypted with the system keychain (Electron safeStorage), base64. */
+  apiKeySealed?: string
   model: string
   effort: ReasoningEffort | ''
   themeId: string
@@ -153,6 +156,25 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFileAtomic(path, JSON.stringify(value, null, 2))
 }
 
+/** Writes settings with the API key encrypted when the keychain allows, so it is not plain text on disk. */
+async function writeSettings(file: SettingsFile): Promise<void> {
+  const key = file.apiKey.trim()
+  if (key && safeStorage.isEncryptionAvailable()) {
+    file = { ...file, apiKey: '', apiKeySealed: safeStorage.encryptString(key).toString('base64') }
+  }
+  await writeJson(settingsPath(), file)
+}
+
+/** A sealed key that no longer decrypts reads as no key, and stays on disk in case the keychain comes back. */
+function openApiKey(file: Partial<SettingsFile>): string {
+  if (!file.apiKeySealed) return file.apiKey ?? ''
+  try {
+    return safeStorage.decryptString(Buffer.from(file.apiKeySealed, 'base64'))
+  } catch {
+    return ''
+  }
+}
+
 export async function ensureStore(): Promise<void> {
   await mkdir(chatsDir(), { recursive: true })
   const existing = await readJsonFile<StoreData | null>(projectsPath(), null, markProjectsRecovered)
@@ -168,6 +190,9 @@ export async function ensureStore(): Promise<void> {
       themeId: DEFAULT_THEME_ID,
       voice: DEFAULT_VOICE
     } satisfies SettingsFile)
+  } else if (settings.apiKey?.trim() && safeStorage.isEncryptionAvailable()) {
+    // A key saved before keys were encrypted is sealed now.
+    await withLock(settingsPath(), async () => writeSettings(await loadSettingsFile()))
   }
   await mkdir(join(dataDir(), 'themes'), { recursive: true })
 }
@@ -272,7 +297,8 @@ async function loadSettingsFile(): Promise<SettingsFile> {
     orchestratorModel: file.orchestratorModel?.trim() ?? '',
     subagentModel: file.subagentModel?.trim() ?? '',
     maxSubagents: normalizeMaxSubagents(file.maxSubagents),
-    apiKey: file.apiKey ?? '',
+    apiKey: openApiKey(file),
+    apiKeySealed: file.apiKeySealed,
     model: file.model || DEFAULT_MODEL,
     effort: normalizeReasoningEffort(file.effort) ?? '',
     themeId: file.themeId || DEFAULT_THEME_ID,
@@ -299,7 +325,7 @@ export async function setMcpServers(text: string): Promise<McpServers> {
   const mcpServers = parseMcpServers(text)
   await withLock(settingsPath(), async () => {
     const current = await loadSettingsFile()
-    await writeJson(settingsPath(), { ...current, mcpServers } satisfies SettingsFile)
+    await writeSettings({ ...current, mcpServers })
   })
   return mcpServers
 }
@@ -312,11 +338,11 @@ export async function getThemeId(): Promise<string> {
 export async function setThemeId(themeId: string): Promise<void> {
   await withLock(settingsPath(), async () => {
     const current = await loadSettingsFile()
-    await writeJson(settingsPath(), {
+    await writeSettings({
       ...current,
       themeId: themeId || DEFAULT_THEME_ID,
       voice: normalizeVoiceSettings(current.voice)
-    } satisfies SettingsFile)
+    })
   })
 }
 
@@ -487,7 +513,7 @@ export async function updateSettings(input: {
 }): Promise<PublicSettings> {
   await withLock(settingsPath(), async () => {
     const current = await loadSettingsFile()
-    await writeJson(settingsPath(), {
+    await writeSettings({
       defaultAgent:
         input.defaultAgent !== undefined ? normalizeChatAgent(input.defaultAgent) : current.defaultAgent,
       claudeModel: input.claudeModel !== undefined ? input.claudeModel.trim() : current.claudeModel,
@@ -497,13 +523,15 @@ export async function updateSettings(input: {
       maxSubagents:
         input.maxSubagents !== undefined ? normalizeMaxSubagents(input.maxSubagents) : current.maxSubagents,
       apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
+      // A new key replaces the sealed one, also when it is empty or cannot be sealed.
+      apiKeySealed: input.apiKey !== undefined ? undefined : current.apiKeySealed,
       model: input.model?.trim() || current.model || DEFAULT_MODEL,
       effort:
         input.effort !== undefined ? (normalizeReasoningEffort(input.effort) ?? '') : current.effort,
       themeId: current.themeId || DEFAULT_THEME_ID,
       voice: normalizeVoiceSettings({ ...current.voice, ...input.voice }),
       mcpServers: current.mcpServers
-    } satisfies SettingsFile)
+    })
   })
   return getPublicSettings()
 }

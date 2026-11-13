@@ -1547,7 +1547,8 @@ function QuestionCard({
   const { busy, error, run } = usePending('Could not send the answer')
   const [picked, setPicked] = useState<string[][]>(() => request.questions.map(() => []))
   const [other, setOther] = useState<string[]>(() => request.questions.map(() => ''))
-  const [usingOther, setUsingOther] = useState<boolean[]>(() => request.questions.map(() => false))
+  // A secret is typed, like Other, into a field of its own.
+  const [usingOther, setUsingOther] = useState<boolean[]>(() => request.questions.map((question) => !!question.secret))
 
   function toggle(index: number, label: string, multi: boolean): void {
     setUsingOther((current) => current.map((item, i) => (i === index ? false : item)))
@@ -1591,6 +1592,49 @@ function QuestionCard({
           const otherOn = usingOther[index]
           return (
             <div key={`${index}:${question.question}`}>
+              {question.secret ? (
+                <div>
+                  {/* The app's words and the agent's are kept apart, so the agent can't word the request as the app. */}
+                  <div className="text-[13px] leading-5 font-semibold text-ink">
+                    The agent asks for a secret:{' '}
+                    <span className="font-mono text-[13.5px] text-accent">{question.secret.name}</span>
+                  </div>
+                  <div className="mt-2 border-l-2 border-line-strong pl-3">
+                    <div className="text-[11px] text-faint">The agent&apos;s reason</div>
+                    <div className="text-[13px] leading-5 whitespace-pre-wrap text-ink">
+                      &ldquo;{question.question}&rdquo;
+                    </div>
+                  </div>
+                  <div className="mt-2 text-[12px] leading-4 text-danger">
+                    The agent can use this value in commands, including sending it over the network. Only enter it if
+                    you trust this request.
+                  </div>
+                  <input
+                    autoFocus
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    data-testid="secret-input"
+                    className="mt-2 w-full rounded-md border border-line bg-surface px-2 py-1.5 font-mono text-[12.5px] text-ink outline-none placeholder:text-muted focus:border-accent/50"
+                    placeholder={question.secret.name}
+                    value={other[index] ?? ''}
+                    onChange={(event) => {
+                      const value = event.target.value
+                      setOther((current) => current.map((item, i) => (i === index ? value : item)))
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' || !ready || busy) return
+                      event.preventDefault()
+                      void run(() => onDecision(request.requestId, { type: 'submit', answers: answers() }))
+                    }}
+                  />
+                  <div className="mt-1.5 text-[11.5px] text-faint">
+                    Kept encrypted on this computer and set as ${question.secret.name} in the agent&apos;s shell. The
+                    agent never sees the value.
+                  </div>
+                </div>
+              ) : (
+              <>
               {question.header && question.header !== question.question && (
                 <div className="mb-1 text-[11px] text-faint">
                   {question.header}
@@ -1649,6 +1693,8 @@ function QuestionCard({
                   )}
                 </button>
               </div>
+              </>
+              )}
             </div>
           )
         })}

@@ -14,7 +14,7 @@ const VISUAL_CSP = [
   "script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com",
   "style-src 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com",
   "font-src https://fonts.gstatic.com data:",
-  "img-src data: blob: https:",
+  "img-src data: blob:",
 ].join("; ");
 
 // Reports the page height so the chat can size the frame to fit.

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 type Call = { method: string; params: Record<string, unknown> }
 type FakeProc = EventEmitter & {
   args: string[]
+  env: Record<string, string | undefined> | undefined
   calls: Call[]
   /** The answers the app sent to the agent's own requests. */
   replies: Array<{ id: unknown; result?: unknown }>
@@ -28,13 +29,19 @@ const fake = vi.hoisted(() => ({
   /** The MCP servers in Settings. */
   mcp: {} as Record<string, unknown>,
   /** Chats made conductor with /conduct, by id. */
-  conductors: new Set<string>()
+  conductors: new Set<string>(),
+  /** The project of each chat, by chat id. */
+  projects: {} as Record<string, string>,
+  /** Saved secrets by project id. */
+  secrets: {} as Record<string, Record<string, string>>,
+  secretListeners: [] as Array<(scope: string) => void>
 }))
 
 /** An ACP agent that answers every request and gives each session/new a fresh id. */
-function fakeAgent(command: string, args: string[]): FakeProc {
+function fakeAgent(command: string, args: string[], env?: Record<string, string | undefined>): FakeProc {
   const proc = new EventEmitter() as FakeProc
   proc.args = [command, ...args]
+  proc.env = env
   proc.calls = []
   proc.replies = []
   proc.stdin = new PassThrough()
@@ -76,9 +83,12 @@ function fakeAgent(command: string, args: string[]): FakeProc {
   return proc
 }
 
-vi.mock('child_process', () => ({ spawn: (command: string, args: string[]) => fakeAgent(command, args) }))
+vi.mock('child_process', () => ({
+  spawn: (command: string, args: string[], options?: { env?: Record<string, string | undefined> }) =>
+    fakeAgent(command, args, options?.env)
+}))
 vi.mock('./grokCli', () => ({ grokBinary: () => 'grok' }))
-vi.mock('./claudeCli', () => ({ claudeAcpCommand: async () => ({ command: 'claude-acp', args: [], env: {} }) }))
+vi.mock('./claudeCli', () => ({ startClaudeAdapter: async () => fakeAgent('claude-acp', [], {}) }))
 vi.mock('./browserAgent', () => ({
   BROWSER_SESSION_RULE: 'browser rule',
   agentHookSettings: async () => ({}),
@@ -91,12 +101,25 @@ vi.mock('./store', () => ({
   claudeModelFor: async () => '',
   getApiKey: async () => null,
   getClaudeModel: async () => '',
-  getChat: async (chatId: string) => ({ id: chatId, conductor: fake.conductors.has(chatId) }),
+  getChat: async (chatId: string) => ({
+    id: chatId,
+    projectId: fake.projects[chatId] ?? '',
+    conductor: fake.conductors.has(chatId)
+  }),
   getEffort: async () => null,
   getMaxSubagents: async () => 2,
   getMcpServers: async () => fake.mcp,
   getSubagentModel: async () => null,
   skipNewSession: <T,>(value: T) => value
+}))
+vi.mock('./secrets', () => ({
+  envFingerprint: (env: Record<string, string>) => Object.values(env).join('+').length.toString(),
+  onSecretsChanged: (listener: (scope: string) => void) => {
+    fake.secretListeners.push(listener)
+    return () => {}
+  },
+  secretEnv: async (scope: string | null) => (scope ? (fake.secrets[scope] ?? {}) : {}),
+  secretScope: (chat: { projectId: string }) => chat.projectId || null
 }))
 
 import {
@@ -107,6 +130,7 @@ import {
   newSession,
   promptSession,
   reloadBotSessions,
+  sessionAgentKey,
   sessionNeedsReload,
   sessionSupportsSteering,
   steerSession,
@@ -121,6 +145,8 @@ afterEach(() => {
   fake.bots = {}
   fake.mcp = {}
   fake.conductors.clear()
+  fake.projects = {}
+  fake.secrets = {}
   fake.steerOutcome = 'injected'
 })
 
@@ -316,5 +342,92 @@ describe('steering a running turn', () => {
   it('does not steer Grok, which does not offer it', async () => {
     const sessionId = await newSession('/project', null, 'grok', 'chat-10')
     expect(sessionSupportsSteering(sessionId)).toBe(false)
+  })
+})
+
+describe('project secrets', () => {
+  const rulesOf = (call: Call | undefined): string => (call?.params._meta as { rules: string }).rules
+
+  it('runs a Grok chat with secrets on a process of its own, with the secrets in its environment', async () => {
+    fake.projects['chat-s'] = 'p1'
+    fake.secrets.p1 = { STRIPE_KEY: 'sk_live_123' }
+    await newSession('/project', null, 'grok', 'chat-1')
+    await newSession('/project', null, 'grok', 'chat-s')
+    const [shared, own] = fake.procs
+    expect(fake.procs).toHaveLength(2)
+    expect(own.env?.STRIPE_KEY).toBe('sk_live_123')
+    expect(shared.env?.STRIPE_KEY).toBeUndefined()
+    // The agent is told the name, never the value.
+    const rules = rulesOf(own.calls.find((call) => call.method === 'session/new'))
+    expect(rules).toContain('STRIPE_KEY')
+    expect(rules).not.toContain('sk_live_123')
+    expect(rulesOf(shared.calls.find((call) => call.method === 'session/new'))).not.toContain('STRIPE_KEY')
+  })
+
+  it("passes a project's secrets to Claude Code per session", async () => {
+    fake.projects['chat-c'] = 'p1'
+    fake.secrets.p1 = { STRIPE_KEY: 'sk_live_123' }
+    await newSession('/project', null, 'claude', 'chat-c')
+    await newSession('/project', null, 'claude', 'chat-1')
+    const [withSecrets, without] = fake.procs[0].calls.filter((call) => call.method === 'session/new')
+    const options = (call: Call): Record<string, unknown> =>
+      (call.params._meta as { claudeCode: { options: Record<string, unknown> } }).claudeCode.options
+    expect(options(withSecrets).env).toEqual({ STRIPE_KEY: 'sk_live_123' })
+    expect(options(without).env).toBeUndefined()
+    const prompt = (withSecrets.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text
+    expect(prompt).toContain('STRIPE_KEY')
+    expect(prompt).not.toContain('sk_live_123')
+  })
+
+  it('moves a live chat to a process with the new secrets on its next turn, and stops the old one', async () => {
+    fake.projects['chat-s'] = 'p1'
+    fake.projects['chat-other'] = 'p2'
+    const sessionId = await newSession('/project', null, 'grok', 'chat-s')
+    const other = await newSession('/project', null, 'grok', 'chat-other')
+    const [shared] = fake.procs
+
+    // The first secret: the chat leaves the shared process, which keeps running.
+    fake.secrets.p1 = { STRIPE_KEY: 'sk_1' }
+    for (const listener of fake.secretListeners) listener('p1')
+    await vi.waitFor(() => expect(sessionNeedsReload(sessionId)).toBe(true))
+    expect(sessionNeedsReload(other)).toBe(false)
+    await loadSession(sessionId, '/project', null, 'grok', 'chat-s')
+    const first = fake.procs[1]
+    expect(first.env?.STRIPE_KEY).toBe('sk_1')
+    expect(shared.killed).toBe(false)
+
+    // A changed secret: a new process, and the old one, now empty, stops.
+    fake.secrets.p1 = { STRIPE_KEY: 'sk_22' }
+    for (const listener of fake.secretListeners) listener('p1')
+    await vi.waitFor(() => expect(sessionNeedsReload(sessionId)).toBe(true))
+    await loadSession(sessionId, '/project', null, 'grok', 'chat-s')
+    expect(fake.procs[2].env?.STRIPE_KEY).toBe('sk_22')
+    expect(first.killed).toBe(true)
+    await promptSession(sessionId, 'go on')
+    expect(fake.procs[2].calls.some((call) => call.method === 'session/prompt')).toBe(true)
+
+    // Deleted secrets: the idle process that still holds them stops at once.
+    fake.secrets.p1 = {}
+    for (const listener of fake.secretListeners) listener('p1')
+    await vi.waitFor(() => expect(fake.procs[2].killed).toBe(true))
+    expect(shared.killed).toBe(false)
+  })
+
+  it("stops a chat with secrets on its own process, and prompts it without starting the shared one", async () => {
+    fake.projects['chat-s'] = 'p1'
+    fake.secrets.p1 = { STRIPE_KEY: 'sk_live_123' }
+    const sessionId = await newSession('/project', null, 'grok', 'chat-s')
+    expect(fake.procs).toHaveLength(1)
+    await promptSession(sessionId, 'go')
+    expect(fake.procs).toHaveLength(1)
+
+    const key = sessionAgentKey(sessionId)
+    expect(key).toMatch(/^grok#p1:/)
+    expect(key).not.toContain('sk_live_123')
+    await newSession('/project', null, 'grok', 'chat-1')
+    const [own, shared] = fake.procs
+    abortAgent(key)
+    expect(own.killed).toBe(true)
+    expect(shared.killed).toBe(false)
   })
 })

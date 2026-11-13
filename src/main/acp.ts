@@ -1,10 +1,10 @@
-import { type ChildProcessWithoutNullStreams, spawn } from 'child_process'
+import { spawn } from 'child_process'
 import readline from 'readline'
 import { onlyMcpServers, toAcpMcpServers } from '../shared/mcp'
 import { agentToolRule, conductorRule } from '../shared/conductor'
 import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
-import { claudeAcpCommand } from './claudeCli'
+import { type AgentProcess, startClaudeAdapter } from './claudeCli'
 import { grokBinary } from './grokCli'
 import { snapshotBeforeTool } from './checkpoints'
 import {
@@ -59,6 +59,7 @@ import {
   skipNewSession
 } from './store'
 import { readGrokPlan } from './sessions'
+import { envFingerprint, onSecretsChanged, secretEnv, secretScope } from './secrets'
 
 type JsonRpc = {
   jsonrpc?: string
@@ -189,15 +190,23 @@ async function botAllowsTool(sessionId: string, params: PermissionParams): Promi
 }
 
 /**
+ * A project's secrets, for the environment of a Grok process. `id` is the scope and a fingerprint of the
+ * values, so changed secrets get a process of their own.
+ */
+export type ProcEnv = { id: string; vars: Record<string, string> }
+
+/**
  * One ACP agent process. Grok Build and Claude Code each get their own, and so does every bot on
- * Grok Build, because Grok takes a bot's skills (`--plugin-dir`) for the whole process.
+ * Grok Build, because Grok takes a bot's skills (`--plugin-dir`) for the whole process. So does every
+ * project with secrets on Grok Build, which takes environment variables only for the whole process.
  */
 type Conn = {
   agent: ChatAgent
-  /** `grok`, `claude`, or `grok@<bot folder>`. */
+  /** `grok`, `claude`, or `grok@<bot folder>`, each with `#<env id>` when it runs with secrets. */
   key: AgentKey
   pluginDir: string | null
-  proc: ChildProcessWithoutNullStreams | null
+  env: ProcEnv | null
+  proc: AgentProcess | null
   /** Counts spawns, so a timer can tell the process it meant from a respawn. */
   generation: number
   ready: Promise<void> | null
@@ -214,15 +223,17 @@ type Conn = {
 export type AgentKey = string
 
 /** The process a session runs on: Claude Code takes a bot's skills per session, Grok per process. */
-export function agentKey(agent: ChatAgent, pluginDir?: string | null): AgentKey {
-  return agent === 'grok' && pluginDir ? `grok@${pluginDir}` : agent
+export function agentKey(agent: ChatAgent, pluginDir?: string | null, env?: ProcEnv | null): AgentKey {
+  if (agent !== 'grok') return agent
+  return `${pluginDir ? `grok@${pluginDir}` : 'grok'}${env ? `#${env.id}` : ''}`
 }
 
-function makeConn(agent: ChatAgent, pluginDir: string | null = null): Conn {
+function makeConn(agent: ChatAgent, pluginDir: string | null = null, env: ProcEnv | null = null): Conn {
   return {
     agent,
-    key: agentKey(agent, pluginDir),
+    key: agentKey(agent, pluginDir, env),
     pluginDir: agent === 'grok' ? pluginDir : null,
+    env: agent === 'grok' ? env : null,
     proc: null,
     generation: 0,
     ready: null,
@@ -242,11 +253,11 @@ const conns = new Map<AgentKey, Conn>([
 const grokConn = conns.get('grok') as Conn
 const claudeConn = conns.get('claude') as Conn
 
-function connFor(agent: ChatAgent, pluginDir?: string | null): Conn {
-  const key = agentKey(agent, pluginDir)
+function connFor(agent: ChatAgent, pluginDir?: string | null, env?: ProcEnv | null): Conn {
+  const key = agentKey(agent, pluginDir, env)
   let conn = conns.get(key)
   if (!conn) {
-    conn = makeConn(agent, pluginDir)
+    conn = makeConn(agent, pluginDir, env)
     conns.set(key, conn)
   }
   return conn
@@ -270,9 +281,14 @@ function connForSession(sessionId: string): Conn {
   return sessionConns.get(sessionId) ?? connFor(agentForSession(sessionId))
 }
 
+/** The key of the process a session runs on, for stopping that process and no other. */
+export function sessionAgentKey(sessionId: string): AgentKey {
+  return connForSession(sessionId).key
+}
+
 function bindSession(sessionId: string, conn: Conn): void {
   sessionAgents.set(sessionId, conn.agent)
-  if (conn.pluginDir) sessionConns.set(sessionId, conn)
+  if (conn.key !== conn.agent) sessionConns.set(sessionId, conn)
   else sessionConns.delete(sessionId)
 }
 
@@ -281,16 +297,41 @@ function promptRequestId(conn: Conn, id: number | string): string {
   return conn.key === 'grok' ? String(id) : `${conn.key}:${id}`
 }
 
-async function spawnAgent(agent: ChatAgent, pluginDir?: string | null): Promise<ChildProcessWithoutNullStreams> {
-  if (agent === 'claude') {
-    const { command, args, env } = await claudeAcpCommand()
-    return spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env })
-  }
+async function spawnAgent(
+  agent: ChatAgent,
+  pluginDir?: string | null,
+  secrets?: ProcEnv | null
+): Promise<AgentProcess> {
+  if (agent === 'claude') return startClaudeAdapter()
   const plugin = pluginDir ? ['--plugin-dir', pluginDir] : []
   return spawn(grokBinary(), ['agent', '--no-leader', ...plugin, 'stdio'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: process.env
+    env: secrets ? { ...process.env, ...secrets.vars } : process.env
   })
+}
+
+/** A chat's scope and secrets, which its agent's shell gets as environment variables. */
+async function chatSecrets(chatId?: string): Promise<{ scope: string | null; env: Record<string, string> }> {
+  const chat = chatId ? await getChat(chatId).catch(() => null) : null
+  const scope = chat ? secretScope(chat) : null
+  return { scope, env: await secretEnv(scope) }
+}
+
+/** The environment of the Grok process for a chat with secrets. Null on the shared process. */
+export async function grokProcEnv(agent: ChatAgent, chatId?: string): Promise<ProcEnv | null> {
+  if (agent !== 'grok') return null
+  const { scope, env } = await chatSecrets(chatId)
+  return Object.keys(env).length > 0 ? { id: `${scope}:${envFingerprint(env)}`, vars: env } : null
+}
+
+/** Session rules that name the chat's secrets, so the agent uses them and does not ask again. */
+function secretsRule(names: string[]): string | null {
+  if (names.length === 0) return null
+  return [
+    `Secrets the user saved for this project are set as environment variables in your shell: ${names.join(', ')}.`,
+    'Use them by name ($NAME). Never print, echo, log or write their values into files, commits or messages, and do not run commands that print the environment, such as env or printenv.',
+    'When you need another secret, such as an API key, call `request_secret` on the workbench MCP. Never ask for one in the chat.'
+  ].join(' ')
 }
 
 function isClaudeExitPlan(options: PermissionOption[]): boolean {
@@ -904,7 +945,7 @@ function releaseAgentState(conn: Conn, reason: string): void {
   }
 }
 
-function attachProcess(conn: Conn, child: ChildProcessWithoutNullStreams): void {
+function attachProcess(conn: Conn, child: AgentProcess): void {
   conn.proc = child
   conn.generation += 1
   const rl = readline.createInterface({ input: child.stdout })
@@ -966,12 +1007,16 @@ export function onTaskNotification(listener: (sessionId: string, message: unknow
   }
 }
 
-export async function ensureAgent(agent: ChatAgent = 'grok', pluginDir?: string | null): Promise<void> {
-  const conn = connFor(agent, pluginDir)
+export async function ensureAgent(
+  agent: ChatAgent = 'grok',
+  pluginDir?: string | null,
+  env?: ProcEnv | null
+): Promise<void> {
+  const conn = connFor(agent, pluginDir, env)
   if (conn.ready) return conn.ready
-  let child: ChildProcessWithoutNullStreams | null = null
+  let child: AgentProcess | null = null
   const ready = (async () => {
-    child = await spawnAgent(agent, conn.pluginDir)
+    child = await spawnAgent(agent, conn.pluginDir, conn.env)
     attachProcess(conn, child)
     conn.steering = await handshake(
       agent,
@@ -984,7 +1029,7 @@ export async function ensureAgent(agent: ChatAgent = 'grok', pluginDir?: string 
     await ready
   } catch (error) {
     // Only clean up our own attempt. A later start may already own the connection.
-    const mine = child as ChildProcessWithoutNullStreams | null
+    const mine = child as AgentProcess | null
     if (conn.ready === ready) conn.ready = null
     if (mine && conn.proc === mine) {
       conn.proc = null
@@ -1014,9 +1059,10 @@ async function sessionConfig(
   chatId?: string,
   pluginDir?: string | null
 ): Promise<Record<string, unknown>> {
-  const rules = extraRules?.trim()
-    ? `${BROWSER_SESSION_RULE}\n\n${extraRules.trim()}`
-    : BROWSER_SESSION_RULE
+  const secrets = (await chatSecrets(chatId)).env
+  const rules = [BROWSER_SESSION_RULE, extraRules?.trim(), secretsRule(Object.keys(secrets).sort())]
+    .filter(Boolean)
+    .join('\n\n')
   // A bot's chats get only the servers chosen on its page.
   const bot = await chatBot(chatId).catch(() => null)
   const servers = bot ? onlyMcpServers(await getMcpServers(), bot.mcpServers) : await getMcpServers()
@@ -1038,6 +1084,8 @@ async function sessionConfig(
   // A conductor gets its role instead: the Agent rule has a chat do small work itself.
   const session = sessionRules(agent, `${rules}\n\n${role ?? agentToolRule(subagentModel, await getMaxSubagents())}`)
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
+  // Claude Code takes environment variables per session: the project's secrets, for its shell.
+  const env = { ...secrets, ...(subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } : {}) }
   return {
     ...config,
     ...session,
@@ -1046,7 +1094,7 @@ async function sessionConfig(
         ...meta,
         options: {
           settings: await agentHookSettings(chatId),
-          ...(subagentModel ? { env: { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } } : {}),
+          ...(Object.keys(env).length > 0 ? { env } : {}),
           ...plugins,
           // Claude Code also loads servers of its own: ~/.claude.json, .mcp.json, plugins. A bot gets none of those.
           ...(bot ? { strictMcpConfig: true } : {})
@@ -1242,6 +1290,37 @@ export function sessionNeedsReload(sessionId: string): boolean {
   return sessionsToReload.has(sessionId)
 }
 
+/** After a project's secrets changed: its live chats load their session again on their next turn, with the new ones. */
+export async function reloadSecretSessions(scope: string): Promise<void> {
+  const sessions = [...conns.values()].flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
+  await Promise.all(
+    sessions.map(async (sessionId) => {
+      const chatId = sessionChatIds.get(sessionId)
+      const chat = chatId ? await getChat(chatId).catch(() => null) : null
+      if (chat && secretScope(chat) === scope) sessionsToReload.add(sessionId)
+    })
+  )
+  // An idle Grok process that holds the old values stops now; a busy one once its last session left it.
+  const env = await secretEnv(scope)
+  const current = Object.keys(env).length > 0 ? `${scope}:${envFingerprint(env)}` : null
+  for (const conn of conns.values()) {
+    const id = conn.env?.id
+    if (id?.startsWith(`${scope}:`) && id !== current && conn.pending.size === 0) abortAgent(conn.key)
+  }
+}
+
+onSecretsChanged((scope) => void reloadSecretSessions(scope))
+
+/**
+ * A session that moved to another process leaves its old one. A Grok process kept for old secrets is stopped
+ * once its last session left it; the shared ones stay.
+ */
+function leavePreviousConn(sessionId: string, previous: Conn | null, next: Conn): void {
+  if (!previous || previous === next) return
+  previous.liveSessions.delete(sessionId)
+  if (previous.env && previous.liveSessions.size === 0) abortAgent(previous.key)
+}
+
 /** `pluginDir` is a bot's folder: the session loads the bot's own skills from it. */
 export async function newSession(
   cwd: string,
@@ -1250,8 +1329,9 @@ export async function newSession(
   chatId?: string,
   pluginDir?: string | null
 ): Promise<string> {
-  await ensureAgent(agent, pluginDir)
-  const conn = connFor(agent, pluginDir)
+  const env = await grokProcEnv(agent, chatId)
+  await ensureAgent(agent, pluginDir, env)
+  const conn = connFor(agent, pluginDir, env)
   const result = await request<{
     sessionId: string
     modes?: { currentModeId?: string; availableModes?: SessionMode[] }
@@ -1271,9 +1351,12 @@ export async function loadSession(
   chatId?: string,
   pluginDir?: string | null
 ): Promise<void> {
-  await ensureAgent(agent, pluginDir)
-  const conn = connFor(agent, pluginDir)
+  const env = await grokProcEnv(agent, chatId)
+  await ensureAgent(agent, pluginDir, env)
+  const conn = connFor(agent, pluginDir, env)
+  const previous = sessionAgents.has(sessionId) ? connForSession(sessionId) : null
   bindSession(sessionId, conn)
+  leavePreviousConn(sessionId, previous, conn)
   sessionsToReload.delete(sessionId)
   const result = await request<unknown>(
     conn,
@@ -1327,7 +1410,7 @@ export async function grokCommands(sessionId: string | null): Promise<AgentComma
   const known = acpSessionCommands.get(key)
   if (known?.length) return known
   const conn = live ? connForSession(live) : grokConn
-  await ensureAgent('grok', conn.pluginDir)
+  await ensureAgent('grok', conn.pluginDir, conn.env)
   const raw = asRecord(await request<unknown>(conn, '_x.ai/commands/list', live ? { sessionId: live } : {}, 10_000))
   const commands = readCommands(raw.commands as SessionUpdate['update']['availableCommands'])
   acpSessionCommands.set(key, commands)
@@ -1374,7 +1457,7 @@ export async function promptSession(
   images: Array<{ mimeType: string; data: string }> = []
 ): Promise<void> {
   const conn = connForSession(sessionId)
-  await ensureAgent(conn.agent, conn.pluginDir)
+  await ensureAgent(conn.agent, conn.pluginDir, conn.env)
   const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
   if (text.trim()) {
     prompt.push({ type: 'text', text })

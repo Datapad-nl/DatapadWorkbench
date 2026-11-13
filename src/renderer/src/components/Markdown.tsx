@@ -65,6 +65,8 @@ function VisualFrame({ id, title }: Visual): React.JSX.Element {
   }, [])
   return (
     <figure className="my-3">
+      {/* Outside the frame, so a visual can't pass itself off as the app's own UI. */}
+      <div className="mb-1 text-[11.5px] text-muted">Made by the agent</div>
       <iframe
         ref={frame}
         src={`workbench-visual://v/${id}`}

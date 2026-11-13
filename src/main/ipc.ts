@@ -20,6 +20,7 @@ import type {
   VoiceSettings
 } from '../shared/types'
 import { normalizeChatAgent, normalizePermissionMode } from '../shared/types'
+import { isAppSender } from './appUrl'
 import { notifyChat, watchAttention } from './attention'
 import {
   clearActivity,
@@ -155,6 +156,7 @@ import {
   readVoiceModelStatus
 } from './voice'
 import { checkForUpdates, getUpdateState, installUpdate, onUpdateState } from './updater'
+import { deleteSecret, listSecrets } from './secrets'
 import { replySteps } from '../shared/steps'
 import {
   checkoutGit,
@@ -259,7 +261,24 @@ async function sendTurn(
   return { chat, done: notified }
 }
 
+/** Every channel answers only the app's own page, so nothing loaded inside the window can call in. */
+function guardIpc(): void {
+  const handle = ipcMain.handle.bind(ipcMain)
+  ipcMain.handle = (channel, listener) =>
+    handle(channel, (event, ...args) => {
+      if (!isAppSender(event)) throw new Error(`${channel} is only for the app window`)
+      return listener(event, ...args)
+    })
+  const on = ipcMain.on.bind(ipcMain)
+  ipcMain.on = (channel, listener) =>
+    on(channel, (event, ...args) => {
+      if (isAppSender(event)) listener(event, ...args)
+    })
+}
+
 export function registerIpc(): void {
+  // Before any channel is registered, here or in contextMenu.ts.
+  guardIpc()
   // A merge mid-turn would take files the agent is still writing.
   setMergeGuard((_projectId, chatId) =>
     isStreaming(chatId) ? 'This chat is still working. Merge once it finishes.' : null
@@ -747,6 +766,13 @@ export function registerIpc(): void {
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send('update:state', payload)
     }
+  })
+
+  // Only the names reach the window; values stay in the main process.
+  ipcMain.handle('secrets:list', async () => listSecrets())
+  ipcMain.handle('secrets:delete', async (_event, input: { scope: string; name: string }) => {
+    await deleteSecret(input.scope, input.name)
+    return listSecrets()
   })
 
   ipcMain.handle('theme:state', async () => {

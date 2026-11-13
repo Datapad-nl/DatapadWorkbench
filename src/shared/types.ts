@@ -145,7 +145,12 @@ export type UserQuestion = {
   header: string | null
   multiSelect: boolean
   options: UserQuestionOption[]
+  /** Asks for a secret: a password field in place of the options. The answer goes to the vault, not the agent. */
+  secret?: { name: string }
 }
+
+/** The names of the secrets kept for a project id or `bot:<id>`. */
+export type SecretScope = { scope: string; names: string[] }
 
 export type UserQuestionRequest = {
   requestId: string

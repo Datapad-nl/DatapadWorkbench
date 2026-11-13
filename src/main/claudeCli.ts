@@ -1,8 +1,11 @@
 import { execFile } from 'child_process'
+import { app, utilityProcess } from 'electron'
+import { EventEmitter } from 'events'
 import { existsSync } from 'fs'
 import { createRequire } from 'module'
 import { homedir } from 'os'
 import { join, sep } from 'path'
+import { type Readable, Writable } from 'stream'
 import type { ClaudeCliInfo } from '../shared/types'
 
 const TTL_MS = 60_000
@@ -34,27 +37,106 @@ export function claudeBinary(): string {
   return 'claude'
 }
 
-/** The ACP adapter that runs Claude Code on the user's own `claude auth login`. */
-export async function claudeAcpCommand(): Promise<{
-  command: string
-  args: string[]
-  env: NodeJS.ProcessEnv
-}> {
-  const resolved = createRequire(__filename).resolve('@agentclientprotocol/claude-agent-acp/dist/index.js')
+/** A running agent: a child process, or the Claude adapter in a utility process made to look like one. */
+export type AgentProcess = {
+  stdin: Writable
+  stdout: Readable
+  stderr: Readable
+  readonly killed: boolean
+  kill(): boolean
+  on(event: 'exit', listener: () => void): unknown
+  on(event: 'error', listener: (error: Error) => void): unknown
+}
+
+/** A file the app ships unpacked next to the asar archive, because another process loads it by path. */
+function unpackedPath(path: string): string {
+  const unpacked = path.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`)
+  return unpacked !== path && existsSync(unpacked) ? unpacked : path
+}
+
+function hostScriptPath(): string {
+  for (const candidate of [join(app.getAppPath(), 'src/main/claude-acp-host.mjs'), join(__dirname, 'claude-acp-host.mjs')]) {
+    const path = unpackedPath(candidate)
+    if (existsSync(path)) return path
+  }
+  throw new Error('The Claude Code host script is missing')
+}
+
+/**
+ * Starts the ACP adapter that runs Claude Code on the user's own `claude auth login`. It runs in a utility
+ * process rather than as Electron run as Node, which the app's fuses turn off.
+ */
+export async function startClaudeAdapter(): Promise<AgentProcess> {
   // In a packaged app the adapter and the Claude Code binary it launches must
   // be real files, so they ship unpacked next to the asar archive.
-  const unpacked = resolved.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`)
-  const entry = unpacked !== resolved && existsSync(unpacked) ? unpacked : resolved
-  const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+  const entry = unpackedPath(createRequire(__filename).resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'))
+  const env: NodeJS.ProcessEnv = { ...process.env }
   // Started from inside a Claude Code session (a terminal agent, say), the app
   // inherits that session's markers. Drop them so chats are their own sessions.
   for (const key of INHERITED_SESSION_ENV) delete env[key]
+  // Inherited from a shell, it would start the utility process's Electron as plain Node.
+  delete env.ELECTRON_RUN_AS_NODE
   // An API key in the environment wins over the claude.ai login and bills the
   // API account. With a subscription signed in, keep the run on the subscription.
   // Ask rather than trust the cache: the first chat after launch starts before anything filled it.
   const info = await getClaudeCliInfo().catch(() => null)
   if (info?.signedIn) delete env.ANTHROPIC_API_KEY
-  return { command: process.execPath, args: [entry], env }
+  return forkAgent(hostScriptPath(), entry, env)
+}
+
+/** A utility process behind the shape of a child process: its stdin goes over the parent port. */
+function forkAgent(script: string, entry: string, env: NodeJS.ProcessEnv): AgentProcess {
+  const child = utilityProcess.fork(script, [entry], { stdio: 'pipe', env, serviceName: 'Claude Code' })
+  const events = new EventEmitter()
+  let killed = false
+  let spawned = false
+  let exited = false
+  // Messages wait for the process to start.
+  const queue: Array<string | null> = []
+  const post = (data: string | null): void => {
+    if (exited || killed) return
+    if (spawned) child.postMessage(data)
+    else queue.push(data)
+  }
+  child.once('spawn', () => {
+    spawned = true
+    // A kill before the process had started could not reach it. It does now.
+    if (killed) {
+      child.kill()
+      return
+    }
+    for (const data of queue.splice(0)) child.postMessage(data)
+  })
+  child.once('exit', () => {
+    exited = true
+    events.emit('exit')
+  })
+  // A fatal error in the adapter, such as running out of memory. Unheard, it would throw in the app.
+  child.on('error', (type: string, location: string) => {
+    events.emit('error', new Error(`${type} at ${location}`))
+  })
+  const stdin = new Writable({
+    write(chunk: Buffer | string, _encoding, done) {
+      post(chunk.toString())
+      done()
+    },
+    final(done) {
+      post(null)
+      done()
+    }
+  })
+  Object.defineProperty(events, 'killed', { get: () => killed })
+  return Object.assign(events, {
+    stdin,
+    stdout: child.stdout as Readable,
+    stderr: child.stderr as Readable,
+    kill() {
+      if (exited || killed) return false
+      killed = true
+      queue.length = 0
+      return spawned ? child.kill() : true
+    }
+  }) as unknown as AgentProcess
 }
 
 /** What the last probe found, however old. Null until one has finished. */

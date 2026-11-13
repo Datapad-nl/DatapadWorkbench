@@ -1,12 +1,20 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const stub = vi.hoisted(() => ({ dir: '' }))
-vi.mock('electron', () => ({ app: { getPath: () => stub.dir } }))
+const stub = vi.hoisted(() => ({ dir: '', keychain: true }))
+// A stand-in keychain: reversible, but never the plain text on disk.
+vi.mock('electron', () => ({
+  app: { getPath: () => stub.dir },
+  safeStorage: {
+    isEncryptionAvailable: () => stub.keychain,
+    encryptString: (value: string) => Buffer.from(`sealed:${Buffer.from(value).toString('hex')}`),
+    decryptString: (sealed: Buffer) => Buffer.from(sealed.toString().slice('sealed:'.length), 'hex').toString()
+  }
+}))
 
-import { createChat, deleteChat, listChats, mutateChat } from './store'
+import { createChat, deleteChat, ensureStore, getApiKey, listChats, mutateChat, setThemeId } from './store'
 
 let chats = ''
 
@@ -32,6 +40,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   rmSync(stub.dir, { recursive: true, force: true })
+  stub.keychain = true
+  vi.unstubAllEnvs()
 })
 
 describe('listChats', () => {
@@ -88,5 +98,34 @@ describe('bot chats', () => {
     expect((await listChats()).find((item) => item.id === chat.id)).toMatchObject({ projectId: '', botId: 'b1' })
     await expect(createChat('', { botId: 'gone' })).rejects.toThrow('Bot not found')
     await expect(createChat('nowhere')).rejects.toThrow('Project not found')
+  })
+})
+
+describe('API key at rest', () => {
+  const settings = (): string => join(stub.dir, 'workbench', 'settings.json')
+  const plain = (): void =>
+    writeFileSync(settings(), JSON.stringify({ apiKey: 'xai-test-1234', model: 'grok', effort: '', themeId: 't' }))
+
+  beforeEach(() => vi.stubEnv('XAI_API_KEY', ''))
+
+  it('encrypts a plain text key on load and still gives it back', async () => {
+    plain()
+    await ensureStore()
+    const disk = readFileSync(settings(), 'utf8')
+    expect(disk).not.toContain('xai-test-1234')
+    expect(JSON.parse(disk)).toMatchObject({ apiKey: '', apiKeySealed: expect.any(String) })
+    expect(await getApiKey()).toBe('xai-test-1234')
+    // Other settings writes keep it sealed.
+    await setThemeId('other')
+    expect(readFileSync(settings(), 'utf8')).not.toContain('xai-test-1234')
+    expect(await getApiKey()).toBe('xai-test-1234')
+  })
+
+  it('leaves the key as it was without a keychain', async () => {
+    stub.keychain = false
+    plain()
+    await ensureStore()
+    expect(JSON.parse(readFileSync(settings(), 'utf8'))).toMatchObject({ apiKey: 'xai-test-1234' })
+    expect(await getApiKey()).toBe('xai-test-1234')
   })
 })

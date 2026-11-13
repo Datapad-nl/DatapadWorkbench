@@ -6,7 +6,8 @@ directories:
   output: dist
 files:
   - out/**
-  - src/main/browser-mcp.mjs
+  # Run by the Claude adapter's utility process. It stays in the asar, where the integrity check covers it.
+  - src/main/claude-acp-host.mjs
   - resources/icon.png
   - resources/trayTemplate*.png
   - package.json
@@ -15,13 +16,24 @@ files:
 # An unpacked module cannot import from inside the asar, so the Claude adapter's
 # dependencies (zod, diff) are unpacked with it.
 asarUnpack:
-  - src/main/browser-mcp.mjs
   - resources/icon.png
   - resources/trayTemplate*.png
   - node_modules/@agentclientprotocol/**
   - node_modules/@anthropic-ai/**
   - node_modules/zod/**
   - node_modules/diff/**
+# Electron's fuses, set in the binary before signing. Off: running the app as plain Node
+# (ELECTRON_RUN_AS_NODE), NODE_OPTIONS and --inspect, which would let any program on this Mac run
+# its own code as Datapad Workbench. On: cookie encryption, and checks that the app's code is the
+# signed app.asar. The app loads its page from file://, so file: keeps its extra privileges.
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableCookieEncryption: true
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: true
 artifactName: Datapad-Workbench-${version}-${os}-${arch}.${ext}
 publish:
   provider: github
