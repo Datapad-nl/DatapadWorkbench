@@ -57,6 +57,29 @@ export type RegistryServer = {
 
 export type RegistrySearchResult = { servers: RegistryServer[]; nextCursor: string | null }
 
+/** The words of a search, split on spaces and the separators registry names use: "Meta Ads", "meta-ads" → meta, ads. */
+export function searchWords(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/[\s\-_./]+/).filter(Boolean))]
+}
+
+/**
+ * The servers whose name, title or description contain every word, those with every word in
+ * their name or title first. Each server once, by name.
+ */
+export function rankSearchResults(servers: RegistryServer[], words: string[]): RegistryServer[] {
+  const seen = new Set<string>()
+  const ranked: Array<{ server: RegistryServer; inName: boolean }> = []
+  for (const server of servers) {
+    if (seen.has(server.name)) continue
+    seen.add(server.name)
+    const name = `${server.name} ${server.title ?? ''}`.toLowerCase()
+    const text = `${name} ${server.description ?? ''}`.toLowerCase()
+    if (!words.every((word) => text.includes(word))) continue
+    ranked.push({ server, inName: words.every((word) => name.includes(word)) })
+  }
+  return ranked.sort((a, b) => Number(b.inName) - Number(a.inName)).map((entry) => entry.server)
+}
+
 /** One way to run a registry server: a hosted endpoint, or a package started on this machine. */
 export type InstallOption =
   | { kind: 'remote'; label: string; remote: RegistryRemote }

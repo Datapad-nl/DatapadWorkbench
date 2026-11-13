@@ -322,6 +322,7 @@ function ServerIcon({ server }: { server: RegistryServer }): React.JSX.Element {
       <img
         src={src}
         alt=""
+        loading="lazy"
         onError={() => setBroken(true)}
         className="h-8 w-8 shrink-0 rounded-md bg-raised object-contain p-1"
       />
@@ -354,7 +355,7 @@ function BrowseView({
         autoFocus
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search by name: github, postgres, notion…"
+        placeholder="Search: github, postgres, meta ads…"
         className={`${INPUT} mt-3`}
       />
       <ul data-testid="mcp-results" className="mt-3 max-h-[50vh] min-h-[120px] space-y-1 overflow-y-auto">
@@ -394,7 +395,7 @@ function BrowseView({
         })}
         {!loading && !error && !results.length ? (
           <li className="px-2 py-6 text-center text-[12px] text-muted">
-            {query.trim() ? `No server names contain "${query.trim()}".` : 'No servers found.'}
+            {query.trim() ? `No servers match "${query.trim()}".` : 'No servers found.'}
           </li>
         ) : null}
       </ul>

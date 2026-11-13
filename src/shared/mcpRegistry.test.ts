@@ -5,6 +5,8 @@ import {
   installFields,
   installOptions,
   missingFields,
+  rankSearchResults,
+  searchWords,
   suggestServerName,
   type RegistryServer
 } from './mcpRegistry'
@@ -106,5 +108,29 @@ describe('suggestServerName', () => {
     expect(suggestServerName({ name: 'com.notion/mcp' }, [])).toBe('notion')
     expect(suggestServerName({ name: 'io.github.example/github-mcp' }, ['github'])).toBe('github-2')
     expect(suggestServerName({ name: 'io.github.someone/mcp-server-browser' }, [])).toBe('browser-2')
+  })
+})
+
+describe('registry search', () => {
+  it('splits a query into words on spaces and name separators', () => {
+    expect(searchWords('  Meta Ads ')).toEqual(['meta', 'ads'])
+    expect(searchWords('meta-ads')).toEqual(['meta', 'ads'])
+    expect(searchWords('io.github/meta_ads meta')).toEqual(['io', 'github', 'meta', 'ads'])
+    expect(searchWords('   ')).toEqual([])
+  })
+
+  it('keeps servers with every word in name, title or description, name and title matches first', () => {
+    const servers: RegistryServer[] = [
+      { name: 'ai.adsap/adsap', description: 'Launch and manage Meta and Google Ads' },
+      { name: 'co.pipeboard/meta-ads-mcp' },
+      { name: 'io.github.cesteral/meta-mcp', title: 'Meta Ads MCP Server' },
+      { name: 'ai.metabind/docs', description: 'Search the Metabind documentation' },
+      { name: 'co.pipeboard/meta-ads-mcp' }
+    ]
+    expect(rankSearchResults(servers, ['meta', 'ads']).map((server) => server.name)).toEqual([
+      'co.pipeboard/meta-ads-mcp',
+      'io.github.cesteral/meta-mcp',
+      'ai.adsap/adsap'
+    ])
   })
 })
