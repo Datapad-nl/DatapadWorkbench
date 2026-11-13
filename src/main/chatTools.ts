@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  Bot,
   Chat,
   ChatAgent,
   ChatEvent,
@@ -10,7 +11,7 @@ import { nextCronRun } from "../shared/cron";
 import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
-import { getBot } from "./bots";
+import { addBotUnread, clearBotUnread, getBot, setBotChat } from "./bots";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { id, now } from "./ids";
 import {
@@ -41,6 +42,7 @@ let sendTurn: SendTurn | null = null;
 let emit: ((event: ChatEvent) => void) | null = null;
 let streaming: (chatId: string) => boolean = () => false;
 let builtinAgents: (chatId: string) => BuiltinAgent[] = () => [];
+let notifyBot: (bot: Bot, chatId: string, text: string) => void = () => {};
 
 // The streaming check is handed over too: importing grok.ts here would close an import cycle
 // through acp.ts and browserAgent.ts, and grok.ts would then run before acp.ts is ready.
@@ -50,11 +52,14 @@ export function registerChatTools(input: {
   emit: (event: ChatEvent) => void;
   isStreaming: (chatId: string) => boolean;
   builtinAgents?: (chatId: string) => BuiltinAgent[];
+  /** The system notification for a new message in a bot's chat. */
+  notifyBot?: (bot: Bot, chatId: string, text: string) => void;
 }): void {
   sendTurn = input.send;
   emit = input.emit;
   streaming = input.isStreaming;
   if (input.builtinAgents) builtinAgents = input.builtinAgents;
+  if (input.notifyBot) notifyBot = input.notifyBot;
 }
 
 /** Whether a chat's turn is running. */
@@ -217,6 +222,50 @@ async function postBotAnswer(
     });
   });
   emitChat(chat);
+}
+
+// Opening the window and a run's answer can ask at the same time; they get the same chat.
+const makingBotChats = new Map<string, Promise<Chat>>();
+
+/** The bot's own chat, for the Chat tab of its window. Made the first time, and again if it was deleted. */
+export function botChat(botId: string): Promise<Chat> {
+  let pending = makingBotChats.get(botId);
+  if (!pending) {
+    pending = findOrMakeBotChat(botId).finally(() => makingBotChats.delete(botId));
+    makingBotChats.set(botId, pending);
+  }
+  return pending;
+}
+
+async function findOrMakeBotChat(botId: string): Promise<Chat> {
+  const bot = await getBot(botId);
+  const existing = bot.chatId ? await getChat(bot.chatId).catch(() => null) : null;
+  if (existing) return existing;
+  const chat = await createChat("", { botId: bot.id, agent: bot.agent, title: bot.name });
+  const saved = await setBotChat(bot.id, chat.id);
+  emitChat(chat);
+  emit?.({ type: "bot", bot: saved });
+  return chat;
+}
+
+/** A new message in the bot's own chat: one more unread, and the window and the system are told. */
+export async function botMessage(
+  botId: string,
+  chatId: string,
+  text: string,
+  source?: string,
+): Promise<void> {
+  const bot = await addBotUnread(botId);
+  emit?.({ type: "bot", bot });
+  emit?.({ type: "bot-message", botId, chatId, text, ...(source ? { source } : {}) });
+  notifyBot(bot, chatId, text);
+}
+
+/** The user has seen the bot's chat. */
+export async function markBotRead(botId: string): Promise<Bot> {
+  const bot = await clearBotUnread(botId);
+  emit?.({ type: "bot", bot });
+  return bot;
 }
 
 export async function listProjectChats(from: unknown): Promise<unknown> {
@@ -680,6 +729,32 @@ export async function cancelProjectSchedule(input: {
 let scheduler: NodeJS.Timeout | null = null;
 let checking = false;
 
+/** Scheduled runs of a bot whose answer goes to the bot's chat once they finish. */
+const botRuns = new Set<string>();
+
+/** Whether a scheduled run of a bot is running in this chat. Its answer is told about in the bot's chat. */
+export function isBotRun(chatId: string): boolean {
+  return botRuns.has(chatId);
+}
+
+/** The chat is being deleted, so its run posts nothing. Otherwise the bot's chat could come back after it went. */
+export function forgetBotRun(chatId: string): void {
+  botRuns.delete(chatId);
+}
+
+/** Posts a scheduled run's answer in the bot's own chat, as a message from the bot. */
+async function postRunAnswer(
+  botId: string,
+  run: Pick<Chat, "id" | "title">,
+  content: string,
+): Promise<void> {
+  if (!botRuns.delete(run.id)) return;
+  const bot = await getBot(botId);
+  const chat = await botChat(bot.id);
+  await postBotAnswer({ botId: bot.id, fromChatId: chat.id }, bot.name, run.id, content);
+  await botMessage(bot.id, chat.id, content, run.title.replace(/^Scheduled: /, ""));
+}
+
 /** Send each due schedule's prompt to its chat. A run missed while the app was closed runs once at start. */
 async function runDueSchedules(): Promise<void> {
   if (checking || !sendTurn) return;
@@ -703,11 +778,42 @@ async function runDueSchedules(): Promise<void> {
       } catch {
         next = null;
       }
+      // A bot's schedule outside a project: its answer goes to the bot's chat, never the bot's chat itself.
+      const bot =
+        summary.botId && !summary.projectId
+          ? await getBot(summary.botId).catch(() => null)
+          : null;
+      const botId = bot && bot.chatId !== summary.id ? bot.id : null;
+      if (botId) botRuns.add(summary.id);
       try {
         const run = await send(summary.id, schedule.prompt);
         // Kept in the chat: the run's live error is gone once the window misses it.
         run.done.catch((error: unknown) => recordFailedRun(summary.id, error));
+        if (botId) {
+          run.done
+            .then(
+              (done) => {
+                if (!done) return void botRuns.delete(summary.id);
+                const reply = done.messages.at(-1);
+                return postRunAnswer(
+                  botId,
+                  done,
+                  reply?.role === "assistant"
+                    ? plainReply(reply.content) || "(empty answer)"
+                    : "(no answer)",
+                );
+              },
+              (error: unknown) =>
+                postRunAnswer(
+                  botId,
+                  summary,
+                  `The scheduled run failed: ${error instanceof Error ? error.message : String(error)}`,
+                ),
+            )
+            .catch(() => {});
+        }
       } catch {
+        botRuns.delete(summary.id);
         // Not started, so the run is still due: the next check tries again.
         continue;
       }

@@ -9,7 +9,20 @@ vi.mock('electron', () => ({
   shell: { trashItem: () => Promise.reject(new Error('no Trash in tests')) }
 }))
 
-import { botAvatarUrl, clearBotAvatar, createBot, isBotFolder, listBots, removeBot, setBotAvatar, updateBot } from './bots'
+import {
+  addBotUnread,
+  botAvatarUrl,
+  clearBotAvatar,
+  clearBotUnread,
+  createBot,
+  getBot,
+  isBotFolder,
+  listBots,
+  removeBot,
+  setBotAvatar,
+  setBotChat,
+  updateBot
+} from './bots'
 
 let images = ''
 
@@ -78,7 +91,19 @@ describe('bots', () => {
         bots: [{ id: 'old', name: 'Old', agent: 'grok', model: '', instructions: '', allowedTools: [], avatar: null }]
       })
     )
-    expect((await listBots())[0].effort).toBe('')
+    expect((await listBots())[0]).toMatchObject({ effort: '', chatId: null, unread: 0 })
+  })
+
+  it("keeps the bot's chat and its unread count apart from the settings", async () => {
+    const bot = await createBot('Nova')
+    await setBotChat(bot.id, 'nova-chat')
+    await addBotUnread(bot.id)
+    const counted = await addBotUnread(bot.id)
+    expect(counted).toMatchObject({ chatId: 'nova-chat', unread: 2, updatedAt: bot.updatedAt })
+    expect(await updateBot({ id: bot.id, instructions: 'Brief me.' })).toMatchObject({ chatId: 'nova-chat', unread: 2 })
+    expect((await clearBotUnread(bot.id)).unread).toBe(0)
+    expect(await getBot(bot.id)).toMatchObject({ chatId: 'nova-chat', unread: 0 })
+    await expect(addBotUnread('gone')).rejects.toThrow('Bot not found')
   })
 
   it('copies the avatar into the bot folder and replaces it', async () => {

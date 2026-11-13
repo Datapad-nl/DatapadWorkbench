@@ -25,6 +25,10 @@ export type Bot = {
   avatar: string | null
   /** The bot's folder: its avatar, and its skills as a plugin. */
   folder: string
+  /** The bot's own chat, shown in the Chat tab of its window. Made the first time the window opens. */
+  chatId?: string | null
+  /** Messages in the bot's chat that came in since the user last had its Chat tab open. */
+  unread?: number
   createdAt: string
   updatedAt: string
 }
@@ -499,8 +503,15 @@ export type ChatEvent =
   | { type: 'aside-done'; chatId: string; chat: Chat }
   /** The user clicked a notification for this chat. */
   | { type: 'open'; chatId: string }
-  /** The user picked this bot in the menu bar menu. */
+  /** The user picked this bot in the menu bar menu, or clicked a notification of its chat. */
   | { type: 'open-bot'; botId: string }
+  /** A bot changed in the main process, for example its unread count. */
+  | { type: 'bot'; bot: Bot }
+  /**
+   * A new message landed in a bot's own chat: its reply, or a scheduled run's answer posted there.
+   * `source` names the run it came from, if any. The window shows a toast unless the bot's Chat tab is open.
+   */
+  | { type: 'bot-message'; botId: string; chatId: string; text: string; source?: string }
   /** The slash commands the chat's agent offers, as it announced them. */
   | { type: 'commands'; chatId: string; commands: AgentCommand[] }
   /** How full the context window of the chat's session is. */

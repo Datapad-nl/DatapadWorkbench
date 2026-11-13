@@ -1,6 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { resolveProjectColor } from '../../shared/projectColor'
-import type { Bot, UpdateBotInput } from '../../shared/types'
+import type { Bot, Chat, UpdateBotInput } from '../../shared/types'
 
 type BotsContextValue = {
   bots: Bot[]
@@ -9,6 +9,8 @@ type BotsContextValue = {
   deleteBot: (botId: string) => Promise<void>
   pickAvatar: (botId: string) => Promise<void>
   clearAvatar: (botId: string) => Promise<void>
+  /** The user has seen the bot's chat. */
+  markBotRead: (botId: string) => Promise<void>
 }
 
 const BotsContext = createContext<BotsContextValue | null>(null)
@@ -28,6 +30,15 @@ export function BotsProvider({ children }: { children: ReactNode }): React.JSX.E
       return next.sort((a, b) => a.name.localeCompare(b.name))
     })
   }, [])
+
+  // Main tells us when a bot changes, such as its count of new messages.
+  useEffect(
+    () =>
+      window.workbench.onChatEvent((event) => {
+        if (event.type === 'bot') put(event.bot)
+      }),
+    [put]
+  )
 
   const createBot = useCallback(
     async (name: string) => {
@@ -67,9 +78,16 @@ export function BotsProvider({ children }: { children: ReactNode }): React.JSX.E
     [put]
   )
 
+  const markBotRead = useCallback(
+    async (botId: string) => {
+      put(await window.workbench.markBotRead(botId))
+    },
+    [put]
+  )
+
   const value = useMemo(
-    () => ({ bots, createBot, updateBot, deleteBot, pickAvatar, clearAvatar }),
-    [bots, createBot, updateBot, deleteBot, pickAvatar, clearAvatar]
+    () => ({ bots, createBot, updateBot, deleteBot, pickAvatar, clearAvatar, markBotRead }),
+    [bots, createBot, updateBot, deleteBot, pickAvatar, clearAvatar, markBotRead]
   )
   return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>
 }
@@ -78,6 +96,47 @@ export function useBots(): BotsContextValue {
   const value = useContext(BotsContext)
   if (!value) throw new Error('useBots needs a BotsProvider')
   return value
+}
+
+/**
+ * While a bot's Chat tab is on screen its new messages count as read: when the tab opens, when one comes in,
+ * and when the window gets focus back. Returns the first message that was new when the tab opened, for the New line.
+ */
+export function useBotChatRead(bot: Bot | null, chat: Chat | undefined): string | null {
+  const { markBotRead } = useBots()
+  const botId = bot?.id ?? null
+  const chatId = chat?.id ?? null
+  const unread = useRef(0)
+  unread.current = bot?.unread ?? 0
+  const messages = useRef(chat?.messages)
+  messages.current = chat?.messages
+  const [newFrom, setNewFrom] = useState<{ chatId: string; messageId: string } | null>(null)
+
+  useEffect(() => {
+    if (!botId || !chatId) return
+    const count = unread.current
+    const replies = (messages.current ?? []).filter((message) => message.role === 'assistant')
+    const first = count > 0 ? replies[Math.max(0, replies.length - count)] : undefined
+    setNewFrom(first ? { chatId, messageId: first.id } : null)
+
+    function markRead(): void {
+      if (botId && document.hasFocus()) void markBotRead(botId).catch(() => undefined)
+    }
+    function markIfNew(): void {
+      if (unread.current > 0) markRead()
+    }
+    markIfNew()
+    window.addEventListener('focus', markIfNew)
+    const off = window.workbench.onChatEvent((event) => {
+      if (event.type === 'bot-message' && event.botId === botId) markRead()
+    })
+    return () => {
+      window.removeEventListener('focus', markIfNew)
+      off()
+    }
+  }, [botId, chatId, markBotRead])
+
+  return newFrom?.chatId === chatId ? newFrom.messageId : null
 }
 
 /** Avatar data URLs by bot id and the bot's updatedAt, so a new image is fetched once. */

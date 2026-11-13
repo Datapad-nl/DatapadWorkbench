@@ -41,8 +41,8 @@ export function isBotFolder(path: string): boolean {
 }
 
 function withFolder(bot: StoredBot): Bot {
-  // Bots saved before effort was a setting follow the global one.
-  return { ...bot, effort: bot.effort ?? '', folder: botFolder(bot.id) }
+  // Bots saved before effort was a setting follow the global one. Those saved before the bot's chat have none yet.
+  return { ...bot, effort: bot.effort ?? '', chatId: bot.chatId ?? null, unread: bot.unread ?? 0, folder: botFolder(bot.id) }
 }
 
 async function loadBots(): Promise<StoredBot[]> {
@@ -157,6 +157,31 @@ export async function updateBot(input: UpdateBotInput): Promise<Bot> {
     await saveBots(bots)
     return withFolder(next)
   })
+}
+
+/** Saves what the app keeps on a bot besides its settings, so `updatedAt` stays the time of the last edit. */
+function changeBot(botId: string, change: (bot: StoredBot) => StoredBot): Promise<Bot> {
+  return withBotsLock(async () => {
+    const bots = await loadBots()
+    const index = bots.findIndex((item) => item.id === botId)
+    if (index === -1) throw new Error('Bot not found')
+    bots[index] = change(bots[index])
+    await saveBots(bots)
+    return withFolder(bots[index])
+  })
+}
+
+export function setBotChat(botId: string, chatId: string): Promise<Bot> {
+  return changeBot(botId, (bot) => ({ ...bot, chatId }))
+}
+
+/** One more message in the bot's chat that the user has not seen. */
+export function addBotUnread(botId: string): Promise<Bot> {
+  return changeBot(botId, (bot) => ({ ...bot, unread: (bot.unread ?? 0) + 1 }))
+}
+
+export function clearBotUnread(botId: string): Promise<Bot> {
+  return changeBot(botId, (bot) => ({ ...bot, unread: 0 }))
 }
 
 /** Removes the bot from the list and moves its folder, skills included, to the Trash. */

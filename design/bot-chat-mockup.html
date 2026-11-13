@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Bot chat — mockup</title>
+<style>
+  :root {
+    --canvas: #141414; --sidebar: #191919; --surface: #1e1e1e; --raised: #252525; --line: #2c2c2c;
+    --ink: #f2f2f0; --muted: #8e8e86; --accent: #c4a35a; --accent-ink: #141414; --danger: #c45c4a; --ok: #7fbf8e;
+    --faint: color-mix(in srgb, var(--muted) 62%, var(--canvas));
+    --ink-2: color-mix(in srgb, var(--ink) 80%, var(--canvas));
+    --line-strong: color-mix(in srgb, var(--line) 70%, var(--ink) 8%);
+    --accent-line: color-mix(in srgb, var(--accent) 35%, transparent);
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0c0c0c; color: var(--ink); font: 13px/1.45 "SF Pro Text", system-ui, sans-serif; padding: 18px; }
+  h2 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 0 0 8px; }
+  h2 b { color: var(--ink); }
+  .frame { display: flex; height: 560px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 26px; position: relative; }
+  .frame.short { height: 320px; }
+
+  .sidebar { width: 200px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--line); padding: 0 8px; }
+  .brand { height: 44px; display: flex; align-items: center; padding-left: 6px; color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; color: var(--ink-2); }
+  .row.active { background: var(--raised); color: var(--ink); }
+  .row.chat { padding-left: 34px; font-size: 12.5px; color: var(--muted); }
+  .row.chat.active { color: var(--ink); }
+  .row .count { margin-left: auto; font-size: 11px; color: var(--faint); }
+  .unread { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+  .label { font-size: 12px; color: var(--faint); padding: 14px 8px 4px; display: flex; justify-content: space-between; }
+  .proj { width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center; font-size: 10px; font-weight: 600; color: #fff; flex-shrink: 0; }
+
+  .av { border-radius: 50%; display: grid; place-items: center; font-weight: 600; color: #141414; flex-shrink: 0; position: relative; }
+  .av.nova { background: linear-gradient(135deg, #c4a35a, #e0c78a); }
+  .av.scout { background: linear-gradient(135deg, #7fa7d9, #a9c6ec); }
+  .av.ledger { background: linear-gradient(135deg, #7fbf8e, #a9dcb4); }
+  .s18 { width: 18px; height: 18px; font-size: 9px; }
+  .s28 { width: 28px; height: 28px; font-size: 12px; }
+  .badge { position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--sidebar); }
+  .badge.sched { background: var(--muted); }
+  .badge.run { background: var(--ok); }
+
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--surface); position: relative; }
+  .titlebar { height: 44px; flex-shrink: 0; border-bottom: 1px solid var(--line); background: var(--canvas); display: flex; align-items: center; gap: 8px; padding: 0 12px; }
+  .crumb { color: var(--muted); }
+  .titlebar b { font-weight: 600; }
+  .tabs { display: flex; gap: 2px; margin-left: 14px; background: var(--surface); border-radius: 7px; padding: 2px; }
+  .tabs span { padding: 3px 12px; border-radius: 5px; font-size: 12px; color: var(--muted); }
+  .tabs span.on { background: var(--raised); color: var(--ink); }
+  .x { margin-left: auto; color: var(--faint); }
+
+  .stream { flex: 1; overflow: hidden; padding: 16px 0 6px; }
+  .col { max-width: 640px; margin: 0 auto; padding: 0 22px; display: flex; flex-direction: column; gap: 14px; }
+  .day { font-size: 11px; color: var(--faint); display: flex; align-items: center; gap: 10px; }
+  .day::before, .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  .msg { display: flex; gap: 10px; }
+  .msg .body { flex: 1; min-width: 0; color: var(--ink-2); }
+  .msg .head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  .msg .head b { color: var(--ink); font-size: 13px; }
+  .source { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; font-size: 11px; color: var(--muted); }
+  .msg ul { margin: 4px 0; padding-left: 18px; }
+  code { font-family: var(--mono); font-size: 11.5px; background: var(--raised); padding: 0 4px; border-radius: 4px; }
+  .newline { font-size: 11px; color: var(--accent); display: flex; align-items: center; gap: 10px; }
+  .newline::after { content: ""; flex: 1; height: 1px; background: var(--accent-line); }
+  .mine { align-self: flex-end; max-width: 72%; background: var(--raised); border-radius: 12px; padding: 7px 12px; }
+
+  .composer { padding: 8px 22px 12px; }
+  .box { max-width: 640px; margin: 0 auto; border: 1px solid var(--line); border-radius: 12px; background: var(--canvas); padding: 8px 12px; }
+  .ph { color: var(--faint); padding: 2px 0 10px; }
+  .bar { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--faint); }
+  .send { margin-left: auto; width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-weight: 700; }
+
+  .settings { flex: 1; overflow: hidden; padding: 20px 0; }
+  .settings .col { gap: 12px; }
+  .field { font-size: 12px; color: var(--muted); }
+  .input { margin-top: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); padding: 7px 10px; color: var(--ink); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .faded { color: var(--faint); font-size: 12px; text-align: center; padding-top: 4px; }
+
+  .toasts { position: absolute; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; width: 330px; }
+  .toast { background: #2a2a2a; border: 1px solid var(--line-strong); border-radius: 12px; padding: 10px 12px; display: flex; gap: 10px; box-shadow: 0 10px 30px #000a; }
+  .toast .tt { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--ink); font-size: 12.5px; }
+  .toast .tt span { font-weight: 400; color: var(--faint); font-size: 11px; }
+  .toast .tt .cl { margin-left: auto; color: var(--faint); font-size: 13px; }
+  .toast .tx { color: var(--ink-2); font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .toast .acts { margin-top: 6px; display: flex; gap: 6px; }
+  .btn { border: 1px solid var(--line); border-radius: 6px; padding: 2px 10px; font-size: 12px; color: var(--ink-2); background: none; font: inherit; }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .timer { height: 2px; background: var(--line); border-radius: 1px; margin-top: 8px; overflow: hidden; }
+  .timer div { width: 62%; height: 100%; background: var(--accent); }
+
+  .n { display: inline-grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; background: #5b8def; color: #fff; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+  .notes { color: var(--ink-2); font-size: 12.5px; max-width: 900px; display: grid; gap: 8px; }
+</style>
+</head>
+<body>
+
+<h2><b>1. Bot window: Chat tab</b> (opens when you click a bot)</h2>
+<div class="frame">
+  <aside class="sidebar">
+    <div class="brand">DATAPAD WORKBENCH</div>
+    <div class="label"><span>Projects</span><span>＋</span></div>
+    <div class="row"><span class="proj" style="background:#6b5bd6">G</span> GrokCode</div>
+    <div class="row"><span class="proj" style="background:#c0613d">S</span> StoreCanvas</div>
+    <div class="label"><span>Bots</span><span>＋</span></div>
+    <div class="row active"><span class="av nova s18">N<span class="badge sched"></span></span> Nova</div>
+    <div class="row"><span class="av scout s18">S<span class="badge run"></span></span> Scout <span class="unread">2</span></div>
+    <div class="row"><span class="av ledger s18">L</span> Ledger</div>
+  </aside>
+  <main class="main">
+    <div class="titlebar">
+      <span class="av nova s18">N</span><span class="crumb">Bots /</span><b>Nova</b>
+      <div class="tabs"><span class="on">Chat</span><span>Settings</span></div>
+      <span class="n" style="margin-left:6px">1</span>
+      <span class="x">✕</span>
+    </div>
+    <div class="stream">
+      <div class="col">
+        <div class="day">Yesterday</div>
+        <div class="mine">Every morning, check my mail and agenda and tell me what needs me.</div>
+        <div class="msg">
+          <div class="av nova s28">N</div>
+          <div class="body"><div class="head"><b>Nova</b> 17:40</div>Done. I'll run at 08:00 on weekdays and post here.</div>
+        </div>
+        <div class="newline">New</div>
+        <div class="msg">
+          <div class="av nova s28">N</div>
+          <div class="body">
+            <div class="head"><b>Nova</b> 08:02 <span class="source">⏱ Morning brief · open run ↗</span> <span class="n">2</span></div>
+            <b style="color:var(--ink)">3 things need you today</b>
+            <ul>
+              <li><b>Acme</b> asked to move Thursday's call to Friday 14:00.</li>
+              <li>The <b>StoreCanvas</b> invoice is 6 days overdue.</li>
+              <li><code>datapad.nl</code> renews in 9 days.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="box">
+        <div class="ph">Message Nova… <span class="n">3</span></div>
+        <div class="bar"><span>＋</span><span>🎙</span><span>↵ send · ⇧↵ new line</span><div class="send">↑</div></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<h2><b>2. Bot window: Settings tab</b> (today's bot page, unchanged)</h2>
+<div class="frame short">
+  <aside class="sidebar">
+    <div class="brand">DATAPAD WORKBENCH</div>
+    <div class="label"><span>Bots</span><span>＋</span></div>
+    <div class="row active"><span class="av nova s18">N</span> Nova</div>
+    <div class="row"><span class="av scout s18">S</span> Scout <span class="unread">2</span></div>
+  </aside>
+  <main class="main">
+    <div class="titlebar">
+      <span class="av nova s18">N</span><span class="crumb">Bots /</span><b>Nova</b>
+      <div class="tabs"><span>Chat</span><span class="on">Settings</span></div>
+      <span class="x">✕</span>
+    </div>
+    <div class="settings">
+      <div class="col">
+        <div class="field">Name<div class="input">Nova</div></div>
+        <div class="grid">
+          <div class="field">Agent<div class="input">Claude Code</div></div>
+          <div class="field">Model<div class="input">Opus</div></div>
+          <div class="field">Effort<div class="input">As in Settings</div></div>
+        </div>
+        <div class="field">Instructions<div class="input" style="height:52px;color:var(--ink-2)">You are my assistant. Message me only when something needs me.</div></div>
+        <div class="faded">… Tools · Skills · Schedules · Folder · Delete bot …</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<h2><b>3. A project window: a message comes in</b></h2>
+<div class="frame">
+  <aside class="sidebar">
+    <div class="brand">DATAPAD WORKBENCH</div>
+    <div class="label"><span>Projects</span><span>＋</span></div>
+    <div class="row"><span class="proj" style="background:#6b5bd6">G</span> GrokCode <span class="count">42</span></div>
+    <div class="row chat active">Fix the tray menu</div>
+    <div class="row chat">App UI design improvement</div>
+    <div class="row"><span class="proj" style="background:#c0613d">S</span> StoreCanvas</div>
+    <div class="label"><span>Bots</span><span>＋</span></div>
+    <div class="row"><span class="av nova s18">N</span> Nova <span class="unread">1</span><span class="n">4</span></div>
+    <div class="row"><span class="av scout s18">S<span class="badge run"></span></span> Scout <span class="unread">2</span></div>
+    <div class="row"><span class="av ledger s18">L</span> Ledger</div>
+  </aside>
+  <main class="main">
+    <div class="titlebar"><span class="crumb">GrokCode /</span><b>Fix the tray menu</b></div>
+    <div class="stream">
+      <div class="col">
+        <div class="mine">The tray menu doesn't update after a bot finishes. Can you look?</div>
+        <div style="color:var(--ink-2)">Found it: <code>refreshTray</code> only runs on chat changes, not when a run ends. I'll hook it into the turn's <code>done</code> as well…</div>
+      </div>
+    </div>
+    <div class="composer"><div class="box"><div class="ph">Message Claude…</div><div class="bar"><span>＋</span><div class="send">↑</div></div></div></div>
+    <div class="toasts">
+      <div class="toast">
+        <div class="av nova s28">N</div>
+        <div style="flex:1;min-width:0">
+          <div class="tt">Nova <span>· Morning brief · now</span><span class="cl">✕</span></div>
+          <div class="tx">3 things need you today: Acme asked to move Thursday's call to Friday 14:00, and the StoreCanvas invoice…</div>
+          <div class="acts"><button class="btn primary">Open</button><span class="n" style="align-self:center">5</span></div>
+          <div class="timer"><div></div></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="notes">
+  <div><span class="n">1</span> Clicking a bot opens its window. <b>Chat</b> is the default tab and <b>Settings</b> holds today's bot page.</div>
+  <div><span class="n">2</span> A scheduled run still runs in its own chat, so this conversation doesn't fill up. Its answer is posted here, and the chip opens the full run.</div>
+  <div><span class="n">3</span> You talk to the bot here. It sees the posted run answers on its next turn, as a project chat sees an @-bot's answer.</div>
+  <div><span class="n">4</span> A bot's row has a badge with the number of new messages. Bots no longer list their chats in the sidebar.</div>
+  <div><span class="n">5</span> A toast appears when a message comes in while you're elsewhere in the app. Open goes to the bot's Chat tab. It hides after a few seconds and stays while hovered. With the window in the background, the system notification is used instead.</div>
+</div>
+</body>
+</html>

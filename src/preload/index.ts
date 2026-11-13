@@ -72,6 +72,10 @@ const api = {
   addBotSkill: (botId: string, source: string, skill: string): Promise<BotSkill> =>
     ipcRenderer.invoke('bot:addSkill', botId, source, skill),
   grokCommandNames: (): Promise<string[]> => ipcRenderer.invoke('bot:grokCommandNames'),
+  /** The bot's own chat for its Chat tab, made the first time. */
+  openBotChat: (botId: string): Promise<Chat> => ipcRenderer.invoke('bot:chat', botId),
+  /** The user has seen the bot's chat: its unread count goes back to 0. */
+  markBotRead: (botId: string): Promise<Bot> => ipcRenderer.invoke('bot:markRead', botId),
   /** `cron` repeats; `at` (an ISO time) runs once. */
   scheduleBot: (input: { botId: string; prompt: string; cron?: string; at?: string }): Promise<Chat> =>
     ipcRenderer.invoke('bot:schedule', input),

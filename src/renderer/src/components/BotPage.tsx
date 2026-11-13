@@ -15,7 +15,7 @@ import { BOT_TOOLS, WORKBENCH_MCP_SERVERS, mcpServerTool, toolsForAgent } from '
 import { BotAvatar, useBots } from '../bots'
 import { BotSchedules } from './BotSchedules'
 import { BotSkills } from './BotSkills'
-import { useWorkspace } from '../workspace'
+import { useWorkspace, type BotTab } from '../workspace'
 import { IconButton } from './icons'
 
 function errorText(error: unknown, fallback: string): string {
@@ -47,9 +47,52 @@ function draftOf(bot: Bot): Draft {
 const field =
   'mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] text-ink outline-none focus:border-accent/60'
 
-/** Shown in place of the chat pane while a bot is open. */
+/** The title bar of a bot's window, with its Chat and Settings tabs. */
+export function BotHeader({ bot }: { bot: Bot }): React.JSX.Element {
+  const { showSidebar, setShowSidebar, openBot, botTab } = useWorkspace()
+  return (
+    <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line bg-canvas px-3">
+      {!showSidebar && (
+        <div className="flex shrink-0 items-center pl-traffic">
+          <IconButton icon="sidebar" label="Show sidebar" onClick={() => setShowSidebar(true)} />
+        </div>
+      )}
+      <BotAvatar bot={bot} size={18} />
+      <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
+        <span className="text-muted">Bots</span>
+        <span className="text-faint">/</span>
+        <span className="truncate font-semibold text-ink">{bot.name}</span>
+      </div>
+      <div className="no-drag ml-3 flex shrink-0 gap-0.5 rounded-[7px] bg-surface p-0.5">
+        {(
+          [
+            ['chat', 'Chat'],
+            ['settings', 'Settings']
+          ] as Array<[BotTab, string]>
+        ).map(([tab, label]) => (
+          <button
+            key={tab}
+            type="button"
+            data-testid={`bot-tab-${tab}`}
+            aria-pressed={botTab === tab}
+            className={`rounded-[5px] px-3 py-[3px] text-[12px] ${
+              botTab === tab ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+            }`}
+            onClick={() => openBot(bot.id, tab)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="flex-1" />
+      <IconButton icon="close" label="Close bot" onClick={() => openBot(null)} />
+    </header>
+  )
+}
+
+/** The Settings tab of a bot's window. */
 export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
-  const { settings, showSidebar, setShowSidebar, openBot, chats, deleteChat } = useWorkspace()
+  const { settings, openBot, chats, deleteChat } = useWorkspace()
   const { updateBot, deleteBot, pickAvatar, clearAvatar } = useBots()
   const [draft, setDraft] = useState<Draft>(() => draftOf(bot))
   const [error, setError] = useState<string | null>(null)
@@ -66,10 +109,12 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
   }, [])
 
   // Another bot opened, or this one changed elsewhere: start from what is saved.
+  // A new count of unread messages changes the bot too, and must not throw away an edit.
+  const savedKey = JSON.stringify(draftOf(bot))
   useEffect(() => {
-    setDraft(draftOf(bot))
+    setDraft(JSON.parse(savedKey) as Draft)
     setError(null)
-  }, [bot])
+  }, [bot.id, savedKey])
 
   const saved = draftOf(bot)
   const dirty = (Object.keys(draft) as Array<keyof Draft>).some((key) => draft[key] !== saved[key])
@@ -157,21 +202,7 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
 
   return (
     <section className="night-pane relative flex min-w-[320px] flex-1 flex-col bg-surface" data-testid="bot-page">
-      <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line bg-canvas px-3">
-        {!showSidebar && (
-          <div className="flex shrink-0 items-center pl-traffic">
-            <IconButton icon="sidebar" label="Show sidebar" onClick={() => setShowSidebar(true)} />
-          </div>
-        )}
-        <BotAvatar bot={bot} size={18} />
-        <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
-          <span className="text-muted">Bots</span>
-          <span className="text-faint">/</span>
-          <span className="truncate font-semibold text-ink">{bot.name}</span>
-        </div>
-        <div className="flex-1" />
-        <IconButton icon="close" label="Close bot" onClick={() => openBot(null)} />
-      </header>
+      <BotHeader bot={bot} />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex max-w-[620px] flex-col gap-5 px-6 py-8">
@@ -396,7 +427,10 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
                 )
                   return
                 void run(async () => {
-                  for (const chat of chats.filter((item) => item.botId === bot.id)) await deleteChat(chat.id)
+                  // Its own chat may not be in the list yet if it was made since the last refresh.
+                  const ids = new Set(chats.filter((item) => item.botId === bot.id).map((item) => item.id))
+                  if (bot.chatId) ids.add(bot.chatId)
+                  for (const id of ids) await deleteChat(id)
                   await deleteBot(bot.id)
                   openBot(null)
                 }, 'Could not delete the bot')

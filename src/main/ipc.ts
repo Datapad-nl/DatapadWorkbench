@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { writeFile } from 'fs/promises'
 import { basename, join } from 'path'
 import type {
+  Bot,
   BrowserBounds,
   Chat,
   ChatAgent,
@@ -112,7 +113,17 @@ import {
 } from './permissions'
 import { findEditClash } from './fileClash'
 import { cancelProjectIntake, maybeStartProjectIntake, scheduleProjectIntake } from './intake'
-import { askBot, registerChatTools, scheduleBotTask, stopSchedule } from './chatTools'
+import {
+  askBot,
+  botChat,
+  botMessage,
+  forgetBotRun,
+  isBotRun,
+  markBotRead,
+  registerChatTools,
+  scheduleBotTask,
+  stopSchedule
+} from './chatTools'
 import { unlinkPr } from './pullRequests'
 import { cancelChatQuestions, onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
 import {
@@ -190,6 +201,11 @@ async function noticeFor(chatId: string, body: string, urgent = false): Promise<
   if (!chat) return
   // A bot's chat may run unattended, so its notice says which bot asks.
   const bot = chat.botId ? await getBot(chat.botId).catch(() => null) : null
+  // The bot's own chat lives in the bot's window, so that is what the notice opens.
+  if (bot && bot.chatId === chat.id) {
+    notifyChat({ id: chat.id, title: bot.name }, body, () => openBotFromTray(bot.id), urgent)
+    return
+  }
   notifyChat(bot ? { id: chat.id, title: `${bot.name}: ${chat.title}` } : chat, body, openFromNotice, urgent)
 }
 
@@ -197,6 +213,24 @@ function emitIndex(event: IndexEvent): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send('index:event', event)
   }
+}
+
+/** A new message in a bot's chat: the notice is from the bot, and clicking it opens the bot's window. */
+function noticeForBot(bot: Bot, chatId: string, text: string): void {
+  const firstLine = text.split('\n').find((line) => line.trim()) ?? text
+  notifyChat({ id: chatId, title: bot.name }, firstLine, () => openBotFromTray(bot.id))
+}
+
+/** A finished turn: a reply in a bot's own chat is a new message there, any other chat gets its notice. */
+async function noticeForReply(chat: Chat): Promise<void> {
+  const reply = chat.messages.at(-1)
+  const answer = reply?.role === 'assistant' ? replySteps(reply.content).at(-1) : undefined
+  const bot = chat.botId ? await getBot(chat.botId).catch(() => null) : null
+  if (bot && bot.chatId === chat.id) {
+    if (answer) await botMessage(bot.id, chat.id, answer)
+    return
+  }
+  notifyChat(chat, answer || 'Finished', openFromNotice)
 }
 
 /** Add the user's message and run the turn; `done` settles when the reply is in. */
@@ -209,16 +243,15 @@ async function sendTurn(
 ): Promise<{ chat: Chat; done: Promise<Chat | null> }> {
   // The turn sends its own done or error event; this only adds the system notification.
   const { chat, done } = await sendUserTurn(chatId, content, attachments, mentions, bots)
+  // A scheduled run of a bot gets no notice of its own: its answer is posted in the bot's chat, which notifies.
   const notified = done.then(
     (saved) => {
-      const reply = saved?.messages.at(-1)
-      const answer = reply?.role === 'assistant' ? replySteps(reply.content).at(-1) : undefined
-      if (saved) notifyChat(saved, answer || 'Finished', openFromNotice)
+      if (saved && !isBotRun(saved.id)) void noticeForReply(saved).catch(() => {})
       return saved
     },
     (error: unknown) => {
       const message = error instanceof Error ? error.message : 'Grok request failed'
-      void noticeFor(chatId, `Stopped: ${message}`)
+      if (!isBotRun(chatId)) void noticeFor(chatId, `Stopped: ${message}`)
       throw error
     }
   )
@@ -235,7 +268,7 @@ export function registerIpc(): void {
     find: (chatId, toolCall) => findEditClash(chatId, toolCall, isStreaming),
     isRunning: isStreaming
   })
-  registerChatTools({ send: sendTurn, emit, isStreaming, builtinAgents: getBuiltinAgents })
+  registerChatTools({ send: sendTurn, emit, isStreaming, builtinAgents: getBuiltinAgents, notifyBot: noticeForBot })
   startActivityBridge()
   startBuiltinAgentsBridge()
   watchAttention()
@@ -405,6 +438,8 @@ export function registerIpc(): void {
   ipcMain.handle('bot:grokCommandNames', async () =>
     (await grokCommands(null).catch(() => [])).map((command) => command.name)
   )
+  ipcMain.handle('bot:chat', (_event, botId: string) => botChat(String(botId)))
+  ipcMain.handle('bot:markRead', (_event, botId: string) => markBotRead(String(botId)))
   ipcMain.handle('bot:schedule', (_event, input: { botId: string; prompt: string; cron?: string; at?: string }) =>
     scheduleBotTask(input ?? {})
   )
@@ -468,6 +503,8 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('chat:delete', async (_event, chatId: string) => {
+    // A scheduled bot run stopped below must not post into the bot's chat, or bring that chat back.
+    forgetBotRun(chatId)
     // Let a running turn save before its files go, so it cannot write the chat back.
     await stopAndWait(chatId)
     // Cancelled, not declined: a declined intake is recorded and never asked again.

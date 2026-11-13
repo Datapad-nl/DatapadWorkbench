@@ -110,11 +110,15 @@ type WorkspaceContextValue = {
   settings: PublicSettings | null
   indexes: Record<string, ProjectIndex>
   openChatIds: string[]
+  /** The chat on screen: the active tab's, or the open bot's own chat while its Chat tab shows. */
   activeChatId: string | null
   activeProjectId: string | null
-  /** The bot whose page shows in place of the chat pane. */
+  /** The bot whose window shows in place of the chat pane. */
   activeBotId: string | null
-  openBot: (botId: string | null) => void
+  /** Which tab of the bot's window shows. */
+  botTab: BotTab
+  /** Opens the bot's window, on its Chat tab unless another is asked for. */
+  openBot: (botId: string | null, tab?: BotTab) => void
   chatsById: Record<string, Chat>
   showNewProject: boolean
   /** `'mcp'` opens Settings on the MCP tab. */
@@ -191,6 +195,8 @@ const emptyStream: StreamState = { status: 'idle', draft: '', error: null, turnI
 
 export type RightPaneId = 'git' | 'browser' | 'activity' | 'knowledge'
 
+export type BotTab = 'chat' | 'settings'
+
 const SESSION_KEY = 'workbench.session'
 const PANE_ORDER_KEY = 'workbench.rightPaneOrder'
 const DEFAULT_PANE_ORDER: RightPaneId[] = ['git', 'browser', 'activity', 'knowledge']
@@ -264,6 +270,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
   activeChatIdRef.current = activeChatId
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [activeBotId, setActiveBotId] = useState<string | null>(null)
+  const [botTab, setBotTab] = useState<BotTab>('chat')
+  /** The open bot's own chat, once main has it. */
+  const [botChat, setBotChat] = useState<{ botId: string; chatId: string } | null>(null)
   const [chatsById, setChatsById] = useState<Record<string, Chat>>({})
   const chatsByIdRef = useRef(chatsById)
   chatsByIdRef.current = chatsById
@@ -607,6 +616,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
           return
         case 'open-bot':
           setActiveBotId(event.botId)
+          setBotTab('chat')
           return
         case 'context':
           setContexts((current) => ({ ...current, [event.chatId]: event.context }))
@@ -786,9 +796,36 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     setActiveBotId(null)
   }, [])
 
-  const openBot = useCallback((botId: string | null) => {
+  const openBot = useCallback((botId: string | null, tab: BotTab = 'chat') => {
     setActiveBotId(botId)
+    setBotTab(tab)
   }, [])
+
+  // The bot's own chat is made the first time its window opens.
+  useEffect(() => {
+    if (!activeBotId) return
+    let live = true
+    window.workbench
+      .openBotChat(activeBotId)
+      .then((chat) => {
+        if (!live) return
+        // Events may have brought a newer copy already.
+        setChatsById((current) => (current[chat.id] ? current : { ...current, [chat.id]: chat }))
+        setBotChat({ botId: activeBotId, chatId: chat.id })
+      })
+      .catch((error: unknown) => console.error('Could not open the bot chat', error))
+    return () => {
+      live = false
+    }
+  }, [activeBotId])
+
+  // The project's tabs stay as they are under the bot's Chat tab; only the chat on screen changes.
+  const shownChatId =
+    activeBotId && botTab === 'chat'
+      ? botChat?.botId === activeBotId
+        ? botChat.chatId
+        : null
+      : activeChatId
 
   const createProject = useCallback(
     async (name: string, path: string | null) => {
@@ -1042,9 +1079,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       settings,
       indexes,
       openChatIds,
-      activeChatId,
+      activeChatId: shownChatId,
       activeProjectId,
       activeBotId,
+      botTab,
       openBot,
       chatsById,
       showNewProject,
@@ -1097,9 +1135,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       settings,
       indexes,
       openChatIds,
-      activeChatId,
+      shownChatId,
       activeProjectId,
       activeBotId,
+      botTab,
       openBot,
       chatsById,
       showNewProject,

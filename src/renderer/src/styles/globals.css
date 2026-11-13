@@ -298,6 +298,17 @@ textarea {
   }
 }
 
+/* A toast's time left. It closes when the bar runs out. */
+.toast-timer {
+  transform-origin: left;
+  animation: toast-timer 8s linear forwards;
+}
+
+@keyframes toast-timer {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
 /* The Constellation theme: what the knowledge graph has beyond its colours. */
 /* The night behind the graph, behind a chat as well. */
 :root[data-theme='constellation'] .night-pane {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PROJECT_COLORS, resolveProjectColor } from '../../../shared/projectColor'
-import type { Bot, ChatSummary, Project } from '../../../shared/types'
+import type { ChatSummary, Project } from '../../../shared/types'
 import { BotAvatar, useBots } from '../bots'
 import { useStreamStatuses, useWorkspace } from '../workspace'
 import wordmark from '../assets/wordmark.png'
@@ -516,8 +516,7 @@ function ChatRow({
   worktreeBranch
 }: {
   chat: ChatSummary
-  /** Missing for a bot's chat. */
-  project?: Project
+  project: Project
   /** Branch of the worktree project this chat runs in, when it is folded under its parent. */
   worktreeBranch?: string | null
 }): React.JSX.Element {
@@ -538,7 +537,7 @@ function ChatRow({
         <button
           className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2 text-left"
           title={chat.title}
-          data-project={project?.id}
+          data-project={project.id}
           onClick={() => void openChat(chat.id)}
         >
           <span className="truncate text-[12.5px]">{chat.title}</span>
@@ -731,7 +730,7 @@ export function Sidebar(): React.JSX.Element | null {
   const chatsByProject = useMemo(() => {
     const grouped: Record<string, typeof chats> = {}
     for (const chat of chats) {
-      // A bot's run in a project lists under the bot.
+      // A bot's chats are reached from the bot's window.
       if (chat.botId) continue
       const owner = ownerOf[chat.projectId] ?? chat.projectId
       grouped[owner] ??= []
@@ -776,19 +775,8 @@ export function Sidebar(): React.JSX.Element | null {
       .filter((item): item is { project: Project; chats: ChatSummary[] } => item !== null)
   }, [projects, ownerOf, chatsByProject, needle, contentHits])
 
-  // Bots filter like projects: by name, or by any of their chats.
-  const shownBots = useMemo(() => {
-    return bots
-      .map((bot) => {
-        const all = chats.filter((chat) => chat.botId === bot.id)
-        if (!needle) return { bot, chats: all }
-        const nameHit = bot.name.toLowerCase().includes(needle)
-        const hits = all.filter((chat) => chat.title.toLowerCase().includes(needle) || contentHits.has(chat.id))
-        if (!nameHit && hits.length === 0) return null
-        return { bot, chats: nameHit && hits.length === 0 ? all : hits }
-      })
-      .filter((item): item is { bot: Bot; chats: ChatSummary[] } => item !== null)
-  }, [bots, chats, needle, contentHits])
+  // Bots filter by name. Their chats are reached from the bot's window, not listed here.
+  const shownBots = needle ? bots.filter((bot) => bot.name.toLowerCase().includes(needle)) : bots
 
   const menuProject = menu ? (projects.find((item) => item.id === menu.projectId) ?? null) : null
 
@@ -1024,10 +1012,9 @@ export function Sidebar(): React.JSX.Element | null {
         {!botsOpen ? null : bots.length === 0 ? (
           <div className="px-2 pb-1 text-[12px] text-faint">No bots yet.</div>
         ) : (
-          shownBots.map(({ bot, chats: botChats }) => {
+          shownBots.map((bot) => {
             const active = activeBotId === bot.id
-            const limit = showAll[bot.id] || needle ? botChats.length : VISIBLE_CHATS
-            const hidden = botChats.length - Math.min(limit, botChats.length)
+            const unread = bot.unread ?? 0
             return (
               <div key={bot.id} className="mb-px">
                 <button
@@ -1042,24 +1029,16 @@ export function Sidebar(): React.JSX.Element | null {
                 >
                   <BotAvatar bot={bot} size={18} />
                   <span className="truncate text-[13px]">{bot.name}</span>
+                  {unread > 0 && (
+                    <span
+                      data-testid="bot-unread"
+                      className="ml-auto flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-accent px-[5px] text-[11px] font-bold text-accent-ink tabular-nums"
+                      title={`${unread} new`}
+                    >
+                      {unread}
+                    </span>
+                  )}
                 </button>
-                {botChats.length > 0 && (
-                  <div className="mb-1 pl-[26px]" data-testid="bot-chats">
-                    <div className="ml-[9px] border-l border-line pl-2">
-                      {botChats.slice(0, limit).map((chat) => (
-                        <ChatRow key={chat.id} chat={chat} />
-                      ))}
-                      {hidden > 0 && (
-                        <button
-                          className="flex h-7 w-full items-center rounded-[7px] px-2 text-left text-[12px] text-faint hover:bg-hover hover:text-muted"
-                          onClick={() => setShowAll((current) => ({ ...current, [bot.id]: true }))}
-                        >
-                          Show {hidden} more
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
               </div>
             )
           })

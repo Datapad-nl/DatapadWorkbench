@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { BotsProvider, useBots } from './bots'
+import { BotsProvider, useBotChatRead, useBots } from './bots'
 import { ActivityApp } from './components/ActivityApp'
-import { BotPage } from './components/BotPage'
+import { BotHeader, BotPage } from './components/BotPage'
+import { BotToasts } from './components/BotToasts'
 import { BrowserPane } from './components/BrowserPane'
 import { ChatPane } from './components/ChatPane'
 import { GitPane } from './components/GitPane'
@@ -47,9 +48,21 @@ function readWidth(key: string, fallback: number, min: number, max: number): num
 }
 
 function Shell(): React.JSX.Element {
-  const { showActivity, showBrowser, showGit, showKnowledge, rightPaneOrder, activeBotId } = useWorkspace()
+  const {
+    showActivity,
+    showBrowser,
+    showGit,
+    showKnowledge,
+    rightPaneOrder,
+    activeBotId,
+    botTab,
+    activeChatId,
+    chatsById
+  } = useWorkspace()
   const { bots } = useBots()
   const activeBot = activeBotId ? (bots.find((bot) => bot.id === activeBotId) ?? null) : null
+  const chatTabBot = activeBot && botTab === 'chat' ? activeBot : null
+  const newMessageId = useBotChatRead(chatTabBot, chatTabBot && activeChatId ? chatsById[activeChatId] : undefined)
   const [activityWidth, setActivityWidth] = useState(() =>
     readWidth(ACTIVITY_WIDTH_KEY, DEFAULT_ACTIVITY_WIDTH, MIN_ACTIVITY_WIDTH, MAX_ACTIVITY_WIDTH)
   )
@@ -238,10 +251,10 @@ function Shell(): React.JSX.Element {
       <div className="flex h-full flex-col overflow-hidden bg-canvas text-ink">
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <Sidebar />
-          {activeBot && <BotPage bot={activeBot} />}
-          {/* Stays mounted under an open bot, so drafts and scroll positions are kept. */}
-          <div className={activeBot ? 'hidden' : 'contents'}>
-            <ChatPane />
+          {activeBot && botTab === 'settings' && <BotPage bot={activeBot} />}
+          {/* Stays mounted under a bot's Settings, so drafts and scroll positions are kept. The Chat tab shows the bot's chat in it. */}
+          <div className={activeBot && botTab === 'settings' ? 'hidden' : 'contents'}>
+            <ChatPane header={chatTabBot ? <BotHeader bot={chatTabBot} /> : undefined} newMessageId={newMessageId} />
           </div>
           {rightPaneOrder.map((id) => panes[id])}
         </div>
@@ -250,6 +263,7 @@ function Shell(): React.JSX.Element {
       <NewProjectModal />
       <SettingsModal />
       <UsageModal />
+      <BotToasts />
     </>
   )
 }

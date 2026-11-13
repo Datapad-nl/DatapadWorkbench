@@ -1,22 +1,42 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Chat } from '../shared/types'
+import type { Bot, Chat, ChatEvent } from '../shared/types'
 
 const stub = vi.hoisted(() => ({
   chats: new Map<string, Chat>(),
   subagentModel: '',
   maxSubagents: 4,
-  handoffs: [] as string[]
+  handoffs: [] as string[],
+  scout: { chatId: null as string | null, unread: 0 }
 }))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
-vi.mock('./bots', () => ({
-  getBot: async (botId: string) => {
+vi.mock('./bots', () => {
+  const getBot = async (botId: string) => {
     if (botId !== 'scout') throw new Error('Bot not found')
-    return { id: 'scout', name: 'Scout', agent: 'claude', model: '', folder: '/bots/scout' }
+    return { id: 'scout', name: 'Scout', agent: 'claude', model: '', folder: '/bots/scout', ...stub.scout }
   }
-}))
+  return {
+    getBot,
+    setBotChat: async (botId: string, chatId: string) => {
+      stub.scout.chatId = chatId
+      return getBot(botId)
+    },
+    addBotUnread: async (botId: string) => {
+      stub.scout.unread += 1
+      return getBot(botId)
+    },
+    clearBotUnread: async (botId: string) => {
+      stub.scout.unread = 0
+      return getBot(botId)
+    }
+  }
+})
 vi.mock('./store', () => ({
   createChat: vi.fn(),
-  getChat: async (chatId: string) => structuredClone(stub.chats.get(chatId)!),
+  getChat: async (chatId: string) => {
+    const chat = stub.chats.get(chatId)
+    if (!chat) throw new Error('Chat not found')
+    return structuredClone(chat)
+  },
   getMaxSubagents: async () => stub.maxSubagents,
   getSubagentModel: async () => stub.subagentModel,
   listProjects: async () => [],
@@ -35,8 +55,10 @@ vi.mock('./store', () => ({
 import {
   agentHook,
   askBot,
+  botChat,
   delegateTask,
   handoffChat,
+  markBotRead,
   nudgeWorker,
   registerChatTools,
   scheduleBotTask,
@@ -399,5 +421,103 @@ describe('@bot', () => {
       content: 'Could not answer: Bot not found',
       fromBot: { botId: 'gone', runChatId: '' }
     })
+  })
+})
+
+describe("the bot's chat", () => {
+  function botChats(): ChatEvent[] {
+    stub.chats.clear()
+    stub.scout = { chatId: null, unread: 0 }
+    vi.mocked(createChat).mockReset()
+    let made = 0
+    vi.mocked(createChat).mockImplementation(async (projectId, input) => {
+      made += 1
+      const chat = { id: `scout-chat-${made}`, projectId, messages: [], ...input } as unknown as Chat
+      stub.chats.set(chat.id, chat)
+      return structuredClone(chat)
+    })
+    const events: ChatEvent[] = []
+    registerChatTools({
+      send: async () => {
+        throw new Error('not in this test')
+      },
+      emit: (event) => events.push(event),
+      isStreaming: () => false
+    })
+    return events
+  }
+
+  it('is made once, kept on the bot, and made again once it was deleted', async () => {
+    const events = botChats()
+    const [first, again] = await Promise.all([botChat('scout'), botChat('scout')])
+    expect(vi.mocked(createChat).mock.calls).toEqual([['', { botId: 'scout', agent: 'claude', title: 'Scout' }]])
+    expect(again.id).toBe(first.id)
+    expect(stub.scout.chatId).toBe(first.id)
+    expect(events.map((event) => event.type)).toEqual(['chat', 'bot'])
+    expect((await botChat('scout')).id).toBe(first.id)
+
+    stub.chats.delete(first.id)
+    const remade = await botChat('scout')
+    expect(remade.id).not.toBe(first.id)
+    expect(stub.scout.chatId).toBe(remade.id)
+  })
+
+  it('is marked read', async () => {
+    const events = botChats()
+    stub.scout.unread = 3
+    expect((await markBotRead('scout')).unread).toBe(0)
+    expect(events).toEqual([{ type: 'bot', bot: expect.objectContaining({ id: 'scout', unread: 0 }) }])
+  })
+
+  it("gets a scheduled run's answer, or why it failed, as a new message from the bot", async () => {
+    botChats()
+    vi.useFakeTimers()
+    const due = new Date(Date.now() - 60_000).toISOString()
+    const run = (id: string, title: string) =>
+      ({ id, projectId: '', botId: 'scout', title, messages: [], schedule: { prompt: 'brief me', nextRunAt: due } }) as unknown as Chat
+    stub.chats.set('brief', run('brief', 'Scheduled: Morning brief'))
+    stub.chats.set('broken', run('broken', 'Scheduled: Backup'))
+    // A fresh module, so its scheduler starts on these fake timers.
+    vi.resetModules()
+    const tools = await import('./chatTools')
+    const events: ChatEvent[] = []
+    const notified: Array<[Pick<Bot, 'id' | 'unread'>, string, string]> = []
+    tools.registerChatTools({
+      send: async (chatId) => {
+        const chat = stub.chats.get(chatId)!
+        if (chatId === 'broken') return { chat, done: Promise.reject(new Error('disk full')) }
+        chat.messages.push({ id: 'a1', role: 'assistant', content: 'All quiet.\nNothing to do.', createdAt: '' })
+        return { chat, done: Promise.resolve(structuredClone(chat)) }
+      },
+      emit: (event) => events.push(event),
+      isStreaming: () => false,
+      notifyBot: (bot, chatId, text) => notified.push([bot, chatId, text])
+    })
+
+    tools.startScheduler()
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    const own = stub.chats.get(stub.scout.chatId!)!
+    expect(own.messages.map((message) => [message.content, message.fromBot])).toEqual(
+      expect.arrayContaining([
+        ['All quiet.\nNothing to do.', { botId: 'scout', name: 'Scout', runChatId: 'brief' }],
+        ['The scheduled run failed: disk full', { botId: 'scout', name: 'Scout', runChatId: 'broken' }]
+      ])
+    )
+    expect(own.messages).toHaveLength(2)
+    expect(own.messages.every((message) => message.role === 'assistant')).toBe(true)
+    expect(stub.scout.unread).toBe(2)
+    expect(vi.mocked(createChat)).toHaveBeenCalledTimes(1)
+    expect(events).toContainEqual({
+      type: 'bot-message',
+      botId: 'scout',
+      chatId: own.id,
+      text: 'All quiet.\nNothing to do.',
+      source: 'Morning brief'
+    })
+    expect(events).toContainEqual(expect.objectContaining({ type: 'bot-message', source: 'Backup' }))
+    expect(notified.map(([, chatId]) => chatId)).toEqual([own.id, own.id])
+    // The failure is still kept in the run's own chat.
+    expect(stub.chats.get('broken')!.messages.at(-1)?.content).toBe('The scheduled run failed: disk full')
   })
 })

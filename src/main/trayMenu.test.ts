@@ -29,6 +29,16 @@ describe('tray menu', () => {
     expect(lines[2]).toEqual({ id: 'c', label: 'Idle' })
   })
 
+  it('says how many new messages are in a bot\'s chat', () => {
+    const bots = [
+      { id: 'a', name: 'Nova', unread: 2 },
+      { id: 'b', name: 'Scout', unread: 1 },
+      { id: 'c', name: 'Idle', unread: 0 }
+    ]
+    const lines = trayBots(bots, [{ id: 'b1', botId: 'b' }], (chatId) => chatId === 'b1', now)
+    expect(lines.map((line) => line.label)).toEqual(['Nova · 2 new', 'Scout · 1 new · working', 'Idle'])
+  })
+
   it('lists each waiting chat once, a bot chat under the bot name', () => {
     const lines = trayWaiting(
       [

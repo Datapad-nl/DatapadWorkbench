@@ -23,16 +23,16 @@ export function whenLabel(at: Date, now: Date): string {
   return `${at.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`
 }
 
-/** Each bot with what it does: working now, else its next scheduled run. */
+/** Each bot with what it does: working now, else its next scheduled run. New messages in its chat come first. */
 export function trayBots(
-  bots: Array<Pick<Bot, 'id' | 'name'>>,
+  bots: Array<Pick<Bot, 'id' | 'name' | 'unread'>>,
   chats: Array<Pick<ChatSummary, 'id' | 'botId' | 'schedule'>>,
   running: (chatId: string) => boolean,
   now: Date
 ): TrayBot[] {
   return bots.map((bot) => {
     const own = chats.filter((chat) => chat.botId === bot.id)
-    const name = clip(bot.name, 40)
+    const name = bot.unread ? `${clip(bot.name, 40)} · ${bot.unread} new` : clip(bot.name, 40)
     if (own.some((chat) => running(chat.id))) return { id: bot.id, label: `${name} · working` }
     const next = own
       .map((chat) => Date.parse(chat.schedule?.nextRunAt ?? ''))

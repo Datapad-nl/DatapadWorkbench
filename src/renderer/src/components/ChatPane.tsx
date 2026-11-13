@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type {
   Attachment,
   Bot,
@@ -244,7 +244,15 @@ async function runSlash(input: SlashRun): Promise<string | null> {
   }
 }
 
-export function ChatPane(): React.JSX.Element {
+export function ChatPane({
+  header,
+  newMessageId
+}: {
+  /** Takes the place of the title bar and the tabs, as in a bot's Chat tab. */
+  header?: ReactNode
+  /** The first new message, with a New line above it. */
+  newMessageId?: string | null
+}): React.JSX.Element {
   const {
     projects,
     chats,
@@ -276,7 +284,8 @@ export function ChatPane(): React.JSX.Element {
     showSidebar,
     setShowSidebar,
     gitSummaries,
-    contexts
+    contexts,
+    openBot
   } = useWorkspace()
   const { stopAll } = useVoice()
   const streams = useStreamStatuses()
@@ -308,58 +317,79 @@ export function ChatPane(): React.JSX.Element {
   const progress = useChatProgress(activeChat?.id ?? null, Boolean(streamingNow))
 
   return (
-    <section className="night-pane corner-marks-over relative [--marks-top:calc(var(--spacing-titlebar)+2.5rem)] flex min-w-[320px] flex-1 flex-col bg-surface">
-      <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line bg-canvas px-3">
-        {!showSidebar && (
-          <div className="flex shrink-0 items-center pl-traffic">
-            <IconButton icon="sidebar" label="Show sidebar" onClick={() => setShowSidebar(true)} />
-          </div>
-        )}
-        {activeBot ? <BotAvatar bot={activeBot} size={16} /> : <Icon name="folder" className="text-faint" />}
-        <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
-          <span
-            className="max-w-[200px] truncate text-muted"
-            title={(activeBot && !activeProject ? activeBot.folder : activeProject?.path) ?? undefined}
-          >
-            {activeBot?.name ?? activeProject?.name ?? 'No project'}
-          </span>
-          {activeChat && (
-            <>
-              <span className="text-faint">/</span>
-              <span className="truncate font-semibold text-ink" title={activeChat.title}>
-                {activeChat.title}
-              </span>
-            </>
-          )}
-        </div>
-        {activeProject && (
-          <BranchChip
-            branch={
-              gitSummaries[activeProject.id]?.available
-                ? (activeChat?.worktreeBranch ?? gitSummaries[activeProject.id]?.branch ?? null)
-                : null
-            }
+    <section
+      className={`night-pane corner-marks-over relative ${
+        header ? '[--marks-top:var(--spacing-titlebar)]' : '[--marks-top:calc(var(--spacing-titlebar)+2.5rem)]'
+      } flex min-w-[320px] flex-1 flex-col bg-surface`}
+    >
+      {header ?? (
+        <>
+          <header className="drag flex h-titlebar shrink-0 items-center gap-2 border-b border-line bg-canvas px-3">
+            {!showSidebar && (
+              <div className="flex shrink-0 items-center pl-traffic">
+                <IconButton icon="sidebar" label="Show sidebar" onClick={() => setShowSidebar(true)} />
+              </div>
+            )}
+            {activeBot ? <BotAvatar bot={activeBot} size={16} /> : <Icon name="folder" className="text-faint" />}
+            <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
+              {activeBot ? (
+                // A bot's run goes back to the bot's window from here.
+                <button
+                  type="button"
+                  data-testid="chat-open-bot"
+                  className="no-drag max-w-[200px] truncate text-muted hover:text-ink"
+                  title={`Open ${activeBot.name}`}
+                  onClick={() => openBot(activeBot.id)}
+                >
+                  {activeBot.name}
+                </button>
+              ) : (
+                <span className="max-w-[200px] truncate text-muted" title={activeProject?.path ?? undefined}>
+                  {activeProject?.name ?? 'No project'}
+                </span>
+              )}
+              {activeChat && (
+                <>
+                  <span className="text-faint">/</span>
+                  <span className="truncate font-semibold text-ink" title={activeChat.title}>
+                    {activeChat.title}
+                  </span>
+                </>
+              )}
+            </div>
+            {activeProject && (
+              <BranchChip
+                branch={
+                  gitSummaries[activeProject.id]?.available
+                    ? (activeChat?.worktreeBranch ?? gitSummaries[activeProject.id]?.branch ?? null)
+                    : null
+                }
+              />
+            )}
+            {activeChat?.pr && <PrChip chatId={activeChat.id} pr={activeChat.pr} />}
+            {activeChat && contexts[activeChat.id] && <ContextChip context={contexts[activeChat.id]} />}
+            <div className="min-w-2 flex-1" />
+            <PaneToggles />
+          </header>
+          <TabBar
+            openChatIds={openChatIds}
+            activeChatId={activeChatId}
+            chats={chats}
+            projects={projects}
+            streams={streams}
+            onOpen={(id) => void openChat(id)}
+            onClose={closeTab}
+            onNew={() => {
+              if (newTabProject) void createChat(newTabProject.id)
+              else setShowNewProject(true)
+            }}
           />
-        )}
-        {activeChat?.pr && <PrChip chatId={activeChat.id} pr={activeChat.pr} />}
-        {activeChat && contexts[activeChat.id] && <ContextChip context={contexts[activeChat.id]} />}
-        <div className="min-w-2 flex-1" />
-        <PaneToggles />
-      </header>
-      <TabBar
-        openChatIds={openChatIds}
-        activeChatId={activeChatId}
-        chats={chats}
-        projects={projects}
-        streams={streams}
-        onOpen={(id) => void openChat(id)}
-        onClose={closeTab}
-        onNew={() => {
-          if (newTabProject) void createChat(newTabProject.id)
-          else setShowNewProject(true)
-        }}
-      />
-      {!activeChat ? (
+        </>
+      )}
+      {!activeChat && header ? (
+        // The bot's chat is still loading.
+        <div className="flex-1" />
+      ) : !activeChat ? (
         <EmptyState
           projectId={activeProject?.id ?? null}
           projectName={activeProject?.name ?? null}
@@ -389,6 +419,7 @@ export function ChatPane(): React.JSX.Element {
             onApprove={(verdict) => approvePlan(activeChat.id, verdict)}
             onRewind={(checkpointId) => openRewind(activeChat.id, checkpointId)}
             onSuggest={(text) => void sendMessage(activeChat.id, text)}
+            newMessageId={newMessageId ?? null}
           />
           <SubagentsPanel chatId={activeChat.id} />
           <HandoffBar
@@ -980,7 +1011,8 @@ function MessageList({
   canApprove,
   onApprove,
   onRewind,
-  onSuggest
+  onSuggest,
+  newMessageId
 }: {
   chat: { messages: Message[] }
   chatId: string
@@ -999,6 +1031,7 @@ function MessageList({
   onApprove: (verdict: PlanVerdict) => Promise<void>
   onRewind: (checkpointId: string) => void
   onSuggest: (text: string) => void
+  newMessageId: string | null
 }): React.JSX.Element {
   const bottom = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -1079,6 +1112,12 @@ function MessageList({
             return (
               <div key={message.id} className="flex flex-col gap-7">
                 {divider && <DayDivider label={divider} />}
+                {message.id === newMessageId && (
+                  <div data-testid="new-messages" className="flex items-center gap-3 text-[11px] text-accent">
+                    New
+                    <span className="h-px flex-1 bg-accent-line" />
+                  </div>
+                )}
                 {message.role === 'user' ? (
                   <article className="group flex flex-col items-end">
                     {side && <div className="mb-1 text-[11px] text-faint">{side}</div>}
