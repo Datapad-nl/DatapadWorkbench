@@ -14,7 +14,7 @@ import { nextCronRun } from "../shared/cron";
 import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
-import { addBotUnread, clearBotUnread, getBot, setBotChat } from "./bots";
+import { addBotUnread, clearBotUnread, getBot, listBots, setBotChat } from "./bots";
 import { endBotRun, startBotRun } from "./botRuns";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { id, now } from "./ids";
@@ -192,7 +192,11 @@ export async function askBot(input: {
   content: string;
   attachments?: Attachment[];
   mentions?: FileMention[];
-}): Promise<void> {
+  /** The user's message addressed to the bot, which the project's agent learns about with the answer. */
+  question?: string;
+  /** The project's agent asked with ask_bot and waits: the answer is its tool result, unless it stopped waiting. */
+  waiting?: AbortSignal;
+}): Promise<string> {
   let name = "The bot";
   let runChatId = "";
   try {
@@ -225,38 +229,74 @@ export async function askBot(input: {
     );
     const finished = await done;
     const reply = finished?.messages.at(-1);
-    await postBotAnswer(
-      input,
-      name,
-      runChatId,
-      !finished
-        ? "The run was deleted before it answered."
-        : reply?.role === "assistant"
-          ? plainReply(reply.content) || "(empty answer)"
-          : "(no answer)",
-    );
+    const answer = !finished
+      ? "The run was deleted before it answered."
+      : reply?.role === "assistant"
+        ? plainReply(reply.content) || "(empty answer)"
+        : "(no answer)";
+    await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting));
+    return answer;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    await postBotAnswer(input, name, runChatId, `Could not answer: ${reason}`).catch(
+    const answer = `Could not answer: ${reason}`;
+    await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting)).catch(
       () => {},
     );
+    return answer;
   }
+}
+
+function stillWaiting(signal: AbortSignal | undefined): boolean {
+  return !!signal && !signal.aborted;
+}
+
+/**
+ * The ask_bot tool: the project's agent asks a bot the user named in a message. The bot runs as it
+ * does when the user asks it, its answer is posted in the project chat, and the agent gets it back.
+ */
+export async function askBotFromChat(
+  input: { from?: unknown; bot?: unknown; message?: unknown },
+  signal: AbortSignal,
+): Promise<{ text: string }> {
+  const caller = await callerChat(input.from);
+  if (caller.botId) throw new Error("Only a project chat can ask a bot.");
+  const wanted = typeof input.bot === "string" ? input.bot.trim().replace(/^@/, "") : "";
+  const message = typeof input.message === "string" ? input.message.trim() : "";
+  if (!wanted) throw new Error("Pass the name of the bot to ask.");
+  if (!message) throw new Error("Pass the message for the bot.");
+  const bots = await listBots();
+  const bot =
+    bots.find((item) => item.name.trim().toLowerCase() === wanted.toLowerCase()) ??
+    bots.find((item) => item.id === wanted);
+  if (!bot) {
+    const names = bots.map((item) => item.name).join(", ");
+    throw new Error(`No bot is named ${wanted}. ${names ? `The bots are: ${names}.` : "There are no bots."}`);
+  }
+  const answer = await askBot({ botId: bot.id, fromChatId: caller.id, content: message, waiting: signal });
+  return { text: `${bot.name} answered:\n\n${answer}` };
 }
 
 /** `delivered`: the chat's own agent wrote it, so its next prompt need not bring it. */
 async function postBotAnswer(
-  input: { botId: string; fromChatId: string },
+  input: { botId: string; fromChatId: string; question?: string },
   name: string,
   runChatId: string,
   content: string,
   delivered = false,
 ): Promise<void> {
+  const question = input.question?.trim();
   const chat = await mutateChat(input.fromChatId, (latest) => {
     latest.messages.push({
       id: id(),
       role: "assistant",
       content,
-      fromBot: { botId: input.botId, name, runChatId, ...(delivered ? { delivered } : {}) },
+      fromBot: {
+        botId: input.botId,
+        name,
+        runChatId,
+        ...(question ? { question } : {}),
+        ...(delivered ? { delivered } : {}),
+      },
       createdAt: now(),
     });
   });

@@ -87,6 +87,7 @@ import {
   onChatLive,
   rewindChat,
   switchChatAgent,
+  saveMessageToBots,
   sendUserTurn,
   setChatMode,
   settleChatPlan,
@@ -94,6 +95,7 @@ import {
   stopAndWait,
   stopStream
 } from './grok'
+import { splitBotMentions } from '../shared/botMentions'
 import {
   abortAgent,
   agentKey,
@@ -622,7 +624,7 @@ export function registerIpc(): void {
         attachments?: Array<{ id: string; mimeType: string; data: string }>
         mentions?: FileMention[]
         conversation?: string
-        /** The bots asked with @. Each answers in a run of its own. */
+        /** The bots named with @ in the message. */
         bots?: BotMention[]
       }
     ) => {
@@ -634,17 +636,32 @@ export function registerIpc(): void {
         all.findIndex((item) => item?.id === bot.id) === index
     )
     const asked = bots.map((bot) => ({ id: bot.id, name: bot.name }))
-    // After the project chat's turn is reserved, so a Stop sent right away still finds it.
-    const askBots = (): void => {
-      for (const bot of bots) {
+    // A message that starts with @bots goes to those bots, each in a run of its own, and the chat's
+    // agent does not answer it. Bots named later in a message are part of what the agent is asked.
+    const { addressed, rest } = splitBotMentions(input.content, asked)
+    if (addressed.length > 0) {
+      if (!rest && !input.attachments?.length && !input.mentions?.length) {
+        throw new Error('Write what you want from the bot after its name.')
+      }
+      if (conversationEnded(conversation)) return getChat(input.chatId)
+      const chat = await saveMessageToBots(
+        input.chatId,
+        input.content,
+        input.attachments ?? [],
+        input.mentions ?? [],
+        asked
+      )
+      for (const bot of addressed) {
         void askBot({
           botId: bot.id,
           fromChatId: input.chatId,
-          content: input.content,
+          content: rest,
           attachments: input.attachments ?? [],
-          mentions: input.mentions ?? []
+          mentions: input.mentions ?? [],
+          question: rest
         })
       }
+      return chat
     }
     // Nothing is awaited before a new turn is reserved, so a Stop sent right after this finds it.
     if (isStreaming(input.chatId)) {
@@ -660,7 +677,6 @@ export function registerIpc(): void {
         conversation,
         asked
       )
-      askBots()
       return started
     }
     // A clip from a conversation that ended while it was on its way does not start a turn.
@@ -673,7 +689,6 @@ export function registerIpc(): void {
       asked
     )
     done.catch(() => {})
-    askBots()
     return chat
   })
 

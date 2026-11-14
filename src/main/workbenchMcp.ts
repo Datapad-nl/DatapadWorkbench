@@ -17,6 +17,7 @@ import {
 } from './browserDrive'
 import { transcribeYoutube } from './youtube'
 import {
+  askBotFromChat,
   cancelProjectSchedule,
   delegateTask,
   handoffChat,
@@ -32,7 +33,7 @@ import {
 import { linkPr, prStatus, unlinkCallerPr } from './pullRequests'
 import { cancelSecret, requestSecret, waitForSecret } from './secretTools'
 import { getChat } from './store'
-import { BOT_RUN_TOOLS, BROWSER_TOOLS, WORKBENCH_TOOLS, type McpTool } from './workbenchMcpTools'
+import { BOT_RUN_TOOLS, BROWSER_TOOLS, PROJECT_CHAT_TOOLS, WORKBENCH_TOOLS, type McpTool } from './workbenchMcpTools'
 
 /**
  * The Workbench's own MCP servers, served over streamable HTTP from the main process. The agents connect to
@@ -114,6 +115,12 @@ async function workbenchTool(name: string, args: Args, from: string, signal: Abo
   if (name === 'pr_status') return prStatus({ ...args, from })
   if (name === 'unlink_pr') return unlinkCallerPr({ from })
   if (name === 'request_secret') return secret(args, from, signal)
+  if (name === 'ask_bot') {
+    // A Stop ends the wait; the bot still finishes and its answer reaches the agent with the next prompt.
+    const cancel = aborted(signal)
+    cancel.catch(() => undefined)
+    return Promise.race([askBotFromChat({ ...args, from }, signal), cancel])
+  }
   if (name === 'notify') return notifyFromBot({ ...args, from })
   if (name === 'follow_up') return setFollowUp({ ...args, from })
   throw new Error(`Unknown tool: ${name}`)
@@ -122,7 +129,8 @@ async function workbenchTool(name: string, args: Args, from: string, signal: Abo
 /** The workbench tools of a chat: a bot's own chat also has the tools of its unattended runs. */
 async function workbenchTools(chatId: string): Promise<McpTool[]> {
   const chat = await getChat(chatId).catch(() => null)
-  return chat?.botId && !chat.projectId ? [...WORKBENCH_TOOLS, ...BOT_RUN_TOOLS] : WORKBENCH_TOOLS
+  if (chat?.botId && !chat.projectId) return [...WORKBENCH_TOOLS, ...BOT_RUN_TOOLS]
+  return chat?.botId ? WORKBENCH_TOOLS : [...WORKBENCH_TOOLS, ...PROJECT_CHAT_TOOLS]
 }
 
 async function browserTool(name: string, args: Args): Promise<unknown> {
@@ -202,7 +210,7 @@ function toContent(name: string, data: any): Array<Record<string, unknown>> {
     if (data.error) return [{ type: 'text', text: `${head} stopped: ${data.error}\n\n${data.answer ?? ''}`.trim() }]
     return [{ type: 'text', text: `${head} finished.\n\n${data.answer || '(no answer)'}` }]
   }
-  if (name === 'read_chat' || name === 'link_pr' || name === 'pr_status' || name === 'request_secret') {
+  if (name === 'read_chat' || name === 'ask_bot' || name === 'link_pr' || name === 'pr_status' || name === 'request_secret') {
     return [{ type: 'text', text: data.text }]
   }
   return [{ type: 'text', text: JSON.stringify(data, null, 2) }]

@@ -79,8 +79,10 @@ export type Message = {
   kind?: 'btw' | 'steer'
   attachments?: Attachment[]
   mentions?: FileMention[]
-  /** Bots the user asked with @ in this message. */
+  /** Bots the user named with @ in this message. */
   bots?: BotMention[]
+  /** The message starts with @bots and went only to them: the project's agent did not answer it. */
+  toBots?: boolean
   /** Set on a bot's answer posted in a project chat. */
   fromBot?: BotAnswer
   createdAt: string
@@ -93,6 +95,8 @@ export type BotAnswer = {
   name: string
   /** The bot's own chat the answer comes from. */
   runChatId: string
+  /** What the user asked the bot in a message addressed to it, which the project's agent never got. */
+  question?: string
   /** Set once the project's agent got the answer with a prompt. */
   delivered?: boolean
 }

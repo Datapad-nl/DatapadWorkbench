@@ -13,12 +13,13 @@ function clip(text: string, max: number): string {
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`
 }
 
-export function promptForBotsAsked(text: string, bots?: BotMention[]): string {
+/** Bots named with @ inside the message: they are part of the request, and the agent works out what to do with them. */
+export function promptForBotsMentioned(text: string, bots?: BotMention[]): string {
   if (!bots || bots.length === 0) return text
-  const names = bots.map((bot) => bot.name).join(', ')
+  const names = bots.map((bot) => `@${bot.name}`).join(', ')
   return withBlock(
     text,
-    `The user also asked ${bots.length === 1 ? 'the bot' : 'the bots'} ${names} about this message. Each works on it by itself and posts its answer in this chat; you get it with your next prompt.`
+    `The user names ${bots.length === 1 ? 'the bot' : 'the bots'} ${names} in this message. A bot is an agent of its own with its own skills; the name is part of the sentence. Work out from the request what the user wants with ${bots.length === 1 ? 'it' : 'them'}: when that is to give a bot something, ask it something or have it do something, call the workbench tool ask_bot with the bot's name and a message that stands on its own, with everything the bot needs. It returns the bot's answer, which the user also sees in this chat.`
   )
 }
 
@@ -37,7 +38,12 @@ export function promptForBotRun(text: string, run: { kind: 'schedule' | 'followU
 export function promptForBotAnswers(text: string, answers: Message[]): string {
   if (answers.length === 0) return text
   const body = answers
-    .map((message) => `### ${message.fromBot?.name ?? 'Bot'}\n\n${clip(message.content, 8000)}`)
+    .map((message) => {
+      const name = message.fromBot?.name ?? 'Bot'
+      const question = message.fromBot?.question?.trim()
+      const asked = question ? `The user asked it: ${clip(question, 2000)}\n\n` : ''
+      return `### ${name}\n\n${asked}${clip(message.content, 8000)}`
+    })
     .join('\n\n')
   return withBlock(text, `Bots answered in this chat since your last prompt:\n\n${body}`)
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type {
   Attachment,
   Bot,
@@ -37,6 +37,7 @@ import {
 import { DEFAULT_MAX_SUBAGENTS, conductorPrompt, weakOrchestrator } from '../../../shared/conductor'
 import { contextLabel, handoffAdvised, handoffPrompt } from '../../../shared/handoff'
 import { resolveProjectColor } from '../../../shared/projectColor'
+import { botMentionParts, mentionedBots, splitBotMentions } from '../../../shared/botMentions'
 import { plainReply } from '../../../shared/steps'
 import {
   CLAUDE_MODELS,
@@ -1223,11 +1224,15 @@ function MessageList({
             const side = message.kind === 'btw' ? 'btw' : message.kind === 'steer' ? 'steer' : null
             const fromBot = message.fromBot
             const answeringBot = fromBot ? bots.find((bot) => bot.id === fromBot.botId) : chatBot
+            // Bots named in the text show there; older messages kept them out of the text.
+            const chipBots = (message.bots ?? []).filter(
+              (bot) => !mentionedBots(message.content, [bot]).length
+            )
             const extras = (
               <>
-                {message.bots && message.bots.length > 0 && (
+                {chipBots.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
-                    {message.bots.map((bot) => (
+                    {chipBots.map((bot) => (
                       <BotChip key={bot.id} mention={bot} />
                     ))}
                   </div>
@@ -1265,8 +1270,13 @@ function MessageList({
                 {message.role === 'user' ? (
                   <article className="group flex flex-col items-end">
                     {side && <div className="mb-1 text-[11px] text-faint">{side}</div>}
+                    {message.toBots && (
+                      <div data-testid="to-bots" className="mb-1 text-[11px] text-faint">
+                        to {splitBotMentions(message.content, message.bots ?? []).addressed.map((bot) => bot.name).join(', ')}
+                      </div>
+                    )}
                     <div className="max-w-[max(560px,78%)] rounded-[14px_14px_4px_14px] border border-line-strong bg-raised px-4 py-2.5 text-[14.5px] leading-[1.6] whitespace-pre-wrap wrap-anywhere text-ink">
-                      {message.content}
+                      <MessageText text={message.content} bots={message.bots} />
                     </div>
                     <div className="flex max-w-[max(560px,78%)] flex-col items-end">{extras}</div>
                     <div className="mt-1 flex h-5 items-center gap-1 text-[11px] tabular-nums text-faint">
@@ -2090,13 +2100,23 @@ function saveRecent(projectId: string, mention: FileMention): void {
   localStorage.setItem(recentsKey(projectId), JSON.stringify(next))
 }
 
-function mentionAt(text: string, caret: number): { start: number; query: string } | null {
+function mentionAt(
+  text: string,
+  caret: number,
+  bots: Array<{ name: string }> = []
+): { start: number; query: string } | null {
   const before = text.slice(0, caret)
   const at = before.lastIndexOf('@')
   if (at < 0) return null
   if (at > 0 && !/\s/.test(before[at - 1] ?? '')) return null
   const query = before.slice(at + 1)
   if (query.includes('\n')) return null
+  // A bot's whole name and a space end the mention: what follows is the sentence. Unless a longer
+  // bot name still starts with what is typed.
+  const lower = query.toLowerCase()
+  const names = bots.map((bot) => bot.name.trim().toLowerCase()).filter(Boolean)
+  const finished = names.some((name) => lower.startsWith(name) && /^\s/.test(query.slice(name.length)))
+  if (finished && !names.some((name) => name.startsWith(lower))) return null
   return { start: at, query }
 }
 
@@ -2155,6 +2175,26 @@ function MentionChip({
   )
 }
 
+/** A user's message, with each bot named as @Name shown inline with its avatar. */
+function MessageText({ text, bots: named }: { text: string; bots?: BotMention[] }): React.JSX.Element {
+  const { bots } = useBots()
+  if (!named || named.length === 0) return <>{text}</>
+  return (
+    <>
+      {botMentionParts(text, named).map((part, index) => {
+        if (typeof part === 'string') return <Fragment key={index}>{part}</Fragment>
+        const bot = bots.find((item) => item.id === part.bot.id)
+        return (
+          <span key={index} data-testid="bot-mention" className="inline-flex items-center gap-1 align-bottom font-medium">
+            {bot ? <BotAvatar bot={bot} size={18} /> : null}
+            {bot?.name ?? part.bot.name}
+          </span>
+        )
+      })}
+    </>
+  )
+}
+
 function BotChip({ mention, onRemove }: { mention: BotMention; onRemove?: () => void }): React.JSX.Element {
   const { bots } = useBots()
   const bot = bots.find((item) => item.id === mention.id)
@@ -2179,7 +2219,7 @@ function BotChip({ mention, onRemove }: { mention: BotMention; onRemove?: () => 
   )
 }
 
-type ComposerDraft = { value: string; attachments: Attachment[]; mentions: FileMention[]; bots: BotMention[] }
+type ComposerDraft = { value: string; attachments: Attachment[]; mentions: FileMention[] }
 
 /** A failed send's text, put back ahead of what was typed since. */
 function joinText(sent: string, typed: string): string {
@@ -2247,7 +2287,6 @@ function Composer({
     () => drafts.current.get(chatId)?.attachments ?? []
   )
   const [mentions, setMentions] = useState<FileMention[]>(() => drafts.current.get(chatId)?.mentions ?? [])
-  const [askedBots, setAskedBots] = useState<BotMention[]>(() => drafts.current.get(chatId)?.bots ?? [])
   const [hits, setHits] = useState<FileHit[]>([])
   const [hitsQuery, setHitsQuery] = useState<string | null>(null)
   const [hitIndex, setHitIndex] = useState(0)
@@ -2331,10 +2370,10 @@ function Composer({
   )
 
   useEffect(() => {
-    if (!value && attachments.length === 0 && mentions.length === 0 && askedBots.length === 0)
+    if (!value && attachments.length === 0 && mentions.length === 0)
       drafts.current.delete(chatId)
-    else drafts.current.set(chatId, { value, attachments, mentions, bots: askedBots })
-  }, [askedBots, attachments, chatId, drafts, mentions, value])
+    else drafts.current.set(chatId, { value, attachments, mentions })
+  }, [attachments, chatId, drafts, mentions, value])
 
   // A send that fails after its chat was switched away and back lands in this composer, not the old one.
   useEffect(() => {
@@ -2342,7 +2381,6 @@ function Composer({
       setValue((typed) => joinText(sent.value, typed))
       setAttachments((typed) => joinBy(sent.attachments, typed, (item) => item.id))
       setMentions((typed) => joinBy(sent.mentions, typed, (item) => item.path))
-      setAskedBots((typed) => joinBy(sent.bots, typed, (item) => item.id))
     }
     const live = restorers.current
     live.set(chatId, put)
@@ -2426,7 +2464,7 @@ function Composer({
       return
     }
     setCommand(null)
-    setMention(mentionAt(text, caret))
+    setMention(mentionAt(text, caret, bots))
   }
 
   function fillCommand(def: SlashDef): void {
@@ -2472,7 +2510,6 @@ function Composer({
       if (def.kind === 'prompt' || def.kind === 'agent' || def.id === 'new' || def.id === 'delete') {
         setAttachments([])
         setMentions([])
-        setAskedBots([])
       }
       if (notice) setPasteError(notice)
     } catch (error) {
@@ -2494,8 +2531,7 @@ function Composer({
         ? {
             value: joinText(sent.value, typed.value),
             attachments: joinBy(sent.attachments, typed.attachments, (item) => item.id),
-            mentions: joinBy(sent.mentions, typed.mentions, (item) => item.path),
-            bots: joinBy(sent.bots, typed.bots, (item) => item.id)
+            mentions: joinBy(sent.mentions, typed.mentions, (item) => item.path)
           }
         : sent
     )
@@ -2504,16 +2540,18 @@ function Composer({
   const botHits = useMemo(() => {
     if (!mention || commandOpen) return []
     const q = mention.query.trim().toLowerCase()
-    return bots.filter((bot) => !askedBots.some((item) => item.id === bot.id) && bot.name.toLowerCase().includes(q))
-  }, [askedBots, bots, commandOpen, mention])
+    return bots.filter((bot) => bot.name.toLowerCase().includes(q))
+  }, [bots, commandOpen, mention])
   /** Bots first, then files. */
   const pickCount = botHits.length + hits.length
 
+  /** The bot's name goes into the text, where it is part of the sentence. */
   function pickBot(bot: Bot): void {
     const caret = ref.current?.selectionStart ?? value.length
     const at = mentionAt(value, caret)
-    const nextText = at ? value.slice(0, at.start) + value.slice(caret) : value
-    setAskedBots((existing) => [...existing, { id: bot.id, name: bot.name }])
+    const name = `@${bot.name} `
+    const start = at ? at.start : caret
+    const nextText = value.slice(0, start) + name + value.slice(caret).replace(/^ /, '')
     setValue(nextText)
     setMention(null)
     setHits([])
@@ -2521,7 +2559,7 @@ function Composer({
     requestAnimationFrame(() => {
       const el = ref.current
       if (!el) return
-      const pos = at ? at.start : nextText.length
+      const pos = start + name.length
       el.focus()
       el.setSelectionRange(pos, pos)
     })
@@ -2588,14 +2626,13 @@ function Composer({
     }
     const text = value.trim()
     if (!text && attachments.length === 0 && mentions.length === 0) return
-    const sent: ComposerDraft = { value, attachments, mentions, bots: askedBots }
-    void onSend(text, attachments, mentions, askedBots).then((ok) => {
+    const sent: ComposerDraft = { value, attachments, mentions }
+    void onSend(text, attachments, mentions, mentionedBots(text, bots)).then((ok) => {
       if (!ok) restore(sent)
     })
     setValue('')
     setAttachments([])
     setMentions([])
-    setAskedBots([])
     setMention(null)
     setCommand(null)
     setHits([])
@@ -2714,15 +2751,8 @@ function Composer({
             </div>
           </div>
         )}
-        {(attachments.length > 0 || mentions.length > 0 || askedBots.length > 0) && (
+        {(attachments.length > 0 || mentions.length > 0) && (
           <div className="mb-3 flex flex-wrap gap-2">
-            {askedBots.map((item) => (
-              <BotChip
-                key={item.id}
-                mention={item}
-                onRemove={() => setAskedBots((current) => current.filter((bot) => bot.id !== item.id))}
-              />
-            ))}
             {mentions.map((item) => (
               <MentionChip
                 key={item.path}

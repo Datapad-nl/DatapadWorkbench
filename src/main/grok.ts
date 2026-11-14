@@ -54,7 +54,7 @@ import {
   type SessionUpdate
 } from './acp'
 import { emitNotice, finishTurn, startTurn } from './activity'
-import { promptForBotAnswers, promptForBotRun, promptForBotsAsked } from './botPrompt'
+import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
 import { botRun } from './botRuns'
 import { botFolder, botSessionRules, getBot, readBotMemory } from './bots'
 import { endForegroundAgents } from './builtinAgents'
@@ -906,7 +906,8 @@ async function appendUserMessage(
   content: string,
   attachments: Attachment[],
   mentions: FileMention[],
-  bots: BotMention[]
+  bots: BotMention[],
+  toBots = false
 ): Promise<Chat> {
   const loaded = await getChat(chatId)
   await mutateChat(chatId, (chat) => {
@@ -919,6 +920,7 @@ async function appendUserMessage(
       attachments: attachments.length > 0 ? attachments : undefined,
       mentions: mentions.length > 0 ? mentions : undefined,
       bots: bots.length > 0 ? bots : undefined,
+      ...(toBots ? { toBots } : {}),
       createdAt: now()
     })
     if (chat.title === 'New chat') {
@@ -928,6 +930,19 @@ async function appendUserMessage(
     }
   })
   return getChat(chatId)
+}
+
+/** Save a message that starts with @bots: it goes only to those bots, so the chat's agent runs no turn. */
+export async function saveMessageToBots(
+  chatId: string,
+  content: string,
+  attachments: Attachment[],
+  mentions: FileMention[],
+  bots: BotMention[]
+): Promise<Chat> {
+  const chat = await appendUserMessage(chatId, content.trim(), attachments, mentions, bots, true)
+  emitLive({ type: 'chat', chatId, chat })
+  return chat
 }
 
 /** Null when the chat's agent can run, otherwise what the user has to do. */
@@ -1034,6 +1049,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
     .find(
       (message) =>
         message.role === 'user' &&
+        !message.toBots &&
         (followUp || (message.kind !== 'btw' && message.kind !== 'steer'))
     )
   if (!followUp && !lastUser) throw new Error('Message is empty')
@@ -1041,7 +1057,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   // new task, and the chat it came from is no neighbour to stay clear of.
   const opensHandoff = Boolean(chat.handoffFrom) && chat.messages.length <= 1
   // Only before the first reply: a chat that has worked in the folder keeps its edits there.
-  const started = chat.messages.some((message) => message.role === 'assistant')
+  const started = chat.messages.some((message) => message.role === 'assistant' && !message.fromBot)
   // A bot asked with @ works in the project's folder next to the project's agent, so neither moves away from the other.
   if (!followUp && !opensHandoff && !started && !chat.worktreePath && !chat.botId && project?.path) {
     const siblings = (await step(turn, listChats())).filter(
@@ -1100,7 +1116,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const unattended = followText ? undefined : botRun(chat.id)
   const asked = followText
     ? followText
-    : promptForBotsAsked(promptForMentions(lastUser!.content, lastUser!.mentions), lastUser!.bots)
+    : promptForBotsMentioned(promptForMentions(lastUser!.content, lastUser!.mentions), lastUser!.bots)
   const mentioned = unattended ? promptForBotRun(asked, unattended) : asked
   // Bot answers posted since the agent's last prompt: it sees them now, once.
   const answers = chat.messages.filter((message) => message.fromBot && !message.fromBot.delivered)
@@ -1402,7 +1418,7 @@ async function startSteer(
     title: 'Steer',
     detail: question || 'Screenshot'
   })
-  queueAsideSteer(chatId, { text: promptForBotsAsked(question, bots), attachments, messageId, conversation })
+  queueAsideSteer(chatId, { text: promptForBotsMentioned(question, bots), attachments, messageId, conversation })
   drainAsideSteers(chatId)
   return started
 }
@@ -1443,7 +1459,7 @@ export async function startAside(
     })
   })
   emitLive({ type: 'chat', chatId, chat: started })
-  void runAside(started, project, replyId, question, attachments, conversation)
+  void runAside(started, project, replyId, question, attachments, conversation, bots)
   return started
 }
 
@@ -1453,7 +1469,8 @@ async function runAside(
   replyId: string,
   question: string,
   attachments: Attachment[],
-  conversation: string | undefined
+  conversation: string | undefined,
+  bots: BotMention[] = []
 ): Promise<void> {
   const chatId = started.id
   const agent = normalizeChatAgent(started.agent)
@@ -1491,7 +1508,7 @@ async function runAside(
     const latest = await getChat(chatId).catch(() => started)
     assembled = await promptIsolated(
       cwd,
-      asidePrompt(question, asideContext(latest, replyId)),
+      asidePrompt(promptForBotsMentioned(question, bots), asideContext(latest, replyId)),
       attachments,
       emitAsideDelta(chatId, replyId),
       abort.signal,
@@ -1520,7 +1537,7 @@ async function runAside(
   }
   if (steer && question.trim() && !abort.signal.aborted && !conversationEnded(conversation)) {
     // The side question stays in the chat with its answer.
-    queueAsideSteer(chatId, { text: question, attachments, conversation })
+    queueAsideSteer(chatId, { text: promptForBotsMentioned(question, bots), attachments, conversation })
     drainAsideSteers(chatId)
   }
 }

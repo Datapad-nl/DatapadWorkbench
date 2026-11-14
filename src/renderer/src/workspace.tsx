@@ -33,6 +33,7 @@ import type {
   WorkspaceSnapshot
 } from '../../shared/types'
 import { normalizePermissionMode } from '../../shared/types'
+import { splitBotMentions } from '../../shared/botMentions'
 import { streamStatuses, type StreamStatus } from './streamStatus'
 
 type StreamState = {
@@ -936,7 +937,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     ) => {
       const atSend = turnsRef.current[chatId]
       const asAside = atSend?.live === true
-      if (!asAside) {
+      // A message that starts with @bots goes only to them: the chat's agent starts no turn.
+      const toBots = splitBotMentions(content, bots ?? []).addressed.length > 0
+      const claims = !asAside && !toBots
+      if (claims) {
         if (sending.current.has(chatId)) return false
         sending.current.add(chatId)
         setStreams((current) => ({
@@ -975,7 +979,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
         })
         return false
       } finally {
-        if (!asAside) sending.current.delete(chatId)
+        if (claims) sending.current.delete(chatId)
       }
     },
     [applyChat, refreshAfterChange]
