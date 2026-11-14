@@ -1920,7 +1920,8 @@ function ModelPicker({
     'Default'
   const shownEffort = effort || defaultEffort
   const warning = conductor ? weakOrchestrator(current, shownEffort) : null
-  const label = [chatAgentLabel(agent), modelName(current), shownEffort ? reasoningEffortLabel(shownEffort) : null]
+  // The glyph names the agent.
+  const label = [modelName(current), shownEffort ? reasoningEffortLabel(shownEffort) : null]
     .filter(Boolean)
     .join(' · ')
   const other: ChatAgent = agent === 'claude' ? 'grok' : 'claude'
@@ -1951,7 +1952,7 @@ function ModelPicker({
         data-testid="chat-agent"
         aria-haspopup="menu"
         aria-expanded={open}
-        title={warning ?? 'Agent, model and effort of this chat'}
+        title={warning ?? `${chatAgentLabel(agent)}: model and effort of this chat`}
         className={`flex h-7 max-w-[260px] items-center gap-1.5 rounded-[7px] px-1.5 text-[12.5px] hover:bg-hover ${
           warning ? 'text-danger' : 'text-muted hover:text-ink'
         }`}
