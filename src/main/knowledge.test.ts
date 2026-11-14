@@ -73,9 +73,14 @@ function snapshotsSent(): KnowledgeSnapshot[] {
   return stub.send.mock.calls.filter(([channel]) => channel === 'knowledge:snapshot').map(([, snapshot]) => snapshot)
 }
 
+/** Every copy a test loaded: a restart loads a second one. */
+const loaded: (typeof import('./knowledge'))[] = []
+
 async function load(): Promise<typeof import('./knowledge')> {
   vi.resetModules()
-  return import('./knowledge')
+  const knowledge = await import('./knowledge')
+  loaded.push(knowledge)
+  return knowledge
 }
 
 beforeEach(async () => {
@@ -90,6 +95,12 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  // A run a test set off can still be writing notes. Stop it, and let it end, before its folder goes.
+  for (const knowledge of loaded.splice(0)) {
+    knowledge.stopKnowledgeWatchers()
+    knowledge.stopKnowledgeJobs()
+    await knowledge.knowledgeJobsSettled()
+  }
   await rm(root, { recursive: true, force: true })
 })
 

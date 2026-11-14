@@ -1473,3 +1473,10 @@ export function stopKnowledgeWatchers(): void {
 export function stopKnowledgeJobs(): void {
   stopping = true
 }
+
+/** Settles once no job is running or queued, so nothing writes to a vault any more. */
+export async function knowledgeJobsSettled(): Promise<void> {
+  while (jobs.size > 0 || queued.size > 0) {
+    await Promise.allSettled([...jobs.values(), ...[...queued.values()].map((next) => next.job)])
+  }
+}
