@@ -1,7 +1,13 @@
 import { app, shell } from 'electron'
 import { copyFile, mkdir, readdir, readFile, rm, stat } from 'fs/promises'
-import { extname, isAbsolute, join, relative } from 'path'
-import { normalizeChatAgent, normalizeReasoningEffort, type Bot, type UpdateBotInput } from '../shared/types'
+import { extname, isAbsolute, join, relative, sep } from 'path'
+import {
+  normalizeChatAgent,
+  normalizeReasoningEffort,
+  type Bot,
+  type BotMemory,
+  type UpdateBotInput
+} from '../shared/types'
 import { id, now } from './ids'
 import { readJsonFile, withLock, writeFileAtomic } from './storeIo'
 
@@ -104,11 +110,59 @@ export async function getBot(botId: string): Promise<Bot> {
   return withFolder(bot)
 }
 
-/** The bot's instructions, as rules for each of its sessions. */
-export function botSessionRules(bot: Bot): string {
+/** Where the bot keeps what it learns. It outlives every chat and both agents. */
+export function botMemoryFolder(botId: string): string {
+  return join(botFolder(botId), 'memory')
+}
+
+const MEMORY_INDEX = 'MEMORY.md'
+/** How much of MEMORY.md each session starts with. The index is meant to stay short. */
+const MAX_INDEX_CHARS = 8000
+
+/** The memory folder is made here, so it is there before the bot first writes in it. */
+export async function readBotMemory(botId: string): Promise<BotMemory> {
+  const folder = botMemoryFolder(botId)
+  await mkdir(folder, { recursive: true }).catch(() => {})
+  const index = await readFile(join(folder, MEMORY_INDEX), 'utf8').catch(() => '')
+  const entries = await readdir(folder, { recursive: true, withFileTypes: true }).catch(() => [])
+  const files = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => relative(folder, join(entry.parentPath, entry.name)).split(sep).join('/'))
+    .filter((path) => path !== MEMORY_INDEX && !path.split('/').some((part) => part.startsWith('.')))
+    .sort()
+  return { folder, index, files }
+}
+
+export async function saveBotMemoryIndex(botId: string, index: string): Promise<BotMemory> {
+  await getBot(botId)
+  const folder = botMemoryFolder(botId)
+  await mkdir(folder, { recursive: true })
+  await writeFileAtomic(join(folder, MEMORY_INDEX), index)
+  return readBotMemory(botId)
+}
+
+/** The bot's instructions and the index of its memory, as rules for each of its sessions. */
+export function botSessionRules(bot: Bot, memoryIndex = ''): string {
   const intro = `You are ${bot.name}, a bot in Datapad Workbench.`
   const instructions = bot.instructions.trim()
-  return instructions ? `${intro}\n\n${instructions}` : intro
+  const folder = botMemoryFolder(bot.id)
+  const index = memoryIndex.trim()
+  const shown =
+    index.length <= MAX_INDEX_CHARS
+      ? index
+      : `${index.slice(0, MAX_INDEX_CHARS)}\n… (cut here: keep ${MEMORY_INDEX} short and move details into files)`
+  const memory = [
+    '## Your memory',
+    `Your memory is the folder ${folder}. It outlives this chat: a new session starts with only these rules and what you saved there.`,
+    `- ${MEMORY_INDEX} in it is the index, shown below. One line per entry, linking to a file in the folder for the details. Read a file when its entry matters to the task.`,
+    '- Save what you will need later and cannot look up again: what the user told you about themselves and how they want things done, their corrections, what you already told them, and where unfinished work stands. For something kept elsewhere, save where to find it, not a copy.',
+    '- Save as you go, not only at the end. Change or remove entries that are no longer true.',
+    `- You can write in this folder without asking.`,
+    '',
+    `### ${MEMORY_INDEX}`,
+    shown || '(empty)'
+  ].join('\n')
+  return [intro, instructions, memory].filter(Boolean).join('\n\n')
 }
 
 export async function createBot(name: string): Promise<Bot> {

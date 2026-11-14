@@ -6,7 +6,8 @@ import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
 import { type AgentProcess, startClaudeAdapter } from './claudeCli'
 import { grokBinary } from './grokCli'
-import { snapshotBeforeTool } from './checkpoints'
+import { relPath, snapshotBeforeTool, toolPaths } from './checkpoints'
+import { botMemoryFolder } from './bots'
 import {
   askPermission,
   cancelAllPermissions,
@@ -37,6 +38,7 @@ import {
   skipOutcome
 } from './questions'
 import { tmpdir } from 'os'
+import { isAbsolute } from 'path'
 import {
   normalizeReasoningEffort,
   type AgentCommand,
@@ -180,13 +182,45 @@ function noteToolCallName(update: SessionUpdate['update'] | undefined): void {
   if (toolCallNames.size > 500) toolCallNames.delete(toolCallNames.keys().next().value as string)
 }
 
-/** Whether a bot chat may run this tool without asking, because the tool is on the bot's list. */
+/** A bot's own tools for its unattended runs, which it runs without asking. */
+const BOT_RUN_TOOL_NAMES = new Set(['mcp__workbench__notify', 'mcp__workbench__follow_up'])
+/** Tool kinds a bot may use in its memory folder without asking. */
+const MEMORY_KINDS = new Set(['read', 'edit', 'write', 'delete', 'move'])
+
+/** Every string in a tool's input that reads as a full path, under any key, such as a move's destination. */
+function fullPathsIn(value: unknown, found: string[] = []): string[] {
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (isAbsolute(text) || text.startsWith('~')) found.push(text)
+  } else if (Array.isArray(value)) {
+    for (const item of value) fullPathsIn(item, found)
+  } else if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) fullPathsIn(item, found)
+  }
+  return found
+}
+
+/** Whether every path this tool names is inside `folder`, given as a full path. */
+function onlyInside(folder: string, tool: PermissionParams['toolCall']): boolean {
+  if (!tool) return false
+  const named = toolPaths(tool)
+  const paths = [...named, ...fullPathsIn(tool.rawInput)]
+  return named.length > 0 && paths.every((path) => isAbsolute(path.trim()) && relPath(folder, path) !== null)
+}
+
+/**
+ * Whether a bot chat may run this tool without asking: the tool is on the bot's list, it is one of the
+ * bot's own run tools, or it reads or writes only the bot's memory folder.
+ */
 async function botAllowsTool(sessionId: string, params: PermissionParams): Promise<boolean> {
   const tool = params.toolCall
   const name = toolCallName(tool) ?? (tool?.toolCallId ? toolCallNames.get(tool.toolCallId) : undefined)
-  if (!name) return false
   const bot = await chatBot(chatIdForSession(sessionId) ?? undefined).catch(() => null)
-  return !!bot && isToolAllowed(bot.allowedTools, name)
+  if (!bot) return false
+  if (name && (BOT_RUN_TOOL_NAMES.has(name) || isToolAllowed(bot.allowedTools, name))) return true
+  // An MCP tool may send what it reads elsewhere, so only the agent's own file tools count.
+  if (name?.startsWith('mcp__')) return false
+  return MEMORY_KINDS.has((tool?.kind ?? '').toLowerCase()) && onlyInside(botMemoryFolder(bot.id), tool)
 }
 
 /**
@@ -1367,6 +1401,18 @@ export async function loadSession(
   rememberModes(sessionId, result)
   conn.liveSessions.add(sessionId)
   await applySessionSettings(agent, sessionId, chatId)
+}
+
+/**
+ * Lets the agent drop a session the chat has moved on from, such as the last scheduled run's. It can
+ * still be loaded again later. Best effort: an agent without `session/close` keeps it until it exits.
+ */
+export async function closeSession(sessionId: string): Promise<void> {
+  if (!sessionAgents.has(sessionId)) return
+  const conn = connForSession(sessionId)
+  if (!conn.proc || !conn.liveSessions.has(sessionId)) return
+  conn.liveSessions.delete(sessionId)
+  await request(conn, 'session/close', { sessionId }, 10_000).catch(() => {})
 }
 
 export function hasLiveSession(sessionId: string): boolean {

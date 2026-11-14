@@ -36,7 +36,9 @@ import {
   createBot,
   getBot,
   listBots,
+  readBotMemory,
   removeBot,
+  saveBotMemoryIndex,
   setBotAvatar,
   updateBot
 } from './bots'
@@ -98,6 +100,7 @@ import {
   reloadBotSessions,
   applyClaudeModelToLiveSessions,
   applyEffortToLiveSessions,
+  closeSession,
   fetchUsage,
   getClaudeOptions,
   grokCommands
@@ -119,14 +122,15 @@ import {
   askBot,
   botChat,
   botMessage,
+  cancelFollowUp,
   forgetBotRun,
-  isBotRun,
   markBotRead,
   newBotChat,
   registerChatTools,
   scheduleBotTask,
   stopSchedule
 } from './chatTools'
+import { isBotRun } from './botRuns'
 import { unlinkPr } from './pullRequests'
 import { cancelChatQuestions, onUserQuestionPrompt, onUserQuestionSettled, resolveUserQuestion } from './questions'
 import {
@@ -247,7 +251,7 @@ async function sendTurn(
 ): Promise<{ chat: Chat; done: Promise<Chat | null> }> {
   // The turn sends its own done or error event; this only adds the system notification.
   const { chat, done } = await sendUserTurn(chatId, content, attachments, mentions, bots)
-  // A scheduled run of a bot gets no notice of its own: its answer is posted in the bot's chat, which notifies.
+  // A bot's scheduled run or follow-up gets no notice of its own: the bot tells the user with notify.
   const notified = done.then(
     (saved) => {
       if (saved && !isBotRun(saved.id)) void noticeForReply(saved).catch(() => {})
@@ -289,7 +293,14 @@ export function registerIpc(): void {
     find: (chatId, toolCall) => findEditClash(chatId, toolCall, isStreaming),
     isRunning: isStreaming
   })
-  registerChatTools({ send: sendTurn, emit, isStreaming, builtinAgents: getBuiltinAgents, notifyBot: noticeForBot })
+  registerChatTools({
+    send: sendTurn,
+    emit,
+    isStreaming,
+    builtinAgents: getBuiltinAgents,
+    notifyBot: noticeForBot,
+    closeSession
+  })
   startActivityBridge()
   startBuiltinAgentsBridge()
   watchAttention()
@@ -467,6 +478,10 @@ export function registerIpc(): void {
   ipcMain.handle('bot:schedule', (_event, input: { botId: string; prompt: string; cron?: string; at?: string }) =>
     scheduleBotTask(input ?? {})
   )
+  ipcMain.handle('bot:memory', (_event, botId: string) => readBotMemory(String(botId)))
+  ipcMain.handle('bot:saveMemory', (_event, botId: string, index: string) =>
+    saveBotMemoryIndex(String(botId), String(index ?? ''))
+  )
   ipcMain.handle('bot:openFolder', async (_event, botId: string) => {
     const bot = await getBot(String(botId))
     const error = await shell.openPath(bot.folder)
@@ -485,6 +500,7 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('chat:stopSchedule', (_event, chatId: string) => stopSchedule(String(chatId)))
+  ipcMain.handle('chat:cancelFollowUp', (_event, chatId: string) => cancelFollowUp(String(chatId)))
   ipcMain.handle('chat:unlinkPr', (_event, chatId: string) => unlinkPr(String(chatId)))
   ipcMain.handle('chat:search', (_event, query: string) => searchChats(String(query ?? '')))
   ipcMain.handle('mcp:get', () => getMcpServers())

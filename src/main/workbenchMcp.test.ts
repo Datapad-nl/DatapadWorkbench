@@ -4,8 +4,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 const fake = vi.hoisted(() => ({
   calls: [] as Array<[string, unknown]>,
-  delegateDone: false
+  delegateDone: false,
+  chat: { botId: undefined as string | undefined, projectId: 'p' }
 }))
+vi.mock('./store', () => ({ getChat: async (chatId: string) => ({ id: chatId, ...fake.chat }) }))
 
 vi.mock('./browser', () => ({
   getBrowserState: () => ({ url: 'about:blank' }),
@@ -61,6 +63,7 @@ afterAll(() => server.close())
 beforeEach(() => {
   fake.calls.length = 0
   fake.delegateDone = false
+  fake.chat = { botId: undefined, projectId: 'p' }
 })
 
 function post(toolset: Toolset, body: unknown, signal?: AbortSignal): Promise<Response> {
@@ -98,6 +101,20 @@ describe('Workbench MCP over HTTP', () => {
     }
     expect(browser.result.tools.map((tool) => tool.name)).toContain('navigate')
     expect(browser.result.tools.map((tool) => tool.name)).not.toContain('delegate')
+  })
+
+  it("lists notify and follow_up only in a bot's own chats", async () => {
+    const names = async (): Promise<string[]> => {
+      const list = (await (await post('workbench', { jsonrpc: '2.0', id: 9, method: 'tools/list' })).json()) as {
+        result: { tools: Array<{ name: string }> }
+      }
+      return list.result.tools.map((tool) => tool.name)
+    }
+    expect(await names()).not.toContain('notify')
+    fake.chat = { botId: 'scout', projectId: 'p' }
+    expect(await names()).not.toContain('notify')
+    fake.chat = { botId: 'scout', projectId: '' }
+    expect(await names()).toEqual(expect.arrayContaining(['notify', 'follow_up', 'request_secret']))
   })
 
   it('runs a tool for the chat of the token, whatever the arguments name', async () => {

@@ -12,13 +12,16 @@ vi.mock('electron', () => ({
 import {
   addBotUnread,
   botAvatarUrl,
+  botSessionRules,
   clearBotAvatar,
   clearBotUnread,
   createBot,
   getBot,
   isBotFolder,
   listBots,
+  readBotMemory,
   removeBot,
+  saveBotMemoryIndex,
   setBotAvatar,
   setBotChat,
   updateBot
@@ -138,5 +141,24 @@ describe('bots', () => {
     await removeBot(bot.id)
     expect(await listBots()).toEqual([])
     expect(existsSync(bot.folder)).toBe(false)
+  })
+
+  it("keeps the bot's memory in its folder and puts the index in its session rules", async () => {
+    const bot = await createBot('Scout')
+    expect(await readBotMemory(bot.id)).toEqual({ folder: join(bot.folder, 'memory'), index: '', files: [] })
+    expect(botSessionRules(bot)).toContain(`Your memory is the folder ${join(bot.folder, 'memory')}.`)
+    expect(botSessionRules(bot)).toMatch(/### MEMORY\.md\n\(empty\)$/)
+
+    mkdirSync(join(bot.folder, 'memory', 'people'), { recursive: true })
+    writeFileSync(join(bot.folder, 'memory', 'people', 'peter.md'), 'Prefers short answers.')
+    writeFileSync(join(bot.folder, 'memory', '.DS_Store'), '')
+    const saved = await saveBotMemoryIndex(bot.id, '- [Peter](people/peter.md) — how he likes answers')
+    expect(saved).toMatchObject({ index: '- [Peter](people/peter.md) — how he likes answers', files: ['people/peter.md'] })
+    expect(readFileSync(join(bot.folder, 'memory', 'MEMORY.md'), 'utf8')).toBe(saved.index)
+
+    const rules = botSessionRules(bot, 'x'.repeat(9000))
+    expect(rules).toContain('cut here: keep MEMORY.md short')
+    expect(rules).not.toContain('x'.repeat(8001))
+    await expect(saveBotMemoryIndex('nobody', 'hi')).rejects.toThrow()
   })
 })

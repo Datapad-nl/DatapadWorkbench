@@ -408,6 +408,7 @@ export function ChatPane({
       ) : (
         <>
           <ScheduleBar chat={activeChat} />
+          <FollowUpBar chat={activeChat} />
           <MessageList
             chat={activeChat}
             chatId={activeChat.id}
@@ -595,6 +596,37 @@ function scheduleTime(iso: string): string {
 }
 
 /** Above the messages of a scheduled chat: when it runs, what it sends, and a way to stop it. */
+/** The follow-up a bot set in this chat: when it comes back, and what for. */
+function FollowUpBar({ chat }: { chat: Chat }): React.JSX.Element | null {
+  const wake = chat.wake
+  if (!wake) return null
+  return (
+    <div className="mx-auto mt-2 w-[min(var(--chat-width,720px),100%-40px)] shrink-0" data-testid="follow-up-bar">
+      <div className="flex items-center gap-2 rounded-[8px] border border-line-strong bg-raised px-3 py-2 text-[12.5px]">
+        <Icon name="clock" size={13} className="shrink-0 text-muted" />
+        <span className="min-w-0 truncate text-muted" title={wake.note}>
+          {'Follows up '}
+          <span className="text-ink">{scheduleTime(wake.at)}</span>
+          {` · ${wake.note}`}
+        </span>
+        <div className="flex-1" />
+        <button
+          type="button"
+          data-testid="follow-up-cancel"
+          className="shrink-0 font-medium text-muted hover:text-danger"
+          onClick={() => {
+            window.workbench
+              .cancelFollowUp(chat.id)
+              .catch((caught: unknown) => window.alert(errorText(caught, 'Could not cancel the follow-up')))
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function ScheduleBar({ chat }: { chat: Chat }): React.JSX.Element | null {
   const schedule = chat.schedule
   if (!schedule) return null

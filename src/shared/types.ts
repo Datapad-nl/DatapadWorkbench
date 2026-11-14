@@ -239,6 +239,10 @@ export type Chat = {
   worktreeBranch?: string | null
   /** Sends `prompt` to this chat once (`at`) or on a cron schedule. */
   schedule?: ChatSchedule | null
+  /** A bot's follow-up (`follow_up`): this chat wakes once at `at`, in the session that set it. */
+  wake?: ChatWake | null
+  /** A scheduled run or follow-up running here. Still set at start means the app closed during it. */
+  unattended?: UnattendedRun | null
   /** A GitHub pull request linked to this chat (`link_pr`). */
   pr?: ChatPullRequest | null
 }
@@ -269,6 +273,19 @@ export type ChatSchedule = {
   nextRunAt: string | null
   lastRunAt?: string
 }
+
+export type ChatWake = {
+  at: string
+  /** What the bot wants to check, in its own words. It is the message the chat wakes with. */
+  note: string
+  /** The session the follow-up was set in, which it resumes. */
+  sessionId: string | null
+}
+
+export type UnattendedRun = { kind: 'schedule' | 'followUp'; startedAt: string }
+
+/** A bot's memory folder: its MEMORY.md index and the other files in it. */
+export type BotMemory = { folder: string; index: string; files: string[] }
 
 export type ChatSummary = Omit<Chat, 'messages'> & {
   messageCount: number

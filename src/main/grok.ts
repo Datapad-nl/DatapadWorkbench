@@ -51,8 +51,9 @@ import {
   type SessionUpdate
 } from './acp'
 import { emitNotice, finishTurn, startTurn } from './activity'
-import { promptForBotAnswers, promptForBotsAsked } from './botPrompt'
-import { botFolder, botSessionRules, getBot } from './bots'
+import { promptForBotAnswers, promptForBotRun, promptForBotsAsked } from './botPrompt'
+import { botRun } from './botRuns'
+import { botFolder, botSessionRules, getBot, readBotMemory } from './bots'
 import { endForegroundAgents } from './builtinAgents'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
@@ -798,9 +799,11 @@ function chatFolder(chat: Chat, project: Project | undefined): string {
   return chatWorkingDir(chat, project?.path) || (chat.botId ? botFolder(chat.botId) : null) || homedir()
 }
 
-/** A bot's instructions come before the rules of the project it works in. */
+/** A bot's instructions and memory come before the rules of the project it works in. */
 async function chatRules(chat: Chat, project: Project | undefined): Promise<string | null> {
-  const bot = chat.botId ? botSessionRules(await getBot(chat.botId)) : null
+  const bot = chat.botId
+    ? botSessionRules(await getBot(chat.botId), (await readBotMemory(chat.botId)).index)
+    : null
   const rules = [bot, await projectSessionRules(project?.id)].filter(Boolean)
   return rules.length > 0 ? rules.join('\n\n') : null
 }
@@ -944,8 +947,12 @@ async function turnBody(turn: Turn, followUp?: FollowUp): Promise<Chat | null> {
   } catch (error) {
     if (isChatGone(error)) return null
     const draft = turn.draft.trim()
-    if (turn.cancelled || error instanceof TurnStopped || draft) return saveReply(turn, draft || stoppedReply(turn))
-    throw error
+    if (turn.cancelled || error instanceof TurnStopped) return saveReply(turn, draft || stoppedReply(turn))
+    if (!draft) throw error
+    const saved = await saveReply(turn, draft)
+    // Nobody watches a bot's unattended run, so it must still fail: the scheduler tells the user why.
+    if (botRun(turn.chatId)) throw error
+    return saved
   }
 }
 
@@ -1036,9 +1043,11 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   checkStopped(turn)
 
   const userText = followText || lastUser!.content
-  const mentioned = followText
+  const unattended = followText ? undefined : botRun(chat.id)
+  const asked = followText
     ? followText
     : promptForBotsAsked(promptForMentions(lastUser!.content, lastUser!.mentions), lastUser!.bots)
+  const mentioned = unattended ? promptForBotRun(asked, unattended) : asked
   // Bot answers posted since the agent's last prompt: it sees them now, once.
   const answers = chat.messages.filter((message) => message.fromBot && !message.fromBot.delivered)
   if (answers.length > 0) {

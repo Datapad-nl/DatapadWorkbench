@@ -766,6 +766,8 @@ export async function listChats(): Promise<ChatSummary[]> {
           worktreePath: chat.worktreePath ?? null,
           worktreeBranch: chat.worktreeBranch ?? null,
           schedule: chat.schedule ?? null,
+          wake: chat.wake ?? null,
+          unattended: chat.unattended ?? null,
           pr: chat.pr ?? null
         },
         edits: editsOf(chat)

@@ -281,6 +281,38 @@ export const WORKBENCH_TOOLS: McpTool[] = [
   }
 ]
 
+/** Only a bot's own chats, outside any project, have these: they are how its unattended runs work. */
+export const BOT_RUN_TOOLS: McpTool[] = [
+  {
+    name: 'notify',
+    description:
+      "Tell the user something, as a message from you in your own chat with a notification. In a scheduled run or a follow-up nobody is watching, and this is the only way the user hears from it: call it once, with a short message, when there is something new they need to know or act on, and not when there is nothing new. When the user is talking with you, just answer instead.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'What the user needs to know: the outcome and key details, short' }
+      },
+      required: ['message'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'follow_up',
+    description:
+      'Come back to this chat later, once, in this same session, for example to see whether something you are waiting for has happened. When the time comes you get `note` as a message and work unattended, as in a scheduled run. A chat has one follow-up; setting another replaces it. Datapad Workbench must be open; a follow-up missed while it was closed runs when it opens.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        note: { type: 'string', description: 'For yourself when you come back: what to check, and why' },
+        minutes: { type: 'number', description: 'Come back in this many minutes' },
+        at: { type: 'string', description: 'Or come back at this local date and time, e.g. 2026-11-06T09:00' }
+      },
+      required: ['note'],
+      additionalProperties: false
+    }
+  }
+]
+
 WORKBENCH_TOOLS.push(
   {
     name: 'schedule_task',

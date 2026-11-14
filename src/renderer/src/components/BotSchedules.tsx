@@ -32,6 +32,7 @@ export function BotSchedules({ bot }: { bot: Bot }): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const scheduled = chats.filter((chat) => chat.botId === bot.id && chat.schedule)
+  const followUps = chats.filter((chat) => chat.botId === bot.id && chat.wake)
 
   async function run(action: () => Promise<unknown>, fallback: string): Promise<boolean> {
     setBusy(true)
@@ -174,6 +175,13 @@ export function BotSchedules({ bot }: { bot: Bot }): React.JSX.Element {
         </div>
       )}
 
+      {(scheduled.length > 0 || followUps.length > 0) && (
+        <div className="text-[11px] text-faint">
+          Runs are quiet: each starts a fresh session with the bot&apos;s memory, and you hear from the bot only when it
+          has something new to tell you.
+        </div>
+      )}
+
       {scheduled.map((chat) => {
         const schedule = chat.schedule!
         return (
@@ -206,6 +214,38 @@ export function BotSchedules({ bot }: { bot: Bot }): React.JSX.Element {
               }}
             >
               Stop
+            </button>
+          </div>
+        )
+      })}
+
+      {followUps.map((chat) => {
+        const wake = chat.wake!
+        return (
+          <div
+            key={`wake-${chat.id}`}
+            data-testid="bot-follow-up-row"
+            className="flex items-start gap-3 rounded-lg border border-line bg-canvas px-3 py-2"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="line-clamp-2 text-[12.5px] text-ink">{wake.note}</div>
+              <div className="mt-0.5 text-[11.5px] text-muted">
+                Follow-up {new Date(wake.at).toLocaleString()} · in “{chat.title}”
+              </div>
+            </div>
+            <button
+              className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-2 hover:border-line-strong hover:text-ink"
+              onClick={() => void openChat(chat.id)}
+            >
+              Open chat
+            </button>
+            <button
+              data-testid="bot-follow-up-cancel"
+              className="shrink-0 rounded-md px-2 py-0.5 text-[11.5px] text-muted hover:text-danger disabled:opacity-50"
+              disabled={busy}
+              onClick={() => void run(() => window.workbench.cancelFollowUp(chat.id), 'Could not cancel the follow-up')}
+            >
+              Cancel
             </button>
           </div>
         )

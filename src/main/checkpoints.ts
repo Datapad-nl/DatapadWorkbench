@@ -101,12 +101,18 @@ function collectPaths(value: unknown, found: string[]): void {
   }
 }
 
-export function pathsFromUpdate(update: SessionUpdate['update'], root: string | null): string[] {
+/** The paths a tool call names, as the agent wrote them. */
+export function toolPaths(update: { locations?: Array<{ path?: string | null }> | null; rawInput?: unknown }): string[] {
   const raw: string[] = []
   for (const location of update.locations ?? []) {
     if (location.path) raw.push(location.path)
   }
   collectPaths(update.rawInput, raw)
+  return raw
+}
+
+export function pathsFromUpdate(update: SessionUpdate['update'], root: string | null): string[] {
+  const raw = toolPaths(update)
   if (!root) return []
   const unique: string[] = []
   for (const item of raw) {
@@ -458,6 +464,8 @@ export async function rewindTo(chatId: string, checkpointId: string, cwd: string
     const keepUntil = chat.messages.findIndex((message) => message.id === target.messageId)
     chat.messages = keepUntil === -1 ? chat.messages : chat.messages.slice(0, keepUntil)
     chat.grokSessionId = null
+    // A follow-up set before the rewind comes back in a fresh session, not the one rewound away.
+    if (chat.wake) chat.wake.sessionId = null
     chat.plan = null
     const current = chat.checkpoints ?? []
     const at = current.findIndex((item) => item.id === checkpointId)

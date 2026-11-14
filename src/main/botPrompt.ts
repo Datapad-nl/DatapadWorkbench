@@ -22,6 +22,18 @@ export function promptForBotsAsked(text: string, bots?: BotMention[]): string {
   )
 }
 
+/** A bot's scheduled run or follow-up: nobody is watching, so it says something only with `notify`. */
+export function promptForBotRun(text: string, run: { kind: 'schedule' | 'followUp' }): string {
+  const what =
+    run.kind === 'schedule'
+      ? 'This is a scheduled run. It starts in a fresh session: your memory holds what earlier runs found and already reported.'
+      : 'This is the follow-up you set earlier, in the session you set it from.'
+  return withBlock(
+    text,
+    `${what} Nobody is watching: the user sees nothing of this run unless you call the workbench tool notify. Call it once, with a short message, only when there is something new the user needs to know or act on. When there is nothing new, finish without it. Before you finish, save in your memory what a later run needs to know, such as what you reported.`
+  )
+}
+
 export function promptForBotAnswers(text: string, answers: Message[]): string {
   if (answers.length === 0) return text
   const body = answers

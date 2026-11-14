@@ -13,6 +13,7 @@ import type {
   BrowserState,
   Bot,
   BotMention,
+  BotMemory,
   BotSkill,
   Chat,
   ChatLiveState,
@@ -65,6 +66,9 @@ const api = {
   pickBotAvatar: (botId: string): Promise<Bot | null> => ipcRenderer.invoke('bot:pickAvatar', botId),
   clearBotAvatar: (botId: string): Promise<Bot> => ipcRenderer.invoke('bot:clearAvatar', botId),
   openBotFolder: (botId: string): Promise<void> => ipcRenderer.invoke('bot:openFolder', botId),
+  /** The bot's memory folder: its MEMORY.md index and the other files in it. */
+  getBotMemory: (botId: string): Promise<BotMemory> => ipcRenderer.invoke('bot:memory', botId),
+  saveBotMemory: (botId: string, index: string): Promise<BotMemory> => ipcRenderer.invoke('bot:saveMemory', botId, index),
   listBotSkills: (botId: string): Promise<BotSkill[]> => ipcRenderer.invoke('bot:skills', botId),
   saveBotSkill: (input: SaveBotSkillInput): Promise<BotSkill> => ipcRenderer.invoke('bot:saveSkill', input),
   removeBotSkill: (botId: string, name: string): Promise<void> => ipcRenderer.invoke('bot:removeSkill', botId, name),
@@ -95,6 +99,8 @@ const api = {
   getChatCommands: (chatId: string) => ipcRenderer.invoke('chat:commands', chatId) as Promise<AgentCommand[]>,
   deleteChat: (chatId: string) => ipcRenderer.invoke('chat:delete', chatId),
   stopSchedule: (chatId: string) => ipcRenderer.invoke('chat:stopSchedule', chatId) as Promise<Chat>,
+  /** Drops the follow-up a bot set in this chat. */
+  cancelFollowUp: (chatId: string) => ipcRenderer.invoke('chat:cancelFollowUp', chatId) as Promise<Chat>,
   unlinkPr: (chatId: string) => ipcRenderer.invoke('chat:unlinkPr', chatId) as Promise<Chat>,
   renameChat: (id: string, title: string) => ipcRenderer.invoke('chat:rename', { id, title }),
   conductChat: (chatId: string) => ipcRenderer.invoke('chat:conduct', chatId) as Promise<Chat>,

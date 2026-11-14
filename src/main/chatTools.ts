@@ -4,6 +4,8 @@ import type {
   Chat,
   ChatAgent,
   ChatEvent,
+  ChatSummary,
+  ChatWake,
   FileMention,
 } from "../shared/types";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
@@ -13,6 +15,7 @@ import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
 import { addBotUnread, clearBotUnread, getBot, setBotChat } from "./bots";
+import { endBotRun, startBotRun } from "./botRuns";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { id, now } from "./ids";
 import {
@@ -44,6 +47,7 @@ let emit: ((event: ChatEvent) => void) | null = null;
 let streaming: (chatId: string) => boolean = () => false;
 let builtinAgents: (chatId: string) => BuiltinAgent[] = () => [];
 let notifyBot: (bot: Bot, chatId: string, text: string) => void = () => {};
+let closeSession: (sessionId: string) => Promise<void> = async () => {};
 
 // The streaming check is handed over too: importing grok.ts here would close an import cycle
 // through acp.ts and browserAgent.ts, and grok.ts would then run before acp.ts is ready.
@@ -55,8 +59,11 @@ export function registerChatTools(input: {
   builtinAgents?: (chatId: string) => BuiltinAgent[];
   /** The system notification for a new message in a bot's chat. */
   notifyBot?: (bot: Bot, chatId: string, text: string) => void;
+  /** Lets the agent drop a session a chat has moved on from. */
+  closeSession?: (sessionId: string) => Promise<void>;
 }): void {
   sendTurn = input.send;
+  if (input.closeSession) closeSession = input.closeSession;
   emit = input.emit;
   streaming = input.isStreaming;
   if (input.builtinAgents) builtinAgents = input.builtinAgents;
@@ -236,18 +243,20 @@ export async function askBot(input: {
   }
 }
 
+/** `delivered`: the chat's own agent wrote it, so its next prompt need not bring it. */
 async function postBotAnswer(
   input: { botId: string; fromChatId: string },
   name: string,
   runChatId: string,
   content: string,
+  delivered = false,
 ): Promise<void> {
   const chat = await mutateChat(input.fromChatId, (latest) => {
     latest.messages.push({
       id: id(),
       role: "assistant",
       content,
-      fromBot: { botId: input.botId, name, runChatId },
+      fromBot: { botId: input.botId, name, runChatId, ...(delivered ? { delivered } : {}) },
       createdAt: now(),
     });
   });
@@ -791,120 +800,281 @@ export async function cancelProjectSchedule(input: {
 
 let scheduler: NodeJS.Timeout | null = null;
 let checking = false;
+let recovered = false;
 
-/** Scheduled runs of a bot whose answer goes to the bot's chat once they finish. */
-const botRuns = new Set<string>();
-
-/** Whether a scheduled run of a bot is running in this chat. Its answer is told about in the bot's chat. */
-export function isBotRun(chatId: string): boolean {
-  return botRuns.has(chatId);
-}
-
-/** The chat is being deleted, so its run posts nothing. Otherwise the bot's chat could come back after it went. */
+/** The chat is being deleted, so its run says nothing more. Otherwise the bot's chat could come back after it went. */
 export function forgetBotRun(chatId: string): void {
-  botRuns.delete(chatId);
+  endBotRun(chatId);
 }
 
-/** Posts a scheduled run's answer in the bot's own chat, as a message from the bot. */
-async function postRunAnswer(
+/** Where a message from a scheduled run says it came from. */
+function runSource(title: string): string {
+  return title.replace(/^Scheduled: /, "");
+}
+
+/**
+ * The bot tells the user something: a message from the bot in its own chat, with a toast, a notice
+ * and one more unread. `inChat`: the text is already in `from`, which may be the bot's own chat.
+ */
+async function tellFromBot(
   botId: string,
-  run: Pick<Chat, "id" | "title">,
+  from: Pick<Chat, "id" | "title">,
   content: string,
+  inChat = false,
 ): Promise<void> {
-  if (!botRuns.delete(run.id)) return;
   const bot = await getBot(botId);
   const chat = await botChat(bot.id);
-  await postBotAnswer({ botId: bot.id, fromChatId: chat.id }, bot.name, run.id, content);
-  await botMessage(bot.id, chat.id, content, run.title.replace(/^Scheduled: /, ""));
+  const own = chat.id === from.id;
+  if (!(own && inChat)) {
+    await postBotAnswer({ botId: bot.id, fromChatId: chat.id }, bot.name, from.id, content, own);
+  }
+  await botMessage(bot.id, chat.id, content, own ? undefined : runSource(from.title));
 }
 
-/** Send each due schedule's prompt to its chat. A run missed while the app was closed runs once at start. */
+/** The chats where a bot runs unattended and speaks with `notify`: its own, outside any project. */
+function isBotsOwn(chat: Pick<Chat, "botId" | "projectId">): chat is Pick<Chat, "projectId"> & { botId: string } {
+  return Boolean(chat.botId) && !chat.projectId;
+}
+
+/** `notify`: the one way a bot's unattended run reaches the user. */
+export async function notifyFromBot(input: {
+  from?: unknown;
+  message?: unknown;
+}): Promise<unknown> {
+  const caller = await callerChat(input.from);
+  if (!isBotsOwn(caller)) {
+    throw new Error("notify is for a bot's own chats. Here, your answer is posted where you were asked.");
+  }
+  const message = optionalText(input.message);
+  if (!message) throw new Error("Pass the message for the user.");
+  await tellFromBot(caller.botId, caller, message);
+  return { sent: true };
+}
+
+const MAX_FOLLOW_UP_MINUTES = 366 * 24 * 60;
+
+function wakeTime(at: unknown, minutes: unknown): Date {
+  const inMinutes = typeof minutes === "number" && Number.isFinite(minutes) ? minutes : undefined;
+  const atText = optionalText(at);
+  if ((inMinutes === undefined) === !atText) throw new Error("Pass either at or minutes.");
+  if (inMinutes === undefined) return firstRun(undefined, atText);
+  if (inMinutes < 1 || inMinutes > MAX_FOLLOW_UP_MINUTES) {
+    throw new Error("Pass minutes from 1 up to a year.");
+  }
+  return new Date(Date.now() + inMinutes * 60_000);
+}
+
+/** `follow_up`: this chat wakes once, later, in the session it is set from. One per chat; a new one replaces it. */
+export async function setFollowUp(input: {
+  from?: unknown;
+  at?: unknown;
+  minutes?: unknown;
+  note?: unknown;
+}): Promise<unknown> {
+  const caller = await callerChat(input.from);
+  if (!isBotsOwn(caller)) throw new Error("follow_up is for a bot's own chats.");
+  const note = optionalText(input.note);
+  if (!note) throw new Error("Pass the note: what to check, and why.");
+  const at = wakeTime(input.at, input.minutes);
+  const chat = await mutateChat(caller.id, (latest) => {
+    latest.wake = { at: at.toISOString(), note, sessionId: latest.grokSessionId ?? null };
+  });
+  emitChat(chat);
+  return { chatId: chat.id, at: at.toString(), replaced: caller.wake ? caller.wake.note : undefined };
+}
+
+export async function cancelFollowUp(chatId: string): Promise<Chat> {
+  const chat = await mutateChat(chatId, (latest) => {
+    latest.wake = null;
+  });
+  emitChat(chat);
+  return chat;
+}
+
+/** The run that started at `startedAt` is over: nothing is left to recover at the next start. */
+async function finishUnattended(chatId: string, startedAt: string): Promise<void> {
+  const chat = await mutateChat(chatId, (latest) => {
+    // A later run in this chat has marked it since; that one is still going.
+    if (latest.unattended?.startedAt === startedAt) latest.unattended = null;
+  }).catch(() => null);
+  if (chat) emitChat(chat);
+}
+
+/** The session a chat leaves behind is let go, unless the chat is back in it. */
+function closeLeftSession(sessionId: string | null | undefined, current: string | null | undefined): void {
+  if (sessionId && sessionId !== current) void closeSession(sessionId).catch(() => {});
+}
+
+/** Send each due schedule's prompt, and each due follow-up, to its chat. A run missed while the app was closed runs once at start. */
 async function runDueSchedules(): Promise<void> {
   if (checking || !sendTurn) return;
   checking = true;
   try {
+    if (!recovered) {
+      recovered = true;
+      await recordInterruptedRuns();
+    }
     const now = new Date();
     for (const summary of await listChats()) {
-      const schedule = summary.schedule;
-      if (
-        !schedule?.nextRunAt ||
-        Date.parse(schedule.nextRunAt) > now.getTime()
-      )
-        continue;
       // Busy with the last run or the user: try again on the next check.
       if (chatRunning(summary.id)) continue;
-      let next: string | null = null;
-      try {
-        next = schedule.cron
-          ? (nextCronRun(schedule.cron, now)?.toISOString() ?? null)
-          : null;
-      } catch {
-        next = null;
-      }
-      // A bot's schedule outside a project: its answer goes to the bot's chat, never the bot's chat itself.
-      const bot =
-        summary.botId && !summary.projectId
-          ? await getBot(summary.botId).catch(() => null)
-          : null;
-      const botId = bot && bot.chatId !== summary.id ? bot.id : null;
-      if (botId) botRuns.add(summary.id);
-      try {
-        const run = await send(summary.id, schedule.prompt);
-        // Kept in the chat: the run's live error is gone once the window misses it.
-        run.done.catch((error: unknown) => recordFailedRun(summary.id, error));
-        if (botId) {
-          run.done
-            .then(
-              (done) => {
-                if (!done) return void botRuns.delete(summary.id);
-                const reply = done.messages.at(-1);
-                return postRunAnswer(
-                  botId,
-                  done,
-                  reply?.role === "assistant"
-                    ? plainReply(reply.content) || "(empty answer)"
-                    : "(no answer)",
-                );
-              },
-              (error: unknown) =>
-                postRunAnswer(
-                  botId,
-                  summary,
-                  `The scheduled run failed: ${error instanceof Error ? error.message : String(error)}`,
-                ),
-            )
-            .catch(() => {});
-        }
-      } catch {
-        botRuns.delete(summary.id);
-        // Not started, so the run is still due: the next check tries again.
-        continue;
-      }
-      const chat = await mutateChat(summary.id, (latest) => {
-        // Changed or cancelled while the run started: leave the user's schedule alone.
-        if (latest.schedule?.nextRunAt !== schedule.nextRunAt) return;
-        latest.schedule = next
-          ? { ...latest.schedule, nextRunAt: next, lastRunAt: now.toISOString() }
-          : null;
-      }).catch(() => null);
-      if (chat) emit?.({ type: "chat", chatId: chat.id, chat });
+      const nextRunAt = summary.schedule?.nextRunAt;
+      if (nextRunAt && Date.parse(nextRunAt) <= now.getTime()) await runSchedule(summary, now);
+      else if (summary.wake && Date.parse(summary.wake.at) <= now.getTime()) await runFollowUp(summary, now);
     }
   } finally {
     checking = false;
   }
 }
 
-async function recordFailedRun(chatId: string, error: unknown): Promise<void> {
+async function runSchedule(summary: ChatSummary, now: Date): Promise<void> {
+  const schedule = summary.schedule!;
+  let next: string | null = null;
+  try {
+    next = schedule.cron
+      ? (nextCronRun(schedule.cron, now)?.toISOString() ?? null)
+      : null;
+  } catch {
+    next = null;
+  }
+  // A bot's schedule outside a project runs unattended, never in the bot's chat itself.
+  const bot = isBotsOwn(summary) ? await getBot(summary.botId).catch(() => null) : null;
+  const botId = bot && bot.chatId !== summary.id ? bot.id : null;
+  // The user may have started a turn here meanwhile: try again on the next check.
+  if (chatRunning(summary.id)) return;
+  const startedAt = now.toISOString();
+  let leftSession: string | null = null;
+  const marked = await mutateChat(summary.id, (latest) => {
+    // Each run of a bot starts fresh: what it needs from earlier runs is in its memory.
+    if (botId) {
+      leftSession = latest.grokSessionId ?? null;
+      latest.grokSessionId = null;
+    }
+    latest.unattended = { kind: "schedule", startedAt };
+  }).catch(() => null);
+  // Deleted since the list was read.
+  if (!marked) return;
+  closeLeftSession(leftSession, null);
+  const botRun = botId ? startBotRun(summary.id, { botId, kind: "schedule" }) : null;
+  let run: { done: Promise<Chat | null> };
+  try {
+    run = await send(summary.id, schedule.prompt);
+  } catch {
+    if (botRun) endBotRun(summary.id, botRun);
+    await finishUnattended(summary.id, startedAt);
+    // Not started, so the run is still due: the next check tries again.
+    return;
+  }
+  run.done.then(
+    () => {
+      if (botRun) endBotRun(summary.id, botRun);
+    },
+    async (error: unknown) => {
+      // Kept in the chat: the run's live error is gone once the window misses it.
+      const text = await recordFailedRun(summary.id, "The scheduled run failed", error);
+      if (botRun && endBotRun(summary.id, botRun)) await tellFromBot(botRun.botId, summary, text);
+    },
+  )
+    .catch(() => {})
+    .finally(() => void finishUnattended(summary.id, startedAt));
+  const chat = await mutateChat(summary.id, (latest) => {
+    // Changed or cancelled while the run started: leave the user's schedule alone.
+    if (latest.schedule?.nextRunAt !== schedule.nextRunAt) return;
+    latest.schedule = next
+      ? { ...latest.schedule, nextRunAt: next, lastRunAt: now.toISOString() }
+      : null;
+  }).catch(() => null);
+  if (chat) emitChat(chat);
+}
+
+async function runFollowUp(summary: ChatSummary, now: Date): Promise<void> {
+  const listed = summary.wake!;
+  // Only a bot's own chat sets one.
+  if (!isBotsOwn(summary)) {
+    await cancelFollowUp(summary.id).catch(() => null);
+    return;
+  }
+  // Its bot tells the user the outcome. A bot that is gone takes its chats along, so try again later.
+  const bot = await getBot(summary.botId).catch(() => null);
+  if (!bot || chatRunning(summary.id)) return;
+  const startedAt = now.toISOString();
+  let wake: ChatWake | null = null;
+  let leftSession: string | null = null;
+  const woken = await mutateChat(summary.id, (latest) => {
+    // Cancelled or replaced since the list was read.
+    if (!latest.wake || latest.wake.at !== listed.at || latest.wake.note !== listed.note) return;
+    wake = latest.wake;
+    latest.wake = null;
+    // Back in the session it was set from, even if a scheduled run has started another since.
+    leftSession = latest.grokSessionId ?? null;
+    if (wake.sessionId) latest.grokSessionId = wake.sessionId;
+    latest.unattended = { kind: "followUp", startedAt };
+  }).catch(() => null);
+  const due = wake as ChatWake | null;
+  if (!woken || !due) return;
+  emitChat(woken);
+  if (due.sessionId) closeLeftSession(leftSession, due.sessionId);
+  const botRun = startBotRun(summary.id, { botId: bot.id, kind: "followUp", note: due.note });
+  let run: { done: Promise<Chat | null> };
+  try {
+    run = await send(summary.id, `Follow-up: ${due.note}`);
+  } catch {
+    endBotRun(summary.id, botRun);
+    // Not started: it stays due, and the next check tries again.
+    const kept = await mutateChat(summary.id, (latest) => {
+      latest.wake ??= due;
+      if (latest.unattended?.startedAt === startedAt) latest.unattended = null;
+    }).catch(() => null);
+    if (kept) emitChat(kept);
+    return;
+  }
+  run.done.then(
+    () => {
+      endBotRun(summary.id, botRun);
+    },
+    async (error: unknown) => {
+      const text = await recordFailedRun(summary.id, "The follow-up failed", error);
+      if (endBotRun(summary.id, botRun)) await tellFromBot(bot.id, summary, text, true);
+    },
+  )
+    .catch(() => {})
+    .finally(() => void finishUnattended(summary.id, startedAt));
+}
+
+/** Writes why a run failed in its chat, and gives the text. */
+async function recordFailedRun(chatId: string, what: string, error: unknown): Promise<string> {
   const reason = error instanceof Error ? error.message : String(error);
+  const content = `${what}: ${reason}`;
   const chat = await mutateChat(chatId, (latest) => {
     latest.messages.push({
       id: id(),
       role: "assistant",
-      content: `The scheduled run failed: ${reason}`,
+      content,
       createdAt: now(),
     });
   }).catch(() => null);
-  if (chat) emit?.({ type: "chat", chatId: chat.id, chat });
+  if (chat) emitChat(chat);
+  return content;
+}
+
+/**
+ * Runs the app closed during are still marked at the next start. Each says so in its chat, and a bot's
+ * run tells the user too, since a run that never finished would otherwise go unnoticed.
+ */
+async function recordInterruptedRuns(): Promise<void> {
+  for (const summary of await listChats()) {
+    const run = summary.unattended;
+    if (!run || chatRunning(summary.id)) continue;
+    const what = run.kind === "schedule" ? "The scheduled run" : "The follow-up";
+    const content = `${what} that started ${new Date(run.startedAt).toLocaleString()} did not finish: Datapad Workbench closed during it.`;
+    const chat = await mutateChat(summary.id, (latest) => {
+      latest.unattended = null;
+      latest.messages.push({ id: id(), role: "assistant", content, createdAt: now() });
+    }).catch(() => null);
+    if (!chat) continue;
+    emitChat(chat);
+    if (isBotsOwn(summary)) await tellFromBot(summary.botId, summary, content, true).catch(() => {});
+  }
 }
 
 export function startScheduler(): void {

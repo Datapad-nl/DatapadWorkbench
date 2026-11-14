@@ -29,6 +29,16 @@ describe('tray menu', () => {
     expect(lines[2]).toEqual({ id: 'c', label: 'Idle' })
   })
 
+  it('counts a follow-up as the next run when it comes first', () => {
+    const chats = [
+      { id: 'a1', botId: 'a', schedule: { prompt: 'x', cron: '0 9 * * *', nextRunAt: new Date(2026, 10, 14, 9).toISOString() } },
+      { id: 'a2', botId: 'a', wake: { at: new Date(2026, 10, 12, 17, 45).toISOString(), note: 'deploy', sessionId: null } }
+    ]
+    const [line] = trayBots([{ id: 'a', name: 'Scout' }], chats, () => false, now)
+    expect(line.label).toMatch(/^Scout · next today /)
+    expect(line.label).toContain('45')
+  })
+
   it('says how many new messages are in a bot\'s chat', () => {
     const bots = [
       { id: 'a', name: 'Nova', unread: 2 },

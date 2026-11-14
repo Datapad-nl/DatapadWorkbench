@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Bot, Chat, ChatEvent } from '../shared/types'
+import type { Chat, ChatEvent } from '../shared/types'
 
 const stub = vi.hoisted(() => ({
   chats: new Map<string, Chat>(),
@@ -60,9 +60,11 @@ import {
   handoffChat,
   markBotRead,
   newBotChat,
+  notifyFromBot,
   nudgeWorker,
   registerChatTools,
   scheduleBotTask,
+  setFollowUp,
   startScheduler,
   waitForDelegate
 } from './chatTools'
@@ -513,55 +515,200 @@ describe("the bot's chat", () => {
     expect(events).toEqual([{ type: 'bot', bot: expect.objectContaining({ id: 'scout', unread: 0 }) }])
   })
 
-  it("gets a scheduled run's answer, or why it failed, as a new message from the bot", async () => {
+  /** A fresh module, so its scheduler starts on fake timers. */
+  async function freshTools(
+    send: (chatId: string, content: string) => Promise<{ chat: Chat; done: Promise<Chat | null> }>
+  ): Promise<{ tools: typeof import('./chatTools'); events: ChatEvent[]; notified: string[]; closed: string[] }> {
+    vi.resetModules()
+    const tools = await import('./chatTools')
+    const events: ChatEvent[] = []
+    const notified: string[] = []
+    const closed: string[] = []
+    tools.registerChatTools({
+      send,
+      emit: (event) => events.push(event),
+      isStreaming: () => false,
+      notifyBot: (_bot, _chatId, text) => notified.push(text),
+      closeSession: async (sessionId) => {
+        closed.push(sessionId)
+      }
+    })
+    return { tools, events, notified, closed }
+  }
+
+  it("keeps a scheduled run quiet, in a fresh session, and tells the user only when it failed", async () => {
     botChats()
     vi.useFakeTimers()
     const due = new Date(Date.now() - 60_000).toISOString()
     const run = (id: string, title: string) =>
-      ({ id, projectId: '', botId: 'scout', title, messages: [], schedule: { prompt: 'brief me', nextRunAt: due } }) as unknown as Chat
+      ({
+        id,
+        projectId: '',
+        botId: 'scout',
+        title,
+        grokSessionId: `old-${id}`,
+        messages: [],
+        schedule: { prompt: 'brief me', nextRunAt: due }
+      }) as unknown as Chat
     stub.chats.set('brief', run('brief', 'Scheduled: Morning brief'))
     stub.chats.set('broken', run('broken', 'Scheduled: Backup'))
-    // A fresh module, so its scheduler starts on these fake timers.
-    vi.resetModules()
-    const tools = await import('./chatTools')
-    const events: ChatEvent[] = []
-    const notified: Array<[Pick<Bot, 'id' | 'unread'>, string, string]> = []
-    tools.registerChatTools({
-      send: async (chatId) => {
-        const chat = stub.chats.get(chatId)!
-        if (chatId === 'broken') return { chat, done: Promise.reject(new Error('disk full')) }
-        chat.messages.push({ id: 'a1', role: 'assistant', content: 'All quiet.\nNothing to do.', createdAt: '' })
-        return { chat, done: Promise.resolve(structuredClone(chat)) }
-      },
-      emit: (event) => events.push(event),
-      isStreaming: () => false,
-      notifyBot: (bot, chatId, text) => notified.push([bot, chatId, text])
+    const seen: Array<[string, string | null | undefined, unknown]> = []
+    const { tools, events, notified, closed } = await freshTools(async (chatId) => {
+      const chat = stub.chats.get(chatId)!
+      seen.push([chatId, chat.grokSessionId, chat.unattended?.kind])
+      if (chatId === 'broken') return { chat, done: Promise.reject(new Error('disk full')) }
+      chat.messages.push({ id: 'a1', role: 'assistant', content: 'All quiet.', createdAt: '' })
+      return { chat, done: Promise.resolve(structuredClone(chat)) }
     })
 
     tools.startScheduler()
     await vi.advanceTimersByTimeAsync(5_000)
 
+    // Each run started in a fresh session, marked as running unattended.
+    expect(seen).toEqual([
+      ['brief', null, 'schedule'],
+      ['broken', null, 'schedule']
+    ])
+    // The sessions of the last runs are let go.
+    expect(closed).toEqual(['old-brief', 'old-broken'])
     const own = stub.chats.get(stub.scout.chatId!)!
-    expect(own.messages.map((message) => [message.content, message.fromBot])).toEqual(
+    expect(own.messages.map((message) => [message.content, message.fromBot])).toEqual([
+      ['The scheduled run failed: disk full', { botId: 'scout', name: 'Scout', runChatId: 'broken' }]
+    ])
+    expect(stub.scout.unread).toBe(1)
+    expect(notified).toEqual(['The scheduled run failed: disk full'])
+    expect(events).toContainEqual(expect.objectContaining({ type: 'bot-message', source: 'Backup' }))
+    // The failure is still kept in the run's own chat, and neither run is left marked.
+    expect(stub.chats.get('broken')!.messages.at(-1)?.content).toBe('The scheduled run failed: disk full')
+    expect(stub.chats.get('brief')!.unattended).toBeNull()
+    expect(stub.chats.get('broken')!.unattended).toBeNull()
+  })
+
+  it('posts what a bot notifies in its own chat, and refuses notify outside its own chats', async () => {
+    const events = botChats()
+    const own = await botChat('scout')
+    stub.chats.set('run', { id: 'run', projectId: '', botId: 'scout', title: 'Scheduled: Inbox', messages: [] } as unknown as Chat)
+    stub.chats.set('job', { id: 'job', projectId: 'p', botId: 'scout', title: 'Job', messages: [] } as unknown as Chat)
+
+    await expect(notifyFromBot({ from: 'run', message: 'Two new invoices.' })).resolves.toEqual({ sent: true })
+    await notifyFromBot({ from: own.id, message: 'Done with the inbox.' })
+    await expect(notifyFromBot({ from: 'job', message: 'hi' })).rejects.toThrow("a bot's own chats")
+    await expect(notifyFromBot({ from: 'run', message: ' ' })).rejects.toThrow('Pass the message')
+
+    expect(stub.chats.get(own.id)!.messages.map((message) => [message.content, message.fromBot])).toEqual([
+      ['Two new invoices.', { botId: 'scout', name: 'Scout', runChatId: 'run' }],
+      // Said in this chat's own session, so not handed back to it as news.
+      ['Done with the inbox.', { botId: 'scout', name: 'Scout', runChatId: own.id, delivered: true }]
+    ])
+    expect(stub.scout.unread).toBe(2)
+    expect(events).toContainEqual(expect.objectContaining({ type: 'bot-message', text: 'Two new invoices.', source: 'Inbox' }))
+  })
+
+  it('sets one follow-up per chat, in the session it was set from', async () => {
+    botChats()
+    stub.chats.set('run', {
+      id: 'run',
+      projectId: '',
+      botId: 'scout',
+      title: 'Scheduled: Deploys',
+      grokSessionId: 'session-1',
+      messages: []
+    } as unknown as Chat)
+    stub.chats.set('job', { id: 'job', projectId: 'p', botId: 'scout', title: 'Job', messages: [] } as unknown as Chat)
+
+    const first = (await setFollowUp({ from: 'run', minutes: 30, note: 'Is the deploy green?' })) as { replaced?: string }
+    expect(first.replaced).toBeUndefined()
+    const wake = stub.chats.get('run')!.wake!
+    expect(wake).toMatchObject({ note: 'Is the deploy green?', sessionId: 'session-1' })
+    expect(Date.parse(wake.at) - Date.now()).toBeGreaterThan(29 * 60_000)
+
+    const second = (await setFollowUp({ from: 'run', minutes: 5, note: 'Check again' })) as { replaced?: string }
+    expect(second.replaced).toBe('Is the deploy green?')
+    expect(stub.chats.get('run')!.wake!.note).toBe('Check again')
+
+    await expect(setFollowUp({ from: 'run', note: 'when?' })).rejects.toThrow('either at or minutes')
+    await expect(setFollowUp({ from: 'run', minutes: 0, note: 'now' })).rejects.toThrow('from 1 up to a year')
+    await expect(setFollowUp({ from: 'run', minutes: 5 })).rejects.toThrow('Pass the note')
+    await expect(setFollowUp({ from: 'job', minutes: 5, note: 'x' })).rejects.toThrow("a bot's own chats")
+  })
+
+  it('wakes a due follow-up in its own session, and tells the user once when it fails', async () => {
+    botChats()
+    vi.useFakeTimers()
+    const own = await botChat('scout')
+    const due = new Date(Date.now() - 60_000).toISOString()
+    stub.chats.set('run', {
+      id: 'run',
+      projectId: '',
+      botId: 'scout',
+      title: 'Scheduled: Deploys',
+      grokSessionId: 'newer-session',
+      messages: [],
+      wake: { at: due, note: 'Is the deploy green?', sessionId: 'session-1' }
+    } as unknown as Chat)
+    stub.chats.get(own.id)!.wake = { at: due, note: 'Look at the inbox again', sessionId: null }
+    const sent: Array<[string, string, string | null | undefined]> = []
+    const { tools, notified, closed } = await freshTools(async (chatId, content) => {
+      const chat = stub.chats.get(chatId)!
+      sent.push([chatId, content, chat.grokSessionId])
+      if (chatId === own.id) return { chat, done: Promise.reject(new Error('signed out')) }
+      return { chat, done: Promise.resolve(structuredClone(chat)) }
+    })
+
+    tools.startScheduler()
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    expect(sent).toEqual(
       expect.arrayContaining([
-        ['All quiet.\nNothing to do.', { botId: 'scout', name: 'Scout', runChatId: 'brief' }],
-        ['The scheduled run failed: disk full', { botId: 'scout', name: 'Scout', runChatId: 'broken' }]
+        ['run', 'Follow-up: Is the deploy green?', 'session-1'],
+        [own.id, 'Follow-up: Look at the inbox again', undefined]
       ])
     )
-    expect(own.messages).toHaveLength(2)
-    expect(own.messages.every((message) => message.role === 'assistant')).toBe(true)
-    expect(stub.scout.unread).toBe(2)
-    expect(vi.mocked(createChat)).toHaveBeenCalledTimes(1)
-    expect(events).toContainEqual({
-      type: 'bot-message',
+    expect(stub.chats.get('run')!.wake).toBeNull()
+    expect(stub.chats.get(own.id)!.wake).toBeNull()
+    // The session a scheduled run started since is let go; the bot's own chat kept its session.
+    expect(closed).toEqual(['newer-session'])
+    // The failure is written once in the bot's own chat, where the follow-up ran.
+    expect(stub.chats.get(own.id)!.messages.map((message) => message.content)).toEqual(['The follow-up failed: signed out'])
+    expect(notified).toEqual(['The follow-up failed: signed out'])
+    expect(stub.chats.get('run')!.messages).toEqual([])
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(sent).toHaveLength(2)
+  })
+
+  it('records runs the app closed during, and tells the user about a bot\'s', async () => {
+    botChats()
+    vi.useFakeTimers()
+    const startedAt = new Date(Date.now() - 3_600_000).toISOString()
+    stub.chats.set('run', {
+      id: 'run',
+      projectId: '',
       botId: 'scout',
-      chatId: own.id,
-      text: 'All quiet.\nNothing to do.',
-      source: 'Morning brief'
+      title: 'Scheduled: Deploys',
+      messages: [],
+      unattended: { kind: 'schedule', startedAt }
+    } as unknown as Chat)
+    stub.chats.set('nightly', {
+      id: 'nightly',
+      projectId: 'p',
+      title: 'Nightly',
+      messages: [],
+      unattended: { kind: 'schedule', startedAt }
+    } as unknown as Chat)
+    const { tools, notified } = await freshTools(async () => {
+      throw new Error('nothing is due')
     })
-    expect(events).toContainEqual(expect.objectContaining({ type: 'bot-message', source: 'Backup' }))
-    expect(notified.map(([, chatId]) => chatId)).toEqual([own.id, own.id])
-    // The failure is still kept in the run's own chat.
-    expect(stub.chats.get('broken')!.messages.at(-1)?.content).toBe('The scheduled run failed: disk full')
+
+    tools.startScheduler()
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    for (const id of ['run', 'nightly']) {
+      const chat = stub.chats.get(id)!
+      expect(chat.unattended).toBeNull()
+      expect(chat.messages.at(-1)?.content).toMatch(/^The scheduled run that started .* did not finish: Datapad Workbench closed during it\.$/)
+    }
+    expect(notified).toHaveLength(1)
+    expect(stub.chats.get(stub.scout.chatId!)!.messages.at(-1)?.fromBot).toMatchObject({ runChatId: 'run' })
   })
 })

@@ -21,15 +21,18 @@ import {
   delegateTask,
   handoffChat,
   listProjectChats,
+  notifyFromBot,
   nudgeWorker,
   readProjectChat,
   scheduleTask,
+  setFollowUp,
   startProjectChat,
   waitForDelegate
 } from './chatTools'
 import { linkPr, prStatus, unlinkCallerPr } from './pullRequests'
 import { cancelSecret, requestSecret, waitForSecret } from './secretTools'
-import { BROWSER_TOOLS, WORKBENCH_TOOLS } from './workbenchMcpTools'
+import { getChat } from './store'
+import { BOT_RUN_TOOLS, BROWSER_TOOLS, WORKBENCH_TOOLS, type McpTool } from './workbenchMcpTools'
 
 /**
  * The Workbench's own MCP servers, served over streamable HTTP from the main process. The agents connect to
@@ -111,7 +114,15 @@ async function workbenchTool(name: string, args: Args, from: string, signal: Abo
   if (name === 'pr_status') return prStatus({ ...args, from })
   if (name === 'unlink_pr') return unlinkCallerPr({ from })
   if (name === 'request_secret') return secret(args, from, signal)
+  if (name === 'notify') return notifyFromBot({ ...args, from })
+  if (name === 'follow_up') return setFollowUp({ ...args, from })
   throw new Error(`Unknown tool: ${name}`)
+}
+
+/** The workbench tools of a chat: a bot's own chat also has the tools of its unattended runs. */
+async function workbenchTools(chatId: string): Promise<McpTool[]> {
+  const chat = await getChat(chatId).catch(() => null)
+  return chat?.botId && !chat.projectId ? [...WORKBENCH_TOOLS, ...BOT_RUN_TOOLS] : WORKBENCH_TOOLS
 }
 
 async function browserTool(name: string, args: Args): Promise<unknown> {
@@ -259,7 +270,9 @@ export async function handleMcp(
     return
   }
   if (method === 'ping') return reply({})
-  if (method === 'tools/list') return reply({ tools: toolset === 'workbench' ? WORKBENCH_TOOLS : BROWSER_TOOLS })
+  if (method === 'tools/list') {
+    return reply({ tools: toolset === 'workbench' ? await workbenchTools(binding.chatId) : BROWSER_TOOLS })
+  }
   if (method !== 'tools/call') {
     sendJson(res, 200, { jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown method: ${method}` } })
     return

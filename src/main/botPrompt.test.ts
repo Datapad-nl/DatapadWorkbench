@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Message } from '../shared/types'
-import { promptForBotAnswers, promptForBotsAsked } from './botPrompt'
+import { promptForBotAnswers, promptForBotRun, promptForBotsAsked } from './botPrompt'
 
 const answer = (name: string, content: string): Message => ({
   id: name,
@@ -27,5 +27,12 @@ describe('bot prompts', () => {
     expect(prompt).toBe(
       '/review\n\nBots answered in this chat since your last prompt:\n\n### Scout\n\nLooks fine.\n\n### Lint\n\nTwo warnings.'
     )
+  })
+
+  it('tells a bot an unattended run is quiet unless it calls notify, after a slash command', () => {
+    const scheduled = promptForBotRun('/check-inbox', { kind: 'schedule' })
+    expect(scheduled.startsWith('/check-inbox\n\nThis is a scheduled run. It starts in a fresh session')).toBe(true)
+    expect(scheduled).toContain('unless you call the workbench tool notify')
+    expect(promptForBotRun('Follow-up: deploy?', { kind: 'followUp' })).toContain('the follow-up you set earlier')
   })
 })

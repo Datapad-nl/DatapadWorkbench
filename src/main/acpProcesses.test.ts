@@ -94,7 +94,11 @@ vi.mock('./browserAgent', () => ({
   agentHookSettings: async () => ({}),
   browserMcpServers: async () => []
 }))
-vi.mock('./checkpoints', () => ({ snapshotBeforeTool: async () => {} }))
+vi.mock('./checkpoints', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./checkpoints')>()),
+  snapshotBeforeTool: async () => {}
+}))
+vi.mock('./bots', () => ({ botMemoryFolder: (botId: string) => `/bots/${botId}/memory` }))
 vi.mock('./sessions', () => ({ readGrokPlan: () => null }))
 vi.mock('./store', () => ({
   chatBot: async (chatId?: string) => (chatId ? (fake.bots[chatId] ?? null) : null),
@@ -274,6 +278,46 @@ describe('agent processes for bots', () => {
     await vi.waitFor(() => expect(pendingPermissionRequests()).toHaveLength(1))
     expect(own.replies).toEqual([{ jsonrpc: '2.0', id: 901, result: { outcome: { outcome: 'selected', optionId: 'yes' } } }])
     expect(pendingPermissionRequests()[0]).toMatchObject({ chatId: 'chat-7', title: expect.stringContaining('notes.md') })
+  })
+
+  it('lets a bot write its memory and use its own run tools without asking, and asks for edits elsewhere', async () => {
+    fake.bots['chat-8'] = { id: 'b8', agent: 'grok', model: '', effort: '', allowedTools: [] }
+    const sessionId = await newSession('/project', null, 'grok', 'chat-8', BOT)
+    bindPermissionSession(sessionId, 'chat-8', 'ask')
+    const [own] = fake.procs
+    const send = (message: Record<string, unknown>): void => {
+      own.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`)
+    }
+    const options = [
+      { optionId: 'yes', kind: 'allow_once', name: 'Allow' },
+      { optionId: 'no', kind: 'reject_once', name: 'Reject' }
+    ]
+    const ask = (id: number, toolCall: Record<string, unknown>): void =>
+      send({ id, method: 'session/request_permission', params: { sessionId, options, toolCall } })
+    ask(911, { toolCallId: 'm1', title: 'MEMORY.md', kind: 'edit', locations: [{ path: '/bots/b8/memory/MEMORY.md' }] })
+    ask(912, { toolCallId: 'm2', title: 'notify', kind: 'other', _meta: { claudeCode: { toolName: 'mcp__workbench__notify' } } })
+    ask(913, { toolCallId: 'm3', title: 'escape', kind: 'edit', locations: [{ path: '/bots/b8/memory/../skills/x/SKILL.md' }] })
+    ask(914, { toolCallId: 'm4', title: 'relative', kind: 'edit', rawInput: { path: 'memory/MEMORY.md' } })
+    ask(915, {
+      toolCallId: 'm5',
+      title: 'move out',
+      kind: 'move',
+      locations: [{ path: '/bots/b8/memory/a.md' }],
+      rawInput: { source: '/bots/b8/memory/a.md', destination: '/Users/me/.zshrc' }
+    })
+    ask(916, {
+      toolCallId: 'm6',
+      title: 'upload',
+      kind: 'read',
+      rawInput: { path: '/bots/b8/memory/MEMORY.md' },
+      _meta: { claudeCode: { toolName: 'mcp__drive__upload' } }
+    })
+
+    await vi.waitFor(() => expect(pendingPermissionRequests()).toHaveLength(4))
+    expect(own.replies.map((reply) => (reply as { id: number }).id).sort()).toEqual([911, 912])
+    expect(pendingPermissionRequests().map((request) => request.title)).toEqual(
+      expect.arrayContaining(['escape', 'relative', 'move out', 'upload'].map((title) => expect.stringContaining(title)))
+    )
   })
 })
 
