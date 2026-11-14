@@ -250,7 +250,7 @@ async function loadSkippedSessions(): Promise<Set<string>> {
   return new Set(ids.filter((item) => typeof item === 'string'))
 }
 
-async function skipSessionImport(sessionId: string): Promise<void> {
+export async function skipSessionImport(sessionId: string): Promise<void> {
   await withLock(skippedSessionsFile(), async () => {
     const skipped = await loadSkippedSessions()
     if (skipped.has(sessionId)) return
@@ -483,6 +483,21 @@ export async function claudeModelFor(chatId: string | undefined): Promise<string
   // A bot's chats follow the model on its page.
   const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
   return bot?.model || chat?.model || (chat?.conductor && file.orchestratorModel) || file.claudeModel || ''
+}
+
+/** The model a Grok chat runs on: its bot's, its own, or '' for the CLI's default. */
+export async function grokModelFor(chatId: string | undefined): Promise<string> {
+  const chat = chatId ? await readChat(chatId) : null
+  const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
+  return (bot?.agent === 'grok' && bot.model) || chat?.model || ''
+}
+
+/** The effort a chat runs at: its bot's, its own, else the setting. */
+export async function effortFor(chatId: string | undefined): Promise<ReasoningEffort | null> {
+  const file = await loadSettingsFile()
+  const chat = chatId ? await readChat(chatId) : null
+  const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
+  return bot?.effort || normalizeReasoningEffort(chat?.effort) || file.effort || null
 }
 
 export async function getSubagentModel(): Promise<string> {

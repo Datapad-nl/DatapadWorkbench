@@ -464,6 +464,8 @@ export async function rewindTo(chatId: string, checkpointId: string, cwd: string
     const keepUntil = chat.messages.findIndex((message) => message.id === target.messageId)
     chat.messages = keepUntil === -1 ? chat.messages : chat.messages.slice(0, keepUntil)
     chat.grokSessionId = null
+    // The fresh session gets what is left of the conversation.
+    if (chat.messages.length > 0) chat.carryOver = true
     // A follow-up set before the rewind comes back in a fresh session, not the one rewound away.
     if (chat.wake) chat.wake.sessionId = null
     chat.plan = null

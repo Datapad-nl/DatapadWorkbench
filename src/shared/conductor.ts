@@ -48,6 +48,19 @@ export function conductorRule(workerModel: string, maxWorkers: number): string {
   ].join('\n\n')
 }
 
+/**
+ * Why a model or effort is too weak to conduct, or null when it can. A conductor plans, writes briefs
+ * and checks workers' diffs, which small, fast models and low effort do poorly.
+ */
+export function weakOrchestrator(model: string, effort?: string | null): string | null {
+  if (/haiku/i.test(model)) return 'Haiku is too small to orchestrate: pick Opus, Fable or Sonnet.'
+  if (/(^|[-_.])(fast|mini|nano|lite)($|[-_.])/i.test(model)) {
+    return `${model} is a fast model and too weak to orchestrate: pick a full model.`
+  }
+  if (effort === 'low') return 'Low effort is too little to orchestrate: pick Medium or higher.'
+  return null
+}
+
 /** What /conduct sends: the conductor's role, then the job. */
 export function conductorPrompt(job: string, workerModel: string, maxWorkers: number): string {
   return `${conductorRule(workerModel, maxWorkers)}\n\nThe job:\n${job.trim()}`

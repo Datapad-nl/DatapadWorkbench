@@ -215,8 +215,12 @@ export type Chat = {
   title: string
   /** Which coding agent runs this chat. Missing means Grok. */
   agent?: ChatAgent
-  /** Claude Code model of this chat. Missing means the one in Settings. */
+  /** Model of this chat, for its agent. Missing means the one in Settings (Claude) or the CLI's default (Grok). */
   model?: string
+  /** Reasoning effort of this chat. Missing means the one in Settings. */
+  effort?: ReasoningEffort
+  /** Its next session gets the conversation so far: set by an agent switch, a rewind or a lost session. */
+  carryOver?: boolean
   /** Set by /conduct: the chat plans and hands the work to workers, on the orchestrator model. */
   conductor?: boolean
   /** The chat that started this one with `delegate`. */

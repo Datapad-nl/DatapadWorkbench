@@ -10,12 +10,14 @@ import type {
   ChatLiveState,
   ChatPlan,
   FileMention,
+  Message,
   PermissionMode,
   PlanEntry,
   PlanVerdict,
   Project
 } from '../shared/types'
 import { chatAgentLabel, normalizeChatAgent, normalizePermissionMode } from '../shared/types'
+import { carryOverPrompt } from '../shared/carryOver'
 import { contextFromUpdate } from '../shared/handoff'
 import {
   abortAgent,
@@ -27,6 +29,7 @@ import {
   bindExitPlanSession,
   cancelSession,
   clearQueuedExitPlanVerdict,
+  closeSession,
   contentText,
   ensureAgent,
   hasOtherActivePrompts,
@@ -74,7 +77,7 @@ import { cancelContinuation } from './secretTools'
 import { clearGrokPlanApproval, grokBuildSignedIn, readGrokPlan } from './sessions'
 import { chatWorkingDir, isolateChatIfNeeded } from './git'
 import { projectSessionRules } from './intake'
-import { getApiKey, getChat, listChats, listProjects, mutateChat } from './store'
+import { getApiKey, getChat, listChats, listProjects, mutateChat, skipSessionImport } from './store'
 import { saveVisual, visualFromUpdate } from './visuals'
 import { STEP_BREAK, plainReply } from '../shared/steps'
 
@@ -655,6 +658,14 @@ function isSlashCommand(text: string): boolean {
   return /^\/\S/.test(text.trimStart())
 }
 
+/** What came before the message a turn sends. A follow-up's steers are its own text, so they stay out. */
+function earlierMessages(chat: Chat, lastUser: Message | undefined, followUp: FollowUp | undefined): Message[] {
+  if (!followUp) return chat.messages.slice(0, Math.max(lastUser ? chat.messages.indexOf(lastUser) : 0, 0))
+  let end = chat.messages.length
+  while (end > 0 && chat.messages[end - 1].kind === 'steer') end -= 1
+  return chat.messages.slice(0, end)
+}
+
 function promptForMode(mode: PermissionMode, text: string): string {
   if (mode !== 'plan' || isSlashCommand(text)) return text
   if (!text.trim()) return PLAN_MODE_INSTRUCTION
@@ -678,6 +689,46 @@ export async function rewindChat(chatId: string, checkpointId: string, cwd: stri
   }
   livePlans.delete(chatId)
   const chat = await getChat(chatId)
+  emitLive({ type: 'chat', chatId, chat })
+  return chat
+}
+
+/**
+ * Move a chat to the other agent. A fresh chat just switches. A started one leaves its session behind:
+ * the next turn opens a session on the new agent and hands it the conversation so far.
+ */
+export async function switchChatAgent(chatId: string, agent: ChatAgent): Promise<Chat> {
+  const next = normalizeChatAgent(agent)
+  const loaded = await getChat(chatId)
+  if (normalizeChatAgent(loaded.agent) === next) return loaded
+  if (isStreaming(chatId) || rewinding.has(chatId)) {
+    throw new Error('Wait for this turn to finish, or stop it, before switching agents.')
+  }
+  // No turn may start on the old agent while the chat moves.
+  rewinding.add(chatId)
+  let chat: Chat
+  try {
+    const dropped = loaded.grokSessionId
+    chat = await mutateChat(chatId, (latest) => {
+      // An imported chat reads its history from its session file. Keep it, now the session goes.
+      if (latest.messages.length === 0) latest.messages = loaded.messages
+      latest.agent = next
+      // A model belongs to one agent. The effort carries over.
+      delete latest.model
+      latest.grokSessionId = null
+      if (latest.messages.length > 0) latest.carryOver = true
+      if (latest.wake) latest.wake.sessionId = null
+      latest.plan = null
+    })
+    if (dropped) {
+      // The old session stays on disk, and the import would bring it back as a chat of its own.
+      await skipSessionImport(dropped)
+      await closeSession(dropped).catch(() => undefined)
+    }
+  } finally {
+    rewinding.delete(chatId)
+  }
+  livePlans.delete(chatId)
   emitLive({ type: 'chat', chatId, chat })
   return chat
 }
@@ -835,12 +886,15 @@ async function resolveSession(chat: Chat, project: Project | undefined): Promise
       return { chat, sessionId }
     } catch {
       // Session is gone in this agent process. Prompting the dead id returns
-      // an empty turn, so open a replacement session instead.
+      // an empty turn, so open a replacement session instead. It gets the conversation so far.
+      chat = { ...chat, carryOver: true }
     }
   }
   const sessionId = await newSession(cwd, await chatRules(chat, project), agent, chat.id, pluginDir)
+  const carryOver = chat.carryOver
   await mutateChat(chat.id, (latest) => {
     latest.grokSessionId = sessionId
+    if (carryOver) latest.carryOver = true
   })
   chat = { ...chat, grokSessionId: sessionId }
   bind(sessionId)
@@ -1061,7 +1115,15 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
       })
     )
   }
-  const cued = promptForMode(mode, promptForBotAnswers(mentioned, answers))
+  const moded = promptForMode(mode, promptForBotAnswers(mentioned, answers))
+  // A new session for a chat that already talked: after an agent switch, a rewind or a lost session.
+  // It gets the conversation before this message, so it carries on instead of starting blank. A slash
+  // command leaves the hand-over for the next message. A bot's scheduled run starts fresh on purpose.
+  const carried =
+    chat.carryOver && !isSlashCommand(userText)
+      ? carryOverPrompt(earlierMessages(chat, lastUser, followUp), chat.id)
+      : null
+  const cued = carried ? `${carried}\n\n${moded}` : moded
   const images = followUp ? (followUp.attachments ?? []) : (lastUser!.attachments ?? [])
 
   // From here the agent owns the turn. Nothing is awaited until the prompt is sent.
@@ -1077,6 +1139,12 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   endForegroundAgents(chat.id)
   const prompt = promptSession(sessionId, cued, images)
   prompt.catch(() => {})
+  // The conversation is in the session now.
+  if (chat.carryOver && !isSlashCommand(userText)) {
+    void mutateChat(chat.id, (latest) => {
+      delete latest.carryOver
+    }).catch(() => undefined)
+  }
   // A steer sent while the turn prepared. The prompt is in the session now, so the steer can follow it.
   if (asideSteers.has(chat.id)) interruptForSteer(turn)
   const result = await Promise.race([prompt.then(() => null), turn.abandoned])

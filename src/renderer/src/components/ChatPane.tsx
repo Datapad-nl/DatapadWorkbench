@@ -20,7 +20,10 @@ import type {
   Project,
   ProjectIndex,
   UserQuestionRequest,
-  AgentCommand
+  AgentCommand,
+  ClaudeOptions,
+  PublicSettings,
+  ReasoningEffort
 } from '../../../shared/types'
 import {
   commandAt,
@@ -31,11 +34,14 @@ import {
   slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
-import { DEFAULT_MAX_SUBAGENTS, conductorPrompt } from '../../../shared/conductor'
+import { DEFAULT_MAX_SUBAGENTS, conductorPrompt, weakOrchestrator } from '../../../shared/conductor'
 import { contextLabel, handoffAdvised, handoffPrompt } from '../../../shared/handoff'
 import { resolveProjectColor } from '../../../shared/projectColor'
 import { plainReply } from '../../../shared/steps'
 import {
+  CLAUDE_MODELS,
+  GROK_REASONING_EFFORTS,
+  REASONING_EFFORTS,
   chatAgentLabel,
   formatGrokCli,
   nextPermissionMode,
@@ -59,6 +65,12 @@ import wordmark from '../assets/wordmark.png'
 
 const MAX_IMAGES = 6
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+/** The model a chat without one of its own runs on. Grok's default is the CLI's, unnamed here. */
+function chatDefaultModel(chat: Chat, settings: PublicSettings | null): string {
+  if (normalizeChatAgent(chat.agent) !== 'claude' || !settings) return ''
+  return (chat.conductor && settings.orchestratorModel) || settings.claudeModel
+}
 
 function planStillOpen(plan: ChatPlan | null | undefined): boolean {
   return Boolean(plan?.awaitingApproval)
@@ -97,7 +109,9 @@ type SlashRun = {
     bots?: BotMention[]
   ) => Promise<boolean>
   setChatMode: (chatId: string, mode: PermissionMode) => Promise<void>
-  saveSettings: (input: { model?: string; claudeModel?: string; effort?: string | null }) => Promise<void>
+  setChatModel: (chatId: string, input: { model?: string; effort?: string }) => Promise<void>
+  /** The model and effort this chat runs on now, for the conductor check. */
+  runsOn: { model: string; effort: string | null }
   setShowSettings: (open: boolean | 'mcp') => void
   setShowUsage: (open: boolean) => void
   openRewind: () => void
@@ -195,24 +209,29 @@ async function runSlash(input: SlashRun): Promise<string | null> {
       if (!args) return 'Usage: /conduct <the job>'
       await window.workbench.conductChat(input.chatId)
       await sendSlash(input, conductorPrompt(args, input.workerModel, input.maxWorkers))
-      return null
-    case 'model':
-      if (!args) {
-        input.setShowSettings(true)
-        return 'Opened settings — set the model there, or /model <id>'
+      {
+        // Warn, not refuse: the user may know better. A weak conductor writes thin briefs and misses failures.
+        const weak = weakOrchestrator(input.runsOn.model, input.runsOn.effort)
+        return weak ? `${weak} This chat will not work well as a conductor.` : null
       }
-      // Each agent keeps its own model setting.
-      await input.saveSettings(input.agent === 'claude' ? { claudeModel: args } : { model: args })
-      return `Model set to ${args}`
+    case 'model':
+      if (!args) return 'Pick the model in the menu next to Ask · Auto · Plan, or /model <id>'
+      // This chat only. Settings holds the model of new chats.
+      await input.setChatModel(input.chatId, { model: args })
+      return `Model of this chat set to ${args}`
     case 'effort': {
       if (!args) {
         input.setShowSettings(true)
         return 'Opened settings — set effort next to the model, or /effort low|medium|high|xhigh|max'
       }
+      if (args.toLowerCase() === 'default') {
+        await input.setChatModel(input.chatId, { effort: '' })
+        return 'This chat follows the effort in Settings again'
+      }
       const effort = normalizeReasoningEffort(args)
-      if (!effort) return 'Usage: /effort low | medium | high | xhigh | max'
-      await input.saveSettings({ effort })
-      return `Effort set to ${reasoningEffortLabel(effort)}`
+      if (!effort) return 'Usage: /effort low | medium | high | xhigh | max | default'
+      await input.setChatModel(input.chatId, { effort })
+      return `Effort of this chat set to ${reasoningEffortLabel(effort)}`
     }
     case 'settings':
     case 'theme':
@@ -272,6 +291,7 @@ export function ChatPane({
     deleteChat,
     renameChat,
     setChatAgent,
+    setChatModel,
     sendMessage,
     stopChat,
     setChatMode,
@@ -282,7 +302,6 @@ export function ChatPane({
     permissions,
     questions,
     settings,
-    saveSettings,
     setShowSettings,
     setShowUsage,
     setShowNewProject,
@@ -492,7 +511,12 @@ export function ChatPane({
                 renameChat,
                 sendMessage,
                 setChatMode,
-                saveSettings,
+                setChatModel,
+                // As a conductor: /conduct makes it one before its first turn.
+                runsOn: {
+                  model: activeChat.model || chatDefaultModel({ ...activeChat, conductor: true }, settings),
+                  effort: activeChat.effort || settings?.effort || null
+                },
                 setShowSettings,
                 setShowUsage,
                 openRewind: () => openRewind(activeChat.id, activeChat.checkpoints?.at(-1)?.id ?? null)
@@ -504,12 +528,29 @@ export function ChatPane({
             }}
             onMode={(mode) => void setChatMode(activeChat.id, mode)}
             agent={normalizeChatAgent(activeChat.agent)}
-            onAgent={
-              !activeChat.grokSessionId &&
-              activeChat.messages.length === 0 &&
-              (settings?.claude.signedIn || normalizeChatAgent(activeChat.agent) === 'claude')
-                ? (agent) => void setChatAgent(activeChat.id, agent)
-                : null
+            agentPicker={
+              <ModelPicker
+                agent={normalizeChatAgent(activeChat.agent)}
+                onAgent={
+                  settings?.claude.signedIn || normalizeChatAgent(activeChat.agent) === 'claude'
+                    ? (agent) =>
+                        void setChatAgent(activeChat.id, agent).catch((error: unknown) =>
+                          alert(errorText(error, 'Could not switch agents'))
+                        )
+                    : null
+                }
+                started={Boolean(activeChat.grokSessionId) || activeChat.messages.length > 0}
+                busy={Boolean(streamingNow)}
+                model={activeChat.model ?? ''}
+                effort={activeChat.effort ?? ''}
+                defaultModel={chatDefaultModel(activeChat, settings)}
+                defaultEffort={settings?.effort ?? null}
+                grokModels={settings?.grokCli.models ?? []}
+                conductor={Boolean(activeChat.conductor)}
+                locked={activeChat.botId ? "Set on the bot's Settings tab" : null}
+                onModel={(model) => void setChatModel(activeChat.id, { model })}
+                onEffort={(effort) => void setChatModel(activeChat.id, { effort })}
+              />
             }
             onPermission={resolvePermission}
             onQuestion={resolveQuestion}
@@ -1793,17 +1834,103 @@ function ModeToggle({
   )
 }
 
-function AgentToggle({
+type ModelChoice = { value: string; name: string; description?: string }
+
+/**
+ * The chat's agent, model and effort. A model or effort change goes to the live session, which keeps
+ * the conversation. An agent change on a started chat goes on in a new session that gets the
+ * conversation handed over.
+ */
+function ModelPicker({
   agent,
-  onAgent
+  onAgent,
+  started,
+  busy,
+  model,
+  effort,
+  defaultModel,
+  defaultEffort,
+  grokModels,
+  conductor,
+  locked,
+  onModel,
+  onEffort
 }: {
   agent: ChatAgent
+  /** Null when only one agent is signed in. */
   onAgent: ((agent: ChatAgent) => void) | null
+  started: boolean
+  busy: boolean
+  /** The chat's own model and effort. Empty follows Settings. */
+  model: string
+  effort: ReasoningEffort | ''
+  /** What an empty model or effort means for this chat. */
+  defaultModel: string
+  defaultEffort: ReasoningEffort | null
+  grokModels: string[]
+  conductor: boolean
+  /** A bot's chat: its page sets all three. */
+  locked: string | null
+  onModel: (model: string) => void
+  /** '' follows Settings again. */
+  onEffort: (effort: ReasoningEffort | '') => void
 }): React.JSX.Element {
-  if (!onAgent) {
+  const [open, setOpen] = useState(false)
+  const [claude, setClaude] = useState<ClaudeOptions | null>(null)
+  const root = useRef<HTMLDivElement>(null)
+  const current = model || defaultModel
+
+  useEffect(() => {
+    if (!open || agent !== 'claude') return
+    let live = true
+    void window.workbench.getClaudeOptions(current).then((options) => {
+      if (live) setClaude(options)
+    })
+    return () => {
+      live = false
+    }
+  }, [open, agent, current])
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (event: MouseEvent): void => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const models: ModelChoice[] =
+    agent === 'claude'
+      ? (claude?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label })))
+      : [{ value: '', name: 'Default' }, ...grokModels.map((id) => ({ value: id, name: id }))]
+  const efforts: readonly ReasoningEffort[] =
+    agent === 'claude' ? (claude?.efforts.length ? claude.efforts : REASONING_EFFORTS) : GROK_REASONING_EFFORTS
+  const modelName = (value: string): string =>
+    models.find((option) => option.value === value)?.name.replace(/ \(.*\)$/, '') ||
+    CLAUDE_MODELS.find((option) => option.value === value)?.label ||
+    value ||
+    'Default'
+  const shownEffort = effort || defaultEffort
+  const warning = conductor ? weakOrchestrator(current, shownEffort) : null
+  const label = [chatAgentLabel(agent), modelName(current), shownEffort ? reasoningEffortLabel(shownEffort) : null]
+    .filter(Boolean)
+    .join(' · ')
+  const other: ChatAgent = agent === 'claude' ? 'grok' : 'claude'
+  const pressed = 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)]'
+
+  if (locked) {
     return (
       <div
         data-testid="chat-agent"
+        title={locked}
         className="flex h-7 shrink-0 items-center gap-1.5 px-1.5 text-[12.5px] text-muted"
       >
         <AgentGlyph agent={agent} size={12} />
@@ -1811,27 +1938,131 @@ function AgentToggle({
       </div>
     )
   }
+
+  const item = (selected: boolean): string =>
+    `flex w-full items-center gap-2 rounded-[6px] px-2 py-1 text-left text-[12.5px] ${
+      selected ? 'text-ink' : 'text-muted hover:bg-hover hover:text-ink'
+    }`
+
   return (
-    <label
-      data-testid="chat-agent"
-      className="relative flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-[7px] px-1.5 text-[12.5px] text-muted hover:bg-hover hover:text-ink"
-    >
-      <AgentGlyph agent={agent} size={12} />
-      {chatAgentLabel(agent)}
-      <Icon name="chevronDown" size={11} className="text-faint" />
-      <select
-        aria-label="Agent"
-        className="absolute inset-0 cursor-pointer opacity-0"
-        value={agent}
-        onChange={(event) => onAgent(event.target.value as ChatAgent)}
+    <div ref={root} className="relative shrink-0">
+      <button
+        type="button"
+        data-testid="chat-agent"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={warning ?? 'Agent, model and effort of this chat'}
+        className={`flex h-7 max-w-[260px] items-center gap-1.5 rounded-[7px] px-1.5 text-[12.5px] hover:bg-hover ${
+          warning ? 'text-danger' : 'text-muted hover:text-ink'
+        }`}
+        onClick={() => setOpen((value) => !value)}
       >
-        {(['grok', 'claude'] as const).map((item) => (
-          <option key={item} value={item}>
-            {chatAgentLabel(item)}
-          </option>
-        ))}
-      </select>
-    </label>
+        <AgentGlyph agent={agent} size={12} />
+        <span className="truncate">{label}</span>
+        <Icon name="chevronDown" size={11} className="shrink-0 text-faint" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          data-testid="model-picker"
+          className="absolute bottom-full left-0 z-20 mb-2 max-h-[420px] w-[280px] overflow-y-auto rounded-[8px] border border-line-strong bg-raised p-2 shadow-xl"
+        >
+          {warning && (
+            <div
+              data-testid="orchestrator-warning"
+              className="mb-2 rounded-[6px] bg-surface px-2 py-1.5 text-[12px] leading-5 text-danger"
+            >
+              This chat is a conductor. {warning} It will not orchestrate well on this choice.
+            </div>
+          )}
+          <div className="px-2 pb-1 text-[11px] uppercase tracking-wide text-faint">Agent</div>
+          <div className="flex gap-0.5 rounded-[8px] bg-surface p-0.5">
+            {(['claude', 'grok'] as const).map((id) => (
+              <button
+                key={id}
+                type="button"
+                aria-pressed={agent === id}
+                disabled={id !== agent && (!onAgent || busy)}
+                className={`flex h-6 flex-1 items-center justify-center gap-1.5 rounded-[6px] text-[12.5px] disabled:opacity-40 ${
+                  agent === id ? pressed : 'text-muted hover:text-ink'
+                }`}
+                onClick={() => {
+                  if (id !== agent && onAgent) onAgent(id)
+                }}
+              >
+                <AgentGlyph agent={id} size={11} />
+                {chatAgentLabel(id)}
+              </button>
+            ))}
+          </div>
+          {started && onAgent && (
+            <p className="px-2 pt-1 text-[11.5px] leading-4 text-faint">
+              {busy
+                ? 'Switch agents once this turn ends.'
+                : `Switching goes on in a new ${chatAgentLabel(other)} session, which gets this conversation.`}
+            </p>
+          )}
+          <div className="px-2 pb-1 pt-3 text-[11px] uppercase tracking-wide text-faint">Model</div>
+          {models.map((option) => {
+            const selected = option.value === model || (!model && option.value === '')
+            return (
+              <button
+                key={option.value || 'default'}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selected}
+                title={option.description}
+                className={item(selected)}
+                onClick={() => onModel(option.value)}
+              >
+                <span className="w-3 shrink-0">{selected && <Icon name="check" size={11} />}</span>
+                <span className="truncate">{option.name}</span>
+                {conductor && weakOrchestrator(option.value || defaultModel) && (
+                  <span className="ml-auto shrink-0 text-[11px] text-faint">weak conductor</span>
+                )}
+              </button>
+            )
+          })}
+          <div className="px-2 pb-1 pt-3 text-[11px] uppercase tracking-wide text-faint">Effort</div>
+          <div className="flex flex-wrap gap-0.5 rounded-[8px] bg-surface p-0.5">
+            {defaultEffort && (
+              <button
+                type="button"
+                aria-pressed={!effort}
+                title={`Follow Settings: ${reasoningEffortLabel(defaultEffort)}`}
+                className={`h-6 flex-1 whitespace-nowrap rounded-[6px] px-1.5 text-[12px] ${
+                  !effort ? pressed : 'text-muted hover:text-ink'
+                }`}
+                onClick={() => onEffort('')}
+              >
+                Settings
+              </button>
+            )}
+            {efforts.map((id) => {
+              const on = effort === id || (!defaultEffort && shownEffort === id)
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  aria-pressed={on}
+                  className={`h-6 flex-1 whitespace-nowrap rounded-[6px] px-1.5 text-[12px] ${
+                    on ? pressed : 'text-muted hover:text-ink'
+                  }`}
+                  onClick={() => onEffort(id)}
+                >
+                  {reasoningEffortLabel(id)}
+                </button>
+              )
+            })}
+          </div>
+          {started && (
+            <p className="px-2 pt-2 text-[11.5px] leading-4 text-faint">
+              A new model or effort takes over from the next reply, with the conversation kept.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1977,7 +2208,7 @@ function Composer({
   onStop,
   onMode,
   agent,
-  onAgent,
+  agentPicker,
   onPermission,
   onQuestion,
   onRewindMenu
@@ -2001,8 +2232,8 @@ function Composer({
   onStop: () => void
   onMode: (mode: PermissionMode) => void
   agent: ChatAgent
-  /** Null once the chat started, or when only one agent is signed in. */
-  onAgent: ((agent: ChatAgent) => void) | null
+  /** The agent, model and effort picker. */
+  agentPicker: ReactNode
   onPermission: (requestId: string, decision: 'allow' | 'deny' | 'wait') => Promise<void>
   onQuestion: (
     requestId: string,
@@ -2775,7 +3006,7 @@ function Composer({
           <IconButton icon="slash" label="Commands" onClick={() => insertTrigger('/')} />
           <span className="mx-1.5 h-4 w-px shrink-0 bg-line" />
           <ModeToggle mode={mode} onMode={onMode} />
-          <AgentToggle agent={agent} onAgent={onAgent} />
+          {agentPicker}
           <div className="min-w-2 flex-1" />
           {voiceSpeaks && (streaming || voiceStatus === 'speaking' || replyMuted) && (
             <button

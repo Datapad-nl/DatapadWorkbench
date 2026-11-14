@@ -111,6 +111,12 @@ vi.mock('./store', () => ({
     conductor: fake.conductors.has(chatId)
   }),
   getEffort: async () => null,
+  // As the store reads them: a bot's own model (on Grok) and effort, else none.
+  grokModelFor: async (chatId?: string) => {
+    const bot = chatId ? fake.bots[chatId] : null
+    return (bot?.agent === 'grok' && bot.model) || ''
+  },
+  effortFor: async (chatId?: string) => (chatId ? fake.bots[chatId]?.effort || null : null),
   getMaxSubagents: async () => 2,
   getMcpServers: async () => fake.mcp,
   getSubagentModel: async () => null,

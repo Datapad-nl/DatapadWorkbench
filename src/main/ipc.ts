@@ -19,7 +19,7 @@ import type {
   UserQuestionAnswer,
   VoiceSettings
 } from '../shared/types'
-import { normalizeChatAgent, normalizePermissionMode } from '../shared/types'
+import { normalizeChatAgent, normalizePermissionMode, normalizeReasoningEffort } from '../shared/types'
 import { isAppSender } from './appUrl'
 import { notifyChat, watchAttention } from './attention'
 import {
@@ -86,6 +86,7 @@ import {
   loadChat,
   onChatLive,
   rewindChat,
+  switchChatAgent,
   sendUserTurn,
   setChatMode,
   settleChatPlan,
@@ -98,6 +99,7 @@ import {
   agentKey,
   applyBotToLiveSessions,
   reloadBotSessions,
+  applyChatToLiveSession,
   applyClaudeModelToLiveSessions,
   applyEffortToLiveSessions,
   closeSession,
@@ -588,14 +590,26 @@ export function registerIpc(): void {
     return chat
   })
 
+  // A started chat goes on in a new session on the other agent, which is handed the conversation.
   ipcMain.handle('chat:setAgent', async (_event, input: { id: string; agent: ChatAgent }) => {
-    return mutateChat(input.id, (chat) => {
-      // A started chat belongs to its agent's session. Only a fresh chat can switch.
-      if (chat.grokSessionId || chat.messages.length > 0) {
-        throw new Error('This chat already started. Open a new chat to switch agents.')
+    return switchChatAgent(input.id, normalizeChatAgent(input.agent))
+  })
+
+  // The live session switches at once and keeps the conversation. '' follows Settings again.
+  ipcMain.handle('chat:setModel', async (_event, input: { id: string; model?: string; effort?: string }) => {
+    const chat = await mutateChat(input.id, (latest) => {
+      if (input.model !== undefined) {
+        if (input.model.trim()) latest.model = input.model.trim()
+        else delete latest.model
       }
-      chat.agent = normalizeChatAgent(input.agent)
+      if (input.effort !== undefined) {
+        const effort = normalizeReasoningEffort(input.effort)
+        if (effort) latest.effort = effort
+        else delete latest.effort
+      }
     })
+    await applyChatToLiveSession(input.id).catch(() => undefined)
+    return chat
   })
 
   ipcMain.handle(

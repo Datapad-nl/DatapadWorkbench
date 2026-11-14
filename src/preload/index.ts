@@ -106,6 +106,9 @@ const api = {
   conductChat: (chatId: string) => ipcRenderer.invoke('chat:conduct', chatId) as Promise<Chat>,
   setChatAgent: (id: string, agent: ChatAgent) =>
     ipcRenderer.invoke('chat:setAgent', { id, agent }) as Promise<Chat>,
+  /** The chat's own model and effort. '' follows Settings again. */
+  setChatModel: (id: string, input: { model?: string; effort?: string }) =>
+    ipcRenderer.invoke('chat:setModel', { id, ...input }) as Promise<Chat>,
   sendMessage: (
     chatId: string,
     content: string,

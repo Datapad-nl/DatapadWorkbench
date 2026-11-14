@@ -19,7 +19,7 @@ import {
   type VoiceModelStatus,
   VOICE_LANGUAGES
 } from '../../../shared/types'
-import { MAX_SUBAGENTS_CHOICES } from '../../../shared/conductor'
+import { MAX_SUBAGENTS_CHOICES, weakOrchestrator } from '../../../shared/conductor'
 import { CHAT_WIDTHS, readChatWidth, saveChatWidth } from '../chatWidth'
 import { useVoice } from '../voice/VoiceProvider'
 import {
@@ -859,6 +859,11 @@ export function SettingsModal(): React.JSX.Element | null {
                           </option>
                         ))}
                     </select>
+                    {key === 'orchestratorModel' && weakOrchestrator(settings[key]) && (
+                      <p data-testid="settings-orchestrator-warning" className="mt-1 text-[11.5px] leading-4 text-danger">
+                        {weakOrchestrator(settings[key])} A conductor on it will not orchestrate well.
+                      </p>
+                    )}
                   </div>
                 ))}
                 <div className="min-w-0">

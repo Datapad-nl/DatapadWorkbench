@@ -5,7 +5,8 @@ import {
   conductorPrompt,
   conductorRule,
   isFileEditTool,
-  normalizeMaxSubagents
+  normalizeMaxSubagents,
+  weakOrchestrator
 } from './conductor'
 
 describe('conductorPrompt', () => {
@@ -75,5 +76,21 @@ describe('agentToolRule', () => {
     expect(rule).toContain('run on claude-haiku-4-5')
     expect(rule).not.toContain('`sonnet`')
     expect(rule).toContain('At most 1 of your agents runs at the same time')
+  })
+})
+
+describe('weakOrchestrator', () => {
+  it('flags small and fast models and low effort', () => {
+    expect(weakOrchestrator('haiku')).toContain('Haiku')
+    expect(weakOrchestrator('claude-haiku-5-5')).toContain('Haiku')
+    expect(weakOrchestrator('grok-4.7-build-fast')).toContain('fast model')
+    expect(weakOrchestrator('opus', 'low')).toContain('Low effort')
+  })
+
+  it('lets full models conduct', () => {
+    expect(weakOrchestrator('opus', 'high')).toBeNull()
+    expect(weakOrchestrator('')).toBeNull()
+    expect(weakOrchestrator('grok-4.7', 'medium')).toBeNull()
+    expect(weakOrchestrator('claude-fable-5-1', null)).toBeNull()
   })
 })

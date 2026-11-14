@@ -5,7 +5,7 @@ import { agentToolRule, conductorRule } from '../shared/conductor'
 import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
 import { type AgentProcess, startClaudeAdapter } from './claudeCli'
-import { grokBinary } from './grokCli'
+import { getGrokCliInfo, grokBinary } from './grokCli'
 import { relPath, snapshotBeforeTool, toolPaths } from './checkpoints'
 import { botMemoryFolder } from './bots'
 import {
@@ -51,6 +51,7 @@ import {
 import {
   chatBot,
   claudeModelFor,
+  effortFor,
   getApiKey,
   getClaudeModel,
   getChat,
@@ -58,6 +59,7 @@ import {
   getMaxSubagents,
   getMcpServers,
   getSubagentModel,
+  grokModelFor,
   skipNewSession
 } from './store'
 import { readGrokPlan } from './sessions'
@@ -1161,9 +1163,9 @@ export async function applyEffortToLiveSessions(effort: ReasoningEffort | null):
   const sessions = [...conns.values()].flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
   await Promise.all(
     sessions.map(async (sessionId) => {
-      // A bot with an effort of its own keeps it.
-      const bot = await chatBot(sessionChatIds.get(sessionId)).catch(() => null)
-      await applySessionEffort(sessionId, bot?.effort || effort)
+      // A bot or a chat with an effort of its own keeps it.
+      const chatId = sessionChatIds.get(sessionId)
+      await applySessionEffort(sessionId, (chatId ? await effortFor(chatId).catch(() => null) : null) || effort)
     })
   )
 }
@@ -1282,14 +1284,29 @@ export async function applyClaudeModelToLiveSessions(): Promise<void> {
 
 async function applySessionSettings(agent: ChatAgent, sessionId: string, chatId?: string): Promise<void> {
   if (chatId) sessionChatIds.set(sessionId, chatId)
-  // A bot's chats run at the bot's effort, and a Grok bot on its own model. Other Grok chats keep Grok's default.
-  const bot = await chatBot(chatId).catch(() => null)
-  if (agent !== 'claude' && bot?.agent === 'grok') {
-    await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, bot.model)
+  // A chat runs at its bot's effort, else its own, else the setting. A Grok chat without a model of
+  // its own or its bot's keeps Grok's default.
+  if (agent !== 'claude') {
+    await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, await grokModelFor(chatId).catch(() => ''))
   }
-  await applySessionEffort(sessionId, bot?.effort || (await getEffort()))
+  await applySessionEffort(sessionId, chatId ? await effortFor(chatId).catch(() => null) : await getEffort())
   if (agent !== 'claude') return
   await applyClaudeModel(connCall(claudeConn), sessionId, await claudeModelFor(chatId))
+}
+
+/** Put a chat's live session on the model and effort just picked for it. The conversation stays. */
+export async function applyChatToLiveSession(chatId: string): Promise<void> {
+  const sessionId = (await getChat(chatId).catch(() => null))?.grokSessionId
+  if (!sessionId || !hasLiveSession(sessionId)) return
+  const agent = connForSession(sessionId).agent
+  await applySessionEffort(sessionId, await effortFor(chatId).catch(() => null))
+  // Back to the default when the chat follows Settings again: Claude Code's "default", Grok's first
+  // listed model, which `grok models` marks as its default.
+  const model =
+    agent === 'claude'
+      ? (await claudeModelFor(chatId).catch(() => '')) || 'default'
+      : (await grokModelFor(chatId).catch(() => '')) || ((await getGrokCliInfo().catch(() => null))?.models[0] ?? '')
+  await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, model)
 }
 
 /** Put the live chats of a bot on its model and effort again, after its page was saved. */
