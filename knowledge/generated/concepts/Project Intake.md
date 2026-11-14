@@ -11,19 +11,17 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-When a new project is added, the app can ask the user a few questions about it. First it scans the project folder for its stack, dependencies and other findings. From that scan it generates intake questions, and it falls back to standard questions if it cannot generate them. The user's answers are turned into session rules, which the project's chats are then given.
+When a project is new to the Workbench, an intake questionnaire is scheduled for it. The main process first scans the folder for its stack, dependencies and notable source findings. From that scan it generates intake questions, using fallback questions if generation fails. The user's answers become session rules that later chats in the project follow.
 
 ## Works with
 
 - [[generated/concepts/Projects.md|Projects]]
-- [[generated/concepts/Knowledge Vault.md|Knowledge Vault]]
-- [[generated/concepts/Chat Sessions over ACP.md|Chat Sessions over ACP]]
+- [[generated/concepts/Agent Questions.md|Agent Questions]]
+- [[generated/concepts/CodeGraph Index.md|CodeGraph Index]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `intake.ts`: Project intake: decides when to run it, schedules it and turns answers into session rules.
-  - `intakeQuestions.ts`: Generates project intake questions from a project scan, with fallback questions.
-  - `projectScan.ts`: Scans a project folder for its stack, dependencies and other findings.
-- `src/renderer/src/components/`: The React components that make up the Workbench window: the project sidebar, the chat pane with agent replies, and the right-hand panes for the browser, git, the knowledge graph and agent activity.
-  - `Modals.tsx`: New project, settings and usage modals, including voice options and agent sign-in status.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `intake.ts`: Project intake questionnaire: scheduling it and turning answers into session rules.
+  - `intakeQuestions.ts`: Generates intake questions from a project scan, with fallback questions.
+  - `projectScan.ts`: Scans a project folder for stack, dependencies and source findings.

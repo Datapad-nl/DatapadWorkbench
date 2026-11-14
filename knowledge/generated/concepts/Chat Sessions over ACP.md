@@ -11,23 +11,24 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-Every chat runs as a session of an agent CLI, either Grok Build or Claude Code, which the app talks to over the Agent Client Protocol (ACP) on stdio. When the user sends a prompt, the main process starts or reuses the agent session for that chat and passes it the prompt, along with the project's MCP servers and rules. The ACP layer handles session updates, modes and plan-exit prompts, and keeps turns in order. Several chats can run at once, each in its own session. A new chat's title comes from its first prompt.
+Every chat runs as an agent session over the Agent Client Protocol (ACP), on either `grok agent stdio` or the Claude Code ACP adapter. When the user sends a message, the renderer calls the IPC bridge and the main process starts or resumes the session for that chat. The turn's prompt goes to the agent process, and the main process streams events back and waits for the turn to end. Several chats can run at the same time, each in its own session, and each can be stopped or waited on separately.
 
 ## Works with
 
 - [[generated/concepts/Live Turn Streaming.md|Live Turn Streaming]]
+- [[generated/concepts/IPC Bridge.md|IPC Bridge]]
 - [[generated/concepts/Agent CLI Detection.md|Agent CLI Detection]]
 - [[generated/concepts/Permission Modes.md|Permission Modes]]
 - [[generated/concepts/MCP Server Configuration.md|MCP Server Configuration]]
-- [[generated/concepts/IPC Bridge.md|IPC Bridge]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `acp.ts`: ACP session update types, agent process keys and waiting for a previous turn.
-  - `grok.ts`: Runs chat turns on agents: streaming state, stopping, slash commands and live chat events.
-  - `ipc.ts`: Registers IPC handlers, sends turns, forwards chat and index events and notifications.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `grok.ts`: Runs chat turns and streams: start, stop, wait, live events and commands.
+  - `acp.ts`: ACP session types, which agent process a session runs on, and turn-end waits.
+  - `ipc.ts`: Registers IPC handlers, sends turns, and raises notices for chats and bots.
+  - `grokCli.ts`: Locates the Grok CLI and probes its version, channel, models and status.
+  - `claudeCli.ts`: Locates the Claude Code CLI, its ACP adapter, and probes sign-in status.
   - `ids.ts`: Generates ids, timestamps and chat titles from prompts.
 - `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `mcp.ts`: MCP server types, parsing of the editor text, and conversion to ACP form.
   - `types.ts`: Core shared types: projects, messages, attachments, file hits, permission modes, plans.

@@ -11,18 +11,17 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-An agent can work with the other chats in its project. Through tools on the Workbench MCP server, it can list those chats, read one, start a new one, or send one a message. The calls arrive at the main process, which runs them against the store and the turn runner. Chats in a project can use this to hand work to each other.
+Agents can talk to other chats and to bots through tools on the Workbench MCP server. An agent can send a message to another chat, ask a bot a question, or post a message to a bot's chat. The main process routes the message to the target session and starts a turn there. It returns the reply where needed and raises a notice. This lets one chat hand work to another, or coordinate several chats, as the subagents panel shows.
 
 ## Works with
 
 - [[generated/concepts/Browser MCP Server.md|Browser MCP Server]]
+- [[generated/concepts/Bots.md|Bots]]
 - [[generated/concepts/Chat Sessions over ACP.md|Chat Sessions over ACP]]
-- [[generated/concepts/Persistence Store.md|Persistence Store]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `chatTools.ts`: Chat tools for agents: sending to chats, asking bots, listing and reading project chats.
-  - `browser-mcp.mjs`: Stdio MCP server exposing BrowserPane tools and workbench chat tools to agents.
-  - `browserAgent.ts`: Local HTTP server backing the browser MCP, plus MCP server and hook configs per chat.
-  - `grok.ts`: Runs chat turns on agents: streaming state, stopping, slash commands and live chat events.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `chatTools.ts`: Chat tools for agents: send to chats, ask bots, and bot chat messages.
+  - `browserAgent.ts`: Local HTTP server behind the browser MCP; builds MCP server configs and agent hooks.
+  - `ipc.ts`: Registers IPC handlers, sends turns, and raises notices for chats and bots.

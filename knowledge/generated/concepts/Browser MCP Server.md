@@ -11,7 +11,7 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-Agents use the BrowserPane through an MCP server that runs over stdio. The app adds this server to every chat's list of MCP servers. When an agent calls a tool such as navigate, screenshot or snapshot, the stdio server passes the call on to a local HTTP server in the main process. That server runs page actions one at a time, so two agents cannot act on the page at the same moment. The same MCP server also gives agents the Workbench's chat tools.
+Agents control the BrowserPane through a stdio MCP server that the Workbench adds to each chat session. The agent calls a tool such as navigate or screenshot. The MCP script forwards the call to a local HTTP server in the main process, which runs it through the browser driver and returns the result. The same server also carries the Workbench's chat tools. The main process builds the MCP config and agent hooks that wire this server into each session.
 
 ## Works with
 
@@ -22,8 +22,7 @@ Agents use the BrowserPane through an MCP server that runs over stdio. The app a
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `browser-mcp.mjs`: Stdio MCP server exposing BrowserPane tools and workbench chat tools to agents.
-  - `browserAgent.ts`: Local HTTP server backing the browser MCP, plus MCP server and hook configs per chat.
-  - `browserDrive.ts`: Serialized browser actions: navigate, back, forward, reload, screenshot, snapshot and element targeting.
-  - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and browser state.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `browserAgent.ts`: Local HTTP server behind the browser MCP; builds MCP server configs and agent hooks.
+  - `browserDrive.ts`: Serialized browser actions: navigate, back, forward, reload, screenshot, snapshot, click, type.
+  - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and state.

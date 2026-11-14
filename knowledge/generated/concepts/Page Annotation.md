@@ -11,17 +11,17 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-The user can annotate a web page to give an agent feedback about it. Starting an annotation injects scripts into the browser page that let the user pick an element. The user can cancel the pick, and the scripts are removed afterwards. Each finished note goes into a queue in the BrowserPane, and the queued notes are sent to the chat together.
+The user can point at parts of a page in the BrowserPane and attach notes to them. Starting annotation injects picker scripts into the page, which let the user select an element and can be cancelled or cleaned up. Each pick becomes a note in a queue in the pane. The user then sends the queued notes to the chat as context for the agent.
 
 ## Works with
 
 - [[generated/concepts/BrowserPane.md|BrowserPane]]
-- [[generated/concepts/Chat Sessions over ACP.md|Chat Sessions over ACP]]
+- [[generated/concepts/Live Turn Streaming.md|Live Turn Streaming]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `annotatePicker.ts`: Scripts injected into the browser page to pick, cancel and clean up element annotations.
-  - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and browser state.
-- `src/renderer/src/components/`: The React components that make up the Workbench window: the project sidebar, the chat pane with agent replies, and the right-hand panes for the browser, git, the knowledge graph and agent activity.
-  - `BrowserPane.tsx`: The built-in browser pane, with page annotation and a queue of notes to send.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `annotatePicker.ts`: Scripts injected into the browser page to pick, cancel and clean up annotations.
+  - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and state.
+- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
+  - `BrowserPane.tsx`: Embedded browser pane with page annotation and a queue of notes to send.

@@ -11,20 +11,20 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-A chat can run in its own git worktree, so its changes stay apart from the project's main checkout and from other chats. The main process creates these worktrees and works out the folder each chat should run in. All of the app's git writes go through a lock, one at a time per repository, so they cannot collide. When a worktree is removed, processes still running from its folder are found and stopped.
+A chat can work in its own git worktree, so concurrent chats don't edit the same checkout. When a chat starts, the main process decides whether it needs isolation and, if so, creates a worktree for it. All of the app's git writes are serialized per repository by a shared lock. When a worktree is no longer used, processes still running from it are found and killed. The sidebar lists worktrees under their project.
 
 ## Works with
 
-- [[generated/concepts/Git Pane.md|Git Pane]]
-- [[generated/concepts/Checkpoints.md|Checkpoints]]
 - [[generated/concepts/Projects.md|Projects]]
-- [[generated/concepts/Pull Request Watching.md|Pull Request Watching]]
+- [[generated/concepts/Git Pane.md|Git Pane]]
+- [[generated/concepts/Permission Modes.md|Permission Modes]]
+- [[generated/concepts/Checkpoints.md|Checkpoints]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `git.ts`: Chat worktrees, isolation decisions, uncommitted path checks and git snapshots for the git pane.
-  - `gitLock.ts`: Serializes the app's git writes per repository using the shared .git directory.
-  - `worktreeProcs.ts`: Finds and kills processes left running inside chat worktrees, on a periodic reaper.
-- `src/renderer/src/components/`: The React components that make up the Workbench window: the project sidebar, the chat pane with agent replies, and the right-hand panes for the browser, git, the knowledge graph and agent activity.
-  - `Sidebar.tsx`: Resizable sidebar listing projects, worktrees and chats, with project icons and scheduled-run times.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `git.ts`: Chat worktrees, isolation decisions, uncommitted paths and git snapshots for the UI.
+  - `gitLock.ts`: Serializes the app's git writes per repository via a shared lock.
+  - `worktreeProcs.ts`: Finds and kills leftover processes running from chat worktrees.
+- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
+  - `Sidebar.tsx`: Resizable sidebar of projects, worktrees, chats, bots and their schedules.

@@ -11,19 +11,21 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-Before it can run chats, the app has to find the agent programs. For Grok, it looks for the Grok CLI and checks its version, release channel and the models it offers. For Claude, it looks for the Claude CLI and its ACP adapter and checks whether the user is signed in. Sign-in itself happens outside the app, through `grok login` or the Claude CLI. The settings modal shows the result for each agent.
+Before a chat can run, the Workbench has to find the agent CLIs installed on the machine. It locates the Grok CLI and checks its version, channel, models and sign-in status. It also locates the Claude Code CLI and its ACP adapter and checks whether the user is signed in. Claude Code plan usage limits are fetched and cached, and the status bar shows them with a countdown to the next reset. The settings modal shows sign-in state for each agent.
 
 ## Works with
 
 - [[generated/concepts/Chat Sessions over ACP.md|Chat Sessions over ACP]]
 - [[generated/concepts/Session Import.md|Session Import]]
+- [[generated/concepts/Slash Commands.md|Slash Commands]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `grokCli.ts`: Finds the grok binary and probes its version, channel, models and status, cached.
-  - `claudeCli.ts`: Finds the Claude CLI, its ACP adapter command and probes sign-in and subscription.
-  - `sessions.ts`: Reads Grok sessions from disk: listing, history, plans and plan approval state.
-  - `env.ts`: Loads environment variables from a .env file.
-- `src/renderer/src/components/`: The React components that make up the Workbench window: the project sidebar, the chat pane with agent replies, and the right-hand panes for the browser, git, the knowledge graph and agent activity.
-  - `Modals.tsx`: New project, settings and usage modals, including voice options and agent sign-in status.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `grokCli.ts`: Locates the Grok CLI and probes its version, channel, models and status.
+  - `claudeCli.ts`: Locates the Claude Code CLI, its ACP adapter, and probes sign-in status.
+  - `claudeUsage.ts`: Fetches and parses Claude Code plan usage limits, with caching and retry.
+  - `sessions.ts`: Lists and reads Grok sessions on disk, plans and sign-in state.
+- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
+  - `Modals.tsx`: New project, settings (agent sign-in, voice language and speed), and usage modals.
+  - `StatusBar.tsx`: Status bar showing usage percent with reset countdown and index state.

@@ -11,19 +11,18 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-The BrowserPane is a web browser built into the Workbench window. Web pages are opened here instead of in an external browser. The main process owns the page: it keeps its state and console log, checks the URLs it is sent to, and attaches the page to the window. The renderer shows the pane among the right-hand panes. Both the user and the agents can drive it.
+The BrowserPane is a web view built into the Workbench, so pages open inside the app instead of an external browser. The main process manages its web contents, cleans up URLs, keeps the page's console log and tracks its state. Actions such as navigate, back, forward, reload, screenshot, snapshot, click and type run one at a time through a serialized driver. The renderer component shows the page next to the chat.
 
 ## Works with
 
 - [[generated/concepts/Browser MCP Server.md|Browser MCP Server]]
 - [[generated/concepts/Page Annotation.md|Page Annotation]]
-- [[generated/concepts/Chat Media and Visuals.md|Chat Media and Visuals]]
 
 ## Where it lives
 
-- `src/main/`: The Electron main process.
-  - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and browser state.
-  - `browserDrive.ts`: Serialized browser actions: navigate, back, forward, reload, screenshot, snapshot and element targeting.
-  - `contextMenu.ts`: Native right-click menu with spelling, links, editing, search and quoting selection into composer.
-- `src/renderer/src/components/`: The React components that make up the Workbench window: the project sidebar, the chat pane with agent replies, and the right-hand panes for the browser, git, the knowledge graph and agent activity.
-  - `BrowserPane.tsx`: The built-in browser pane, with page annotation and a queue of notes to send.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and state.
+  - `browserDrive.ts`: Serialized browser actions: navigate, back, forward, reload, screenshot, snapshot, click, type.
+  - `contextMenu.ts`: Native right-click menu with spelling, links, editing and quote-to-composer actions.
+- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
+  - `BrowserPane.tsx`: Embedded browser pane with page annotation and a queue of notes to send.

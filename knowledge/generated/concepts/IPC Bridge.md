@@ -11,19 +11,21 @@ workbench_generated: true
 
 > This note is maintained by Datapad Workbench. Add your own writing in `notes/`.
 
-The renderer has no direct access to Electron or the file system. Instead, the preload script builds an API object and exposes it on `window`, and a type declaration describes that API to the UI code. Each method on the object calls an IPC handler that the main process registers. Events go the other way: the main process pushes them to the renderer over IPC, for example chat streams and notices.
+The React UI never touches Electron directly. The preload script builds one API object, exposes it on `window`, and declares its type for the renderer. Each call on that object becomes an IPC message that a handler registered in the main process answers. The main process also pushes events back to the renderer, such as stream updates and notices, and the UI contexts subscribe to them.
 
 ## Works with
 
+- [[generated/concepts/Chat Sessions over ACP.md|Chat Sessions over ACP]]
 - [[generated/concepts/Live Turn Streaming.md|Live Turn Streaming]]
 - [[generated/concepts/Persistence Store.md|Persistence Store]]
-- [[generated/concepts/Workspace State.md|Workspace State]]
 
 ## Where it lives
 
 - `src/preload/`: The bridge between the UI and the main process.
   - `index.ts`: Builds the API object exposed to the renderer and exports its type.
   - `index.d.ts`: Declares the Workbench API on the global `Window` type.
-- `src/main/`: The Electron main process.
-  - `ipc.ts`: Registers IPC handlers, sends turns, forwards chat and index events and notifications.
-  - `index.ts`: App entry: creates the window, tray behavior, single instance, startup and clean quitting.
+- `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
+  - `ipc.ts`: Registers IPC handlers, sends turns, and raises notices for chats and bots.
+  - `index.ts`: App entry: window lifecycle, tray-hiding, single instance and clean quit.
+- `src/renderer/src/`: The React UI root: it mounts the app, lays out the sidebar, chat and resizable right panes, and provides workspace and bot contexts to the components.
+  - `workspace.tsx`: Workspace context: pending requests, right pane, bot tabs and streams.
