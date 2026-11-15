@@ -223,6 +223,8 @@ export async function askBot(input: {
     runChatId = created.id;
     const run = await mutateChat(created.id, (latest) => {
       latest.replyTo = caller.id;
+      const last = caller.messages.at(-1);
+      if (last) latest.askedAfter = last.id;
     });
     emitChat(run);
     const { done } = await send(

@@ -216,6 +216,8 @@ export type Chat = {
   botId?: string
   /** A bot's run asked with @: the project chat its answer is posted in. */
   replyTo?: string
+  /** The last message of the replyTo chat when the bot was asked: its first prompt gets the conversation up to there. */
+  askedAfter?: string
   title: string
   /** Which coding agent runs this chat. Missing means Grok. */
   agent?: ChatAgent

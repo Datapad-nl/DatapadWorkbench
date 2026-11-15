@@ -17,7 +17,7 @@ import type {
   Project
 } from '../shared/types'
 import { chatAgentLabel, normalizeChatAgent, normalizePermissionMode } from '../shared/types'
-import { carryOverPrompt } from '../shared/carryOver'
+import { askedFromPrompt, carryOverPrompt } from '../shared/carryOver'
 import { contextFromUpdate } from '../shared/handoff'
 import {
   abortAgent,
@@ -667,6 +667,11 @@ function earlierMessages(chat: Chat, lastUser: Message | undefined, followUp: Fo
   return chat.messages.slice(0, end)
 }
 
+async function askedFromConversation(chatId: string, lastId: string): Promise<string | null> {
+  const asking = await getChat(chatId).catch(() => null)
+  return asking ? askedFromPrompt(asking.messages, lastId, asking.title) : null
+}
+
 function promptForMode(mode: PermissionMode, text: string): string {
   if (mode !== 'plan' || isSlashCommand(text)) return text
   if (!text.trim()) return PLAN_MODE_INSTRUCTION
@@ -1145,7 +1150,17 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
     chat.carryOver && !isSlashCommand(userText)
       ? carryOverPrompt(earlierMessages(chat, lastUser, followUp), chat.id)
       : null
-  const cued = carried ? `${carried}\n\n${moded}` : moded
+  // A bot asked from a project chat starts with that chat's conversation up to the question.
+  const askedFrom =
+    !carried &&
+    chat.replyTo &&
+    chat.askedAfter &&
+    !isSlashCommand(userText) &&
+    earlierMessages(chat, lastUser, followUp).length === 0
+      ? await step(turn, askedFromConversation(chat.replyTo, chat.askedAfter))
+      : null
+  const handed = carried ?? askedFrom
+  const cued = handed ? `${handed}\n\n${moded}` : moded
   const images = followUp ? (followUp.attachments ?? []) : (lastUser!.attachments ?? [])
 
   // From here the agent owns the turn. Nothing is awaited until the prompt is sent.
