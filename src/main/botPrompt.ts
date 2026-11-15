@@ -31,7 +31,7 @@ export function promptForBotRun(text: string, run: { kind: 'schedule' | 'followU
       : 'This is the follow-up you set earlier, in the session you set it from.'
   return withBlock(
     text,
-    `${what} Nobody is watching: the user sees nothing of this run unless you call the workbench tool notify. Call it once, with a short message, only when there is something new the user needs to know or act on. When there is nothing new, finish without it. Before you finish, save in your memory what a later run needs to know, such as what you reported.`
+    `${what} Nobody is watching: the user sees nothing of this run unless you call the workbench tool notify. Call it once, with a short message, only when there is something new the user needs to know or act on. When there is nothing new, finish without it. Before you finish, save in your own memory what a later run needs to know, such as what you reported. Leave the shared memory as it is in this run: writing there waits for the user.`
   )
 }
 

@@ -37,8 +37,10 @@ import {
   getBot,
   listBots,
   readBotMemory,
+  readSharedMemory,
   removeBot,
   saveBotMemoryIndex,
+  saveSharedMemoryIndex,
   setBotAvatar,
   updateBot
 } from './bots'
@@ -488,6 +490,8 @@ export function registerIpc(): void {
   ipcMain.handle('bot:saveMemory', (_event, botId: string, index: string) =>
     saveBotMemoryIndex(String(botId), String(index ?? ''))
   )
+  ipcMain.handle('memory:shared', () => readSharedMemory())
+  ipcMain.handle('memory:saveShared', (_event, index: string) => saveSharedMemoryIndex(String(index ?? '')))
   ipcMain.handle('bot:openFolder', async (_event, botId: string) => {
     const bot = await getBot(String(botId))
     const error = await shell.openPath(bot.folder)

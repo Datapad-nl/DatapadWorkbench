@@ -56,7 +56,7 @@ import {
 import { emitNotice, finishTurn, startTurn } from './activity'
 import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
 import { botRun } from './botRuns'
-import { botFolder, botSessionRules, getBot, readBotMemory } from './bots'
+import { botFolder, botSessionRules, getBot, readBotMemory, readSharedMemory } from './bots'
 import { endForegroundAgents } from './builtinAgents'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
@@ -853,7 +853,11 @@ function chatFolder(chat: Chat, project: Project | undefined): string {
 /** A bot's instructions and memory come before the rules of the project it works in. */
 async function chatRules(chat: Chat, project: Project | undefined): Promise<string | null> {
   const bot = chat.botId
-    ? botSessionRules(await getBot(chat.botId), (await readBotMemory(chat.botId)).index)
+    ? botSessionRules(
+        await getBot(chat.botId),
+        (await readBotMemory(chat.botId)).index,
+        (await readSharedMemory()).index
+      )
     : null
   const rules = [bot, await projectSessionRules(project?.id)].filter(Boolean)
   return rules.length > 0 ? rules.join('\n\n') : null

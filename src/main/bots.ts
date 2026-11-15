@@ -115,13 +115,27 @@ export function botMemoryFolder(botId: string): string {
   return join(botFolder(botId), 'memory')
 }
 
+/** What every bot knows: who the user is and what they work on. Every bot reads it, and asks before writing in it. */
+export function sharedMemoryFolder(): string {
+  return join(app.getPath('userData'), 'workbench', 'memory')
+}
+
 const MEMORY_INDEX = 'MEMORY.md'
 /** How much of MEMORY.md each session starts with. The index is meant to stay short. */
 const MAX_INDEX_CHARS = 8000
+/** The shared index is in every session of every bot, so it gets less room. */
+const MAX_SHARED_INDEX_CHARS = 2000
 
-/** The memory folder is made here, so it is there before the bot first writes in it. */
-export async function readBotMemory(botId: string): Promise<BotMemory> {
-  const folder = botMemoryFolder(botId)
+export function readBotMemory(botId: string): Promise<BotMemory> {
+  return readMemory(botMemoryFolder(botId))
+}
+
+export function readSharedMemory(): Promise<BotMemory> {
+  return readMemory(sharedMemoryFolder())
+}
+
+/** The memory folder is made here, so it is there before a bot first writes in it. */
+async function readMemory(folder: string): Promise<BotMemory> {
   await mkdir(folder, { recursive: true }).catch(() => {})
   const index = await readFile(join(folder, MEMORY_INDEX), 'utf8').catch(() => '')
   const entries = await readdir(folder, { recursive: true, withFileTypes: true }).catch(() => [])
@@ -135,32 +149,49 @@ export async function readBotMemory(botId: string): Promise<BotMemory> {
 
 export async function saveBotMemoryIndex(botId: string, index: string): Promise<BotMemory> {
   await getBot(botId)
-  const folder = botMemoryFolder(botId)
-  await mkdir(folder, { recursive: true })
-  await writeFileAtomic(join(folder, MEMORY_INDEX), index)
-  return readBotMemory(botId)
+  return saveMemoryIndex(botMemoryFolder(botId), index)
 }
 
-/** The bot's instructions and the index of its memory, as rules for each of its sessions. */
-export function botSessionRules(bot: Bot, memoryIndex = ''): string {
+export function saveSharedMemoryIndex(index: string): Promise<BotMemory> {
+  return saveMemoryIndex(sharedMemoryFolder(), index)
+}
+
+async function saveMemoryIndex(folder: string, index: string): Promise<BotMemory> {
+  await mkdir(folder, { recursive: true })
+  await writeFileAtomic(join(folder, MEMORY_INDEX), index)
+  return readMemory(folder)
+}
+
+function shownIndex(index: string, max: number): string {
+  const text = index.trim()
+  if (!text) return '(empty)'
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}\n… (cut here: keep ${MEMORY_INDEX} short and move details into files)`
+}
+
+/** The bot's instructions and the indexes of its own and the shared memory, as rules for each of its sessions. */
+export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = ''): string {
   const intro = `You are ${bot.name}, a bot in Datapad Workbench.`
   const instructions = bot.instructions.trim()
-  const folder = botMemoryFolder(bot.id)
-  const index = memoryIndex.trim()
-  const shown =
-    index.length <= MAX_INDEX_CHARS
-      ? index
-      : `${index.slice(0, MAX_INDEX_CHARS)}\n… (cut here: keep ${MEMORY_INDEX} short and move details into files)`
   const memory = [
-    '## Your memory',
-    `Your memory is the folder ${folder}. It outlives this chat: a new session starts with only these rules and what you saved there.`,
-    `- ${MEMORY_INDEX} in it is the index, shown below. One line per entry, linking to a file in the folder for the details. Read a file when its entry matters to the task.`,
-    '- Save what you will need later and cannot look up again: what the user told you about themselves and how they want things done, their corrections, what you already told them, and where unfinished work stands. For something kept elsewhere, save where to find it, not a copy.',
+    '## Memory',
+    'You have two memory folders, your own and one shared with the other bots. They outlive this chat: a new session starts with only these rules and what is saved there.',
+    `- ${MEMORY_INDEX} in each is its index, shown below. One line per entry, linking to a file in the folder for the details. Read a file when its entry matters to the task.`,
+    '- Save what you will need later and cannot look up again. For something kept elsewhere, save where to find it, not a copy.',
     '- Save as you go, not only at the end. Change or remove entries that are no longer true.',
-    `- You can write in this folder without asking.`,
+    '- Save only in these two folders, not in any other memory your agent has: the other bots and the user do not see that one.',
     '',
-    `### ${MEMORY_INDEX}`,
-    shown || '(empty)'
+    '### Your memory',
+    `Your memory is the folder ${botMemoryFolder(bot.id)}. No other bot reads it. It holds your own work: what you already told the user, where unfinished work stands, and how the user wants your job done, with their corrections. You can write in this folder without asking.`,
+    '',
+    `#### ${MEMORY_INDEX}`,
+    shownIndex(memoryIndex, MAX_INDEX_CHARS),
+    '',
+    '### Shared memory',
+    `The shared memory is the folder ${sharedMemoryFolder()}. Every bot reads it. It holds what any bot would need: who the user is, their businesses and projects, and how they want things done in general. You can read its files without asking. Writing in it asks the user first, so save there only what another bot would need too, and everything else in your own. Use your file tools there, not the shell: a command that names this folder asks first too.`,
+    '',
+    `#### ${MEMORY_INDEX}`,
+    shownIndex(sharedIndex, MAX_SHARED_INDEX_CHARS)
   ].join('\n')
   return [intro, instructions, memory].filter(Boolean).join('\n\n')
 }

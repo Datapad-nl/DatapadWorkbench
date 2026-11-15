@@ -102,7 +102,10 @@ vi.mock('./checkpoints', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./checkpoints')>()),
   snapshotBeforeTool: async () => {}
 }))
-vi.mock('./bots', () => ({ botMemoryFolder: (botId: string) => `/bots/${botId}/memory` }))
+vi.mock('./bots', () => ({
+  botMemoryFolder: (botId: string) => `/bots/${botId}/memory`,
+  sharedMemoryFolder: () => '/workbench/memory'
+}))
 vi.mock('./sessions', () => ({ readGrokPlan: () => null }))
 vi.mock('./store', () => ({
   chatBot: async (chatId?: string) => (chatId ? (fake.bots[chatId] ?? null) : null),
@@ -249,6 +252,9 @@ describe('agent processes for bots', () => {
     // A project's chat keeps every server, and Claude Code's own config.
     expect(names(plainNew)).toEqual(['github', 'notes'])
     expect(options(plainNew).strictMcpConfig).toBeUndefined()
+    // A bot's memory is the Workbench's, so Claude Code's own is off for it and left alone for a project's chat.
+    expect(options(botNew).settings).toEqual({ autoMemoryEnabled: false })
+    expect(options(plainNew).settings).toEqual({})
   })
 
   it("loads a bot's live chats again on their next turn after its MCP servers changed", async () => {
@@ -331,6 +337,64 @@ describe('agent processes for bots', () => {
     expect(pendingPermissionRequests().map((request) => request.title)).toEqual(
       expect.arrayContaining(['escape', 'relative', 'move out', 'upload'].map((title) => expect.stringContaining(title)))
     )
+  })
+
+  it('lets a bot read the shared memory without asking, and asks before it writes there, in any mode', async () => {
+    const options = [
+      { optionId: 'yes', kind: 'allow_once', name: 'Allow' },
+      { optionId: 'no', kind: 'reject_once', name: 'Reject' }
+    ]
+    const shared = '/workbench/memory/peter.md'
+    const calls = [
+      { toolCallId: 's1', title: 'read shared', kind: 'read', locations: [{ path: shared }] },
+      { toolCallId: 's2', title: 'edit shared', kind: 'edit', locations: [{ path: shared }] },
+      { toolCallId: 's3', title: 'move in', kind: 'move', rawInput: { source: '/bots/b9/memory/a.md', destination: shared } },
+      { toolCallId: 's4', title: 'edit own', kind: 'edit', locations: [{ path: '/bots/b9/memory/MEMORY.md' }] },
+      { toolCallId: 's5', title: 'append', kind: 'execute', rawInput: { command: 'cat >> ~/data/workbench/memory/MEMORY.md' } }
+    ]
+    const titles = (chatId: string): string[] =>
+      pendingPermissionRequests()
+        .filter((request) => request.chatId === chatId)
+        .map((request) => request.title)
+
+    for (const [index, mode] of (['ask', 'accept'] as const).entries()) {
+      const chatId = `chat-9${mode}`
+      fake.bots[chatId] = { id: 'b9', agent: 'grok', model: '', effort: '', allowedTools: [] }
+      const sessionId = await newSession('/project', null, 'grok', chatId, BOT)
+      bindPermissionSession(sessionId, chatId, mode)
+      const own = fake.procs[fake.procs.length - 1]
+      const first = 920 + index * 10
+      for (const [at, toolCall] of calls.entries()) {
+        const message = { id: first + at, method: 'session/request_permission', params: { sessionId, options, toolCall } }
+        own.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`)
+      }
+      await vi.waitFor(() => expect(titles(chatId)).toHaveLength(3))
+      expect(titles(chatId)).toEqual(
+        expect.arrayContaining(['edit shared', 'move in', 'append'].map((title) => expect.stringContaining(title)))
+      )
+      // Reading the shared memory and writing its own ran without a question.
+      const answered = own.replies.map((reply) => (reply as { id: number }).id)
+      expect(answered).toEqual(expect.arrayContaining([first, first + 3]))
+    }
+
+    // Only the shared folder itself is free to read.
+    fake.bots['chat-9out'] = { id: 'b9', agent: 'grok', model: '', effort: '', allowedTools: [] }
+    const outside = await newSession('/project', null, 'grok', 'chat-9out', BOT)
+    bindPermissionSession(outside, 'chat-9out', 'ask')
+    const escape = { toolCallId: 's6', title: 'read outside', kind: 'read', locations: [{ path: '/workbench/memory/../secrets.json' }] }
+    fake.procs[fake.procs.length - 1].stdout.write(
+      `${JSON.stringify({ jsonrpc: '2.0', id: 940, method: 'session/request_permission', params: { sessionId: outside, options, toolCall: escape } })}\n`
+    )
+    await vi.waitFor(() => expect(titles('chat-9out')).toEqual([expect.stringContaining('read outside')]))
+
+    // A project chat, which is no bot's, is not held to this.
+    const sessionId = await newSession('/project', null, 'grok', 'chat-1')
+    bindPermissionSession(sessionId, 'chat-1', 'accept')
+    const proc = fake.procs[fake.procs.length - 1]
+    const message = { id: 950, method: 'session/request_permission', params: { sessionId, options, toolCall: calls[1] } }
+    proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`)
+    await vi.waitFor(() => expect(proc.replies.some((reply) => (reply as { id: number }).id === 950)).toBe(true))
+    expect(titles('chat-1')).toEqual([])
   })
 })
 

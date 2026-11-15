@@ -7,7 +7,7 @@ import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './br
 import { type AgentProcess, startClaudeAdapter } from './claudeCli'
 import { getGrokCliInfo, grokBinary } from './grokCli'
 import { relPath, snapshotBeforeTool, toolPaths } from './checkpoints'
-import { botMemoryFolder } from './bots'
+import { botMemoryFolder, sharedMemoryFolder } from './bots'
 import {
   askPermission,
   cancelAllPermissions,
@@ -38,7 +38,7 @@ import {
   skipOutcome
 } from './questions'
 import { tmpdir } from 'os'
-import { isAbsolute } from 'path'
+import { isAbsolute, sep } from 'path'
 import {
   normalizeReasoningEffort,
   type AgentCommand,
@@ -212,7 +212,7 @@ function onlyInside(folder: string, tool: PermissionParams['toolCall']): boolean
 
 /**
  * Whether a bot chat may run this tool without asking: the tool is on the bot's list, it is one of the
- * bot's own run tools, or it reads or writes only the bot's memory folder.
+ * bot's own run tools, it reads or writes only the bot's memory folder, or it only reads the shared memory.
  */
 async function botAllowsTool(sessionId: string, params: PermissionParams): Promise<boolean> {
   const tool = params.toolCall
@@ -222,7 +222,26 @@ async function botAllowsTool(sessionId: string, params: PermissionParams): Promi
   if (name && (BOT_RUN_TOOL_NAMES.has(name) || isToolAllowed(bot.allowedTools, name))) return true
   // An MCP tool may send what it reads elsewhere, so only the agent's own file tools count.
   if (name?.startsWith('mcp__')) return false
-  return MEMORY_KINDS.has((tool?.kind ?? '').toLowerCase()) && onlyInside(botMemoryFolder(bot.id), tool)
+  const kind = (tool?.kind ?? '').toLowerCase()
+  if (MEMORY_KINDS.has(kind) && onlyInside(botMemoryFolder(bot.id), tool)) return true
+  return kind === 'read' && onlyInside(sharedMemoryFolder(), tool)
+}
+
+/**
+ * Whether a bot chat's tool may change the shared memory, which every bot then reads: any tool but a read or
+ * a search that names the folder, as a path or inside a shell command.
+ */
+async function botWritesSharedMemory(sessionId: string, params: PermissionParams): Promise<boolean> {
+  const tool = params.toolCall
+  const kind = (tool?.kind ?? '').toLowerCase()
+  if (!tool || kind === 'read' || kind === 'search') return false
+  const shared = sharedMemoryFolder()
+  const paths = [...toolPaths(tool), ...fullPathsIn(tool.rawInput)]
+  // A command may write the folder with ~ or an escaped space, so its last three names are looked for.
+  const tail = shared.split(sep).slice(-3).join('/')
+  const text = `${tool.title ?? ''} ${JSON.stringify(tool.rawInput ?? '')}`.replace(/\\+/g, '/')
+  const named = text.includes(tail) || paths.some((path) => isAbsolute(path.trim()) && relPath(shared, path) !== null)
+  return named && Boolean(await chatBot(chatIdForSession(sessionId) ?? undefined).catch(() => null))
 }
 
 /**
@@ -545,6 +564,8 @@ async function settlePermission(conn: Conn, message: JsonRpc): Promise<void> {
   let decision = decidePermission(mode, params)
   // A bot runs the tools on its list unattended. Anything else asks, and the question sends a notification.
   if (decision === 'ask' && (await botAllowsTool(sessionId, params))) decision = 'allow'
+  // What one bot writes in the shared memory every bot then follows, so that asks first, in any mode.
+  if (decision === 'allow' && (await botWritesSharedMemory(sessionId, params))) decision = 'ask'
   const requestId = message.id === undefined ? null : promptRequestId(conn, message.id)
   // An edit to files another chat in the same folder changed and has not committed asks first, in any mode.
   const clash = decision !== 'deny' && requestId ? await findClash(sessionId, params) : null
@@ -1137,7 +1158,8 @@ async function sessionConfig(
       claudeCode: {
         ...meta,
         options: {
-          settings: await agentHookSettings(chatId),
+          // A bot keeps its memory in the Workbench's folders. Claude Code's own, kept per working folder, is off.
+          settings: { ...(await agentHookSettings(chatId)), ...(bot ? { autoMemoryEnabled: false } : {}) },
           ...(Object.keys(env).length > 0 ? { env } : {}),
           ...plugins,
           // Claude Code also loads servers of its own: ~/.claude.json, .mcp.json, plugins. A bot gets none of those.

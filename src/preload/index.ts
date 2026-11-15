@@ -69,6 +69,9 @@ const api = {
   /** The bot's memory folder: its MEMORY.md index and the other files in it. */
   getBotMemory: (botId: string): Promise<BotMemory> => ipcRenderer.invoke('bot:memory', botId),
   saveBotMemory: (botId: string, index: string): Promise<BotMemory> => ipcRenderer.invoke('bot:saveMemory', botId, index),
+  /** The memory folder every bot reads, in the same shape as a bot's own. */
+  getSharedMemory: (): Promise<BotMemory> => ipcRenderer.invoke('memory:shared'),
+  saveSharedMemory: (index: string): Promise<BotMemory> => ipcRenderer.invoke('memory:saveShared', index),
   listBotSkills: (botId: string): Promise<BotSkill[]> => ipcRenderer.invoke('bot:skills', botId),
   saveBotSkill: (input: SaveBotSkillInput): Promise<BotSkill> => ipcRenderer.invoke('bot:saveSkill', input),
   removeBotSkill: (botId: string, name: string): Promise<void> => ipcRenderer.invoke('bot:removeSkill', botId, name),

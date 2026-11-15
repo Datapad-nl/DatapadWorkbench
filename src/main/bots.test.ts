@@ -20,8 +20,10 @@ import {
   isBotFolder,
   listBots,
   readBotMemory,
+  readSharedMemory,
   removeBot,
   saveBotMemoryIndex,
+  saveSharedMemoryIndex,
   setBotAvatar,
   setBotChat,
   updateBot
@@ -147,7 +149,7 @@ describe('bots', () => {
     const bot = await createBot('Scout')
     expect(await readBotMemory(bot.id)).toEqual({ folder: join(bot.folder, 'memory'), index: '', files: [] })
     expect(botSessionRules(bot)).toContain(`Your memory is the folder ${join(bot.folder, 'memory')}.`)
-    expect(botSessionRules(bot)).toMatch(/### MEMORY\.md\n\(empty\)$/)
+    expect(botSessionRules(bot)).toMatch(/#### MEMORY\.md\n\(empty\)\n\n### Shared memory\n/)
 
     mkdirSync(join(bot.folder, 'memory', 'people'), { recursive: true })
     writeFileSync(join(bot.folder, 'memory', 'people', 'peter.md'), 'Prefers short answers.')
@@ -160,5 +162,32 @@ describe('bots', () => {
     expect(rules).toContain('cut here: keep MEMORY.md short')
     expect(rules).not.toContain('x'.repeat(8001))
     await expect(saveBotMemoryIndex('nobody', 'hi')).rejects.toThrow()
+  })
+
+  it('gives every bot the shared memory next to its own, with a shorter index', async () => {
+    const scout = await createBot('Scout')
+    const clerk = await createBot('Clerk')
+    const folder = join(stub.dir, 'workbench', 'memory')
+    expect(await readSharedMemory()).toEqual({ folder, index: '', files: [] })
+
+    writeFileSync(join(folder, 'peter.md'), 'Prefers short answers.')
+    const shared = await saveSharedMemoryIndex('- [Peter](peter.md) — how he likes answers')
+    expect(shared).toEqual({ folder, index: '- [Peter](peter.md) — how he likes answers', files: ['peter.md'] })
+    await saveBotMemoryIndex(scout.id, '- [Runs](runs.md) — what Scout reported')
+    // The shared memory is not inside a bot's folder, and a bot's memory does not show in it.
+    expect(isBotFolder(folder)).toBe(false)
+    expect((await readBotMemory(clerk.id)).index).toBe('')
+
+    for (const bot of [scout, clerk]) {
+      const own = (await readBotMemory(bot.id)).index
+      const rules = botSessionRules(bot, own, (await readSharedMemory()).index)
+      expect(rules).toContain(`The shared memory is the folder ${folder}.`)
+      expect(rules).toMatch(/### Shared memory\n[^\n]+\n\n#### MEMORY\.md\n- \[Peter\]\(peter\.md\) — how he likes answers$/)
+      expect(rules.includes('what Scout reported')).toBe(bot === scout)
+    }
+
+    const long = botSessionRules(scout, '', 'y'.repeat(3000))
+    expect(long).toContain('y'.repeat(2000))
+    expect(long).not.toContain('y'.repeat(2001))
   })
 })

@@ -292,7 +292,7 @@ export type ChatWake = {
 
 export type UnattendedRun = { kind: 'schedule' | 'followUp'; startedAt: string }
 
-/** A bot's memory folder: its MEMORY.md index and the other files in it. */
+/** A memory folder, a bot's own or the one all bots share: its MEMORY.md index and the other files in it. */
 export type BotMemory = { folder: string; index: string; files: string[] }
 
 export type ChatSummary = Omit<Chat, 'messages'> & {

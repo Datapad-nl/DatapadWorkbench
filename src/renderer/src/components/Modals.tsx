@@ -32,6 +32,7 @@ import {
   type MicInput
 } from '../voice/engine'
 import { useWorkspace } from '../workspace'
+import { SharedMemory } from './BotMemory'
 import { McpSettings } from './McpSettings'
 import { ThemeEditor } from './ThemeEditor'
 import { Toggle } from './Toggle'
@@ -1025,6 +1026,9 @@ export function SettingsModal(): React.JSX.Element | null {
             </div>
             <UpdateSection />
             <SecretsSection />
+            <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
+              <SharedMemory />
+            </div>
             <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
               <div className="text-[12px] font-medium text-ink">Support</div>
               <p className="mt-1 text-[12px] leading-5 text-muted">
