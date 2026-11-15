@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
   CLAUDE_MODELS,
   type ClaudeUsage,
@@ -33,6 +33,7 @@ import {
 } from '../voice/engine'
 import { useWorkspace } from '../workspace'
 import { SharedMemory } from './BotMemory'
+import { Icon } from './icons'
 import { McpSettings } from './McpSettings'
 import { ThemeEditor } from './ThemeEditor'
 import { Toggle } from './Toggle'
@@ -421,7 +422,7 @@ function updateText(state: UpdateState): string {
 }
 
 /** The secrets agents asked for in chats, by project or bot. Names only: values never leave the main process. */
-function SecretsSection(): React.JSX.Element | null {
+function SecretsSection(): React.JSX.Element {
   const { projects } = useWorkspace()
   const [scopes, setScopes] = useState<SecretScope[]>([])
   const [botNames, setBotNames] = useState<Record<string, string>>({})
@@ -436,7 +437,7 @@ function SecretsSection(): React.JSX.Element | null {
         setBotNames(Object.fromEntries(bots.map((bot) => [`bot:${bot.id}`, bot.name])))
       },
       () => {
-        // No list to show: the section stays hidden.
+        // No list to show: the pane says there are none.
       }
     )
     return () => {
@@ -444,14 +445,19 @@ function SecretsSection(): React.JSX.Element | null {
     }
   }, [])
 
-  if (scopes.length === 0) return null
+  if (scopes.length === 0) {
+    return (
+      <p className="text-[12px] leading-5 text-muted">
+        No secrets yet. When an agent asks for one in a chat, it is kept here.
+      </p>
+    )
+  }
   const label = (scope: string): string =>
     projects.find((project) => project.id === scope)?.name ?? botNames[scope] ?? 'Removed project'
 
   return (
-    <div data-testid="settings-secrets" className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
-      <div className="text-[12px] font-medium text-ink">Secrets</div>
-      <p className="mt-1 text-[12px] leading-5 text-muted">
+    <div data-testid="settings-secrets">
+      <p className="text-[12px] leading-5 text-muted">
         Kept encrypted with the system keychain. Agents get them as environment variables, never the values.
       </p>
       <div className="mt-2 flex flex-col gap-2">
@@ -514,7 +520,7 @@ function UpdateSection(): React.JSX.Element {
 
   const busy = state.status === 'checking' || state.status === 'downloading'
   return (
-    <div data-testid="settings-updates" className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
+    <div data-testid="settings-updates" className="py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="text-[12px] font-medium text-ink">Updates</div>
         <span className="font-mono text-[11px] text-muted">v{__APP_VERSION__}</span>
@@ -594,10 +600,73 @@ function AgentStatus({ settings }: { settings: PublicSettings }): React.JSX.Elem
   )
 }
 
+/** The sections of Settings, in nav order. A new section is one entry here and one case in `SettingsModal`. */
+const SETTINGS_SECTIONS = [
+  { id: 'agent', label: 'Agent', group: 'Chats', description: 'The agent, model, and effort new chats start with.' },
+  {
+    id: 'subagents',
+    label: 'Subagents',
+    group: 'Chats',
+    description: 'How a chat hands work to subagents, and on which models.'
+  },
+  {
+    id: 'voice',
+    label: 'Voice',
+    group: 'Chats',
+    description: 'Talk to the agent and hear its replies, all on this computer.'
+  },
+  { id: 'memory', label: 'Memory', group: 'Context', description: 'What every bot should know about you and your work.' },
+  { id: 'secrets', label: 'Secrets', group: 'Context', description: 'Secrets agents asked for in chats, by project or bot.' },
+  {
+    id: 'mcp',
+    label: 'MCP servers',
+    group: 'Context',
+    description: 'Servers that give every chat more tools.',
+    testId: 'settings-mcp'
+  },
+  {
+    id: 'appearance',
+    label: 'Appearance',
+    group: 'Workbench',
+    description:
+      'Switch a built-in look, or edit every surface, typeface, and radius. Save as a theme file you can load later.',
+    testId: 'settings-appearance'
+  },
+  { id: 'about', label: 'About', group: 'Workbench', description: 'Version, updates, and support.' }
+] as const satisfies readonly { id: string; label: string; group: string; description: string; testId?: string }[]
+
+type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
+
+/** One setting: label and help on the left, the control on the right, or under them when `stacked`. */
+function SettingRow({
+  label,
+  help,
+  stacked,
+  children
+}: {
+  label: React.ReactNode
+  help?: React.ReactNode
+  stacked?: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className={`py-3 ${stacked ? '' : 'flex items-center justify-between gap-6'}`}>
+      <div className="min-w-0">
+        <div className="text-[12px] font-medium text-ink">{label}</div>
+        {help ? <div className="mt-0.5 text-[11.5px] leading-[17px] text-muted">{help}</div> : null}
+      </div>
+      <div className={stacked ? 'mt-2' : 'shrink-0'}>{children}</div>
+    </div>
+  )
+}
+
+const SETTINGS_SELECT =
+  'w-64 rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60'
+
 export function SettingsModal(): React.JSX.Element | null {
   const { showSettings, setShowSettings, settings, saveSettings } = useWorkspace()
   const { model: voiceModel } = useVoice()
-  const [tab, setTab] = useState<'general' | 'mcp' | 'appearance'>('general')
+  const [section, setSection] = useState<SettingsSectionId>('agent')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState(settings?.model || DEFAULT_MODEL)
   const [effort, setEffort] = useState<ReasoningEffort | ''>(settings?.effort ?? '')
@@ -613,10 +682,19 @@ export function SettingsModal(): React.JSX.Element | null {
 
   useEffect(() => {
     if (!showSettings) return
-    setTab(showSettings === 'mcp' ? 'mcp' : 'general')
+    setSection(showSettings === 'mcp' ? 'mcp' : 'agent')
     setSaved(false)
     setSaveError(null)
   }, [showSettings])
+
+  useEffect(() => {
+    if (!showSettings) return
+    function onKey(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setShowSettings(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showSettings, setShowSettings])
 
   // This dialog stays mounted from the first frame, while settings are still
   // null. Seed the select from the saved model each time it opens, otherwise
@@ -648,6 +726,7 @@ export function SettingsModal(): React.JSX.Element | null {
   const claudeModels: ClaudeOptions['models'] =
     claudeOptions?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label }))
   const efforts: readonly ReasoningEffort[] = onClaude ? (claudeOptions?.efforts ?? REASONING_EFFORTS) : GROK_REASONING_EFFORTS
+  const current = SETTINGS_SECTIONS.find((item) => item.id === section) ?? SETTINGS_SECTIONS[0]
 
   // A toggle saves at once. A failed save shows below, like the Save button's own error.
   function save(patch: Parameters<typeof saveSettings>[0]): void {
@@ -674,57 +753,15 @@ export function SettingsModal(): React.JSX.Element | null {
     }
   }
 
-  return (
-    <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
-      <div
-        className={`corner-marks flex flex-col rounded-2xl border border-line bg-surface p-5 shadow-2xl ${
-          tab === 'appearance'
-            ? 'h-[86vh] w-[880px]'
-            : tab === 'mcp'
-              ? 'max-h-[86vh] w-[560px] overflow-y-auto'
-              : 'max-h-[86vh] w-[460px] overflow-y-auto'
-        }`}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-[15px] font-semibold tracking-tight">Settings</div>
-          </div>
-          <div className="flex rounded-md bg-canvas p-0.5">
-            <button
-              className={`rounded px-2.5 py-1 text-[11px] ${
-                tab === 'general' ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
-              }`}
-              onClick={() => setTab('general')}
-            >
-              General
-            </button>
-            <button
-              data-testid="settings-mcp"
-              className={`rounded px-2.5 py-1 text-[11px] ${
-                tab === 'mcp' ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
-              }`}
-              onClick={() => setTab('mcp')}
-            >
-              MCP
-            </button>
-            <button
-              data-testid="settings-appearance"
-              className={`rounded px-2.5 py-1 text-[11px] ${
-                tab === 'appearance' ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
-              }`}
-              onClick={() => setTab('appearance')}
-            >
-              Appearance
-            </button>
-          </div>
-        </div>
-
-        {tab === 'general' ? (
-          <>
-            <div className="mt-4 rounded-lg border border-line bg-canvas px-3 py-3">
-              <div className="flex items-center justify-between gap-3">
+  const body = (): React.JSX.Element => {
+    switch (section) {
+      case 'agent':
+        return (
+          <div className="divide-y divide-line">
+            <div className="pb-3">
+              <div className="flex items-center justify-between gap-6">
                 <div className="text-[12px] font-medium text-ink">Agent for new chats</div>
-                <div data-testid="settings-default-agent" className="flex rounded-md bg-surface p-0.5">
+                <div data-testid="settings-default-agent" className="flex rounded-md bg-canvas p-0.5">
                   {(
                     [
                       ['grok', 'Grok Build'],
@@ -746,221 +783,215 @@ export function SettingsModal(): React.JSX.Element | null {
                 </div>
               </div>
               <AgentStatus settings={settings} />
-              <div className="mt-3 grid grid-cols-[minmax(0,1.4fr)_minmax(0,0.9fr)] gap-3">
-                <div className="min-w-0">
-                  <label className="block text-[12px] text-muted">Model</label>
-                  {onClaude ? (
-                    <select
-                      data-testid="settings-claude-model"
-                      value={claudeModel}
-                      onChange={(event) => {
-                        setClaudeModel(event.target.value)
-                        setSaved(false)
-                      }}
-                      className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
-                    >
-                      {claudeModels.some((option) => option.value === claudeModel) ? null : (
-                        <option value={claudeModel}>{claudeModel}</option>
-                      )}
-                      {claudeModels.map((option) => (
+            </div>
+            <SettingRow label="Model">
+              {onClaude ? (
+                <select
+                  data-testid="settings-claude-model"
+                  value={claudeModel}
+                  onChange={(event) => {
+                    setClaudeModel(event.target.value)
+                    setSaved(false)
+                  }}
+                  className={SETTINGS_SELECT}
+                >
+                  {claudeModels.some((option) => option.value === claudeModel) ? null : (
+                    <option value={claudeModel}>{claudeModel}</option>
+                  )}
+                  {claudeModels.map((option) => (
+                    <option key={option.value} value={option.value} title={option.description}>
+                      {option.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <select
+                  data-testid="settings-model"
+                  value={model}
+                  onChange={(event) => {
+                    setModel(event.target.value)
+                    setSaved(false)
+                  }}
+                  className={`${SETTINGS_SELECT} font-mono`}
+                >
+                  {modelOptions(settings.grokCli.models, model).map((id) => (
+                    <option key={id} value={id}>
+                      {id}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </SettingRow>
+            <SettingRow label="Effort">
+              <select
+                data-testid="settings-effort"
+                value={effort}
+                onChange={(event) => {
+                  setEffort(event.target.value as ReasoningEffort | '')
+                  setSaved(false)
+                }}
+                className={SETTINGS_SELECT}
+              >
+                <option value="">Default</option>
+                {effort && !efforts.includes(effort) ? (
+                  <option value={effort}>{reasoningEffortLabel(effort)}</option>
+                ) : null}
+                {efforts.map((id) => (
+                  <option key={id} value={id}>
+                    {reasoningEffortLabel(id)}
+                  </option>
+                ))}
+              </select>
+            </SettingRow>
+            {onClaude || settings.grokBuildSignedIn ? null : (
+              <SettingRow label="xAI API key (instead of grok login)">
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(event) => {
+                    setApiKey(event.target.value)
+                    setSaved(false)
+                  }}
+                  className="w-64 rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
+                  placeholder={settings.keyPreview ?? 'xai-…'}
+                />
+              </SettingRow>
+            )}
+          </div>
+        )
+      case 'subagents':
+        return (
+          <>
+            <p className="text-[12px] leading-5 text-muted">
+              Type /conduct and a job to make a chat the conductor: it plans, writes each task with the checks it
+              must pass, gives it to a subagent in its own chat, and checks what comes back against them. It does
+              not change files itself. These are Claude Code models, and a subagent with a model runs on Claude
+              Code.
+            </p>
+            <div className="mt-2 divide-y divide-line">
+              {(
+                [
+                  ['orchestratorModel', 'Orchestrator model', 'Same as the chat'],
+                  ['subagentModel', 'Subagent model', 'Auto: the orchestrator picks']
+                ] as const
+              ).map(([key, label, unset]) => (
+                <SettingRow key={key} label={label}>
+                  <select
+                    data-testid={`settings-${key}`}
+                    value={settings[key]}
+                    onChange={(event) => save({ [key]: event.target.value })}
+                    className={SETTINGS_SELECT}
+                  >
+                    <option value="">{unset}</option>
+                    {settings[key] && !claudeModels.some((option) => option.value === settings[key]) ? (
+                      <option value={settings[key]}>{settings[key]}</option>
+                    ) : null}
+                    {claudeModels
+                      .filter((option) => option.value)
+                      .map((option) => (
                         <option key={option.value} value={option.value} title={option.description}>
                           {option.name}
                         </option>
                       ))}
-                    </select>
-                  ) : (
-                    <select
-                      data-testid="settings-model"
-                      value={model}
-                      onChange={(event) => {
-                        setModel(event.target.value)
-                        setSaved(false)
-                      }}
-                      className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
+                  </select>
+                  {key === 'orchestratorModel' && weakOrchestrator(settings[key]) && (
+                    <p
+                      data-testid="settings-orchestrator-warning"
+                      className="mt-1 w-64 text-[11.5px] leading-4 text-danger"
                     >
-                      {modelOptions(settings.grokCli.models, model).map((id) => (
-                        <option key={id} value={id}>
-                          {id}
-                        </option>
-                      ))}
-                    </select>
+                      {weakOrchestrator(settings[key])} A conductor on it will not orchestrate well.
+                    </p>
                   )}
-                </div>
-                <div className="min-w-0">
-                  <label className="block text-[12px] text-muted">Effort</label>
-                  <select
-                    data-testid="settings-effort"
-                    value={effort}
-                    onChange={(event) => {
-                      setEffort(event.target.value as ReasoningEffort | '')
-                      setSaved(false)
-                    }}
-                    className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
-                  >
-                    <option value="">Default</option>
-                    {effort && !efforts.includes(effort) ? (
-                      <option value={effort}>{reasoningEffortLabel(effort)}</option>
-                    ) : null}
-                    {efforts.map((id) => (
-                      <option key={id} value={id}>
-                        {reasoningEffortLabel(id)}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              {onClaude || settings.grokBuildSignedIn ? null : (
-                <>
-                  <label className="mt-3 block text-[12px] text-muted">xAI API key (instead of grok login)</label>
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(event) => {
-                      setApiKey(event.target.value)
-                      setSaved(false)
-                    }}
-                    className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 font-mono text-[13px] outline-none focus:border-accent/60"
-                    placeholder={settings.keyPreview ?? 'xai-…'}
-                  />
-                </>
-              )}
+                </SettingRow>
+              ))}
+              <SettingRow
+                label="Most subagents at once"
+                help="A Claude Code chat plans the work and gives it to subagents; one that reaches this waits for a subagent to report back. At None it does the work itself."
+              >
+                <select
+                  data-testid="settings-maxSubagents"
+                  value={settings.maxSubagents}
+                  onChange={(event) => save({ maxSubagents: Number(event.target.value) })}
+                  className="w-28 rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
+                >
+                  {MAX_SUBAGENTS_CHOICES.map((count) => (
+                    <option key={count} value={count}>
+                      {count === 0 ? 'None' : count}
+                    </option>
+                  ))}
+                </select>
+              </SettingRow>
             </div>
-            <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
-              <div className="text-[12px] font-medium text-ink">Subagents</div>
-              <p className="mt-1 text-[12px] leading-5 text-muted">
-                Type /conduct and a job to make a chat the conductor: it plans, writes each task with the checks it
-                must pass, gives it to a subagent in its own chat, and checks what comes back against them. It does
-                not change files itself. These are Claude Code models, and a subagent with a model runs on Claude
-                Code.
-              </p>
-              <div className="mt-3 grid grid-cols-2 gap-3">
-                {(
-                  [
-                    ['orchestratorModel', 'Orchestrator model', 'Same as the chat'],
-                    ['subagentModel', 'Subagent model', 'Auto: the orchestrator picks']
-                  ] as const
-                ).map(([key, label, unset]) => (
-                  <div key={key} className="min-w-0">
-                    <label className="block text-[12px] text-muted">{label}</label>
-                    <select
-                      data-testid={`settings-${key}`}
-                      value={settings[key]}
-                      onChange={(event) => save({ [key]: event.target.value })}
-                      className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
-                    >
-                      <option value="">{unset}</option>
-                      {settings[key] && !claudeModels.some((option) => option.value === settings[key]) ? (
-                        <option value={settings[key]}>{settings[key]}</option>
-                      ) : null}
-                      {claudeModels
-                        .filter((option) => option.value)
-                        .map((option) => (
-                          <option key={option.value} value={option.value} title={option.description}>
-                            {option.name}
-                          </option>
-                        ))}
-                    </select>
-                    {key === 'orchestratorModel' && weakOrchestrator(settings[key]) && (
-                      <p data-testid="settings-orchestrator-warning" className="mt-1 text-[11.5px] leading-4 text-danger">
-                        {weakOrchestrator(settings[key])} A conductor on it will not orchestrate well.
-                      </p>
-                    )}
-                  </div>
-                ))}
-                <div className="min-w-0">
-                  <label className="block text-[12px] text-muted">Most subagents at once</label>
-                  <select
-                    data-testid="settings-maxSubagents"
-                    value={settings.maxSubagents}
-                    onChange={(event) => save({ maxSubagents: Number(event.target.value) })}
-                    className="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-[13px] outline-none focus:border-accent/60"
-                  >
-                    {MAX_SUBAGENTS_CHOICES.map((count) => (
-                      <option key={count} value={count}>
-                        {count === 0 ? 'None' : count}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <p className="min-w-0 self-end pb-2 text-[12px] leading-5 text-muted">
-                  A Claude Code chat plans the work and gives it to subagents; one that reaches this waits for a subagent to report back. At None it does the work itself.
-                </p>
-              </div>
-            </div>
-            <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-[12px] font-medium text-ink">Voice</div>
-                  <p className="mt-1 text-[12px] leading-5 text-muted">
-                    Talk to the agent on this machine. Listening uses a local Whisper model. Replies use
-                    a local Supertonic voice. Audio never leaves the computer.
-                  </p>
-                </div>
-                <Toggle
-                  label="Enable voice"
-                  on={voice.enabled}
-                  onClick={() => {
-                    const next = !voice.enabled
-                    save({ voice: { enabled: next } })
-                    if (next) {
-                      void window.workbench.ensureMic()
-                      void window.workbench.ensureVoiceModel()
-                    }
-                  }}
-                />
-              </div>
-              {voice.enabled && (
-                <div className="mt-3 space-y-3 border-t border-line pt-3">
+          </>
+        )
+      case 'voice':
+        return (
+          <div className="divide-y divide-line">
+            <SettingRow
+              label="Enable voice"
+              help="Talk to the agent on this machine. Listening uses a local Whisper model. Replies use a local Supertonic voice. Audio never leaves the computer."
+            >
+              <Toggle
+                label="Enable voice"
+                on={voice.enabled}
+                onClick={() => {
+                  const next = !voice.enabled
+                  save({ voice: { enabled: next } })
+                  if (next) {
+                    void window.workbench.ensureMic()
+                    void window.workbench.ensureVoiceModel()
+                  }
+                }}
+              />
+            </SettingRow>
+            {voice.enabled && (
+              <>
+                <div className="py-3">
                   <MicAccessRow />
-                  <label className="flex items-center justify-between gap-3 text-[12px] text-ink">
-                    <span>
-                      Conversation mode
-                      <span className="mt-0.5 block text-[11px] leading-4 text-muted">
-                        Show the Conversation button in the chat. That button starts a live voice
-                        loop: listen, send as you talk, speak replies, interrupt.
-                      </span>
-                    </span>
-                    <Toggle
-                      label="Conversation mode"
-                      on={voice.conversation}
-                      onClick={() => {
-                        const next = !voice.conversation
-                        save({
-                          voice: next
-                            ? { conversation: true, speakReplies: true, autoSend: true }
-                            : { conversation: false }
-                        })
-                      }}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-[12px] text-ink">
-                    Speak replies
-                    <Toggle
-                      label="Speak replies"
-                      on={voice.speakReplies}
-                      onClick={() => save({ voice: { speakReplies: !voice.speakReplies } })}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-[12px] text-ink">
-                    Send after I stop talking
-                    <Toggle
-                      label="Send after I stop talking"
-                      on={voice.autoSend}
-                      onClick={() => save({ voice: { autoSend: !voice.autoSend } })}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between gap-3 text-[12px] text-ink">
-                    Keep listening after replies
-                    <Toggle
-                      label="Keep listening after replies"
-                      on={voice.handsFree}
-                      onClick={() => save({ voice: { handsFree: !voice.handsFree } })}
-                    />
-                  </label>
+                </div>
+                <SettingRow
+                  label="Conversation mode"
+                  help="Show the Conversation button in the chat. That button starts a live voice loop: listen, send as you talk, speak replies, interrupt."
+                >
+                  <Toggle
+                    label="Conversation mode"
+                    on={voice.conversation}
+                    onClick={() => {
+                      const next = !voice.conversation
+                      save({
+                        voice: next ? { conversation: true, speakReplies: true, autoSend: true } : { conversation: false }
+                      })
+                    }}
+                  />
+                </SettingRow>
+                <SettingRow label="Speak replies">
+                  <Toggle
+                    label="Speak replies"
+                    on={voice.speakReplies}
+                    onClick={() => save({ voice: { speakReplies: !voice.speakReplies } })}
+                  />
+                </SettingRow>
+                <SettingRow label="Send after I stop talking">
+                  <Toggle
+                    label="Send after I stop talking"
+                    on={voice.autoSend}
+                    onClick={() => save({ voice: { autoSend: !voice.autoSend } })}
+                  />
+                </SettingRow>
+                <SettingRow label="Keep listening after replies">
+                  <Toggle
+                    label="Keep listening after replies"
+                    on={voice.handsFree}
+                    onClick={() => save({ voice: { handsFree: !voice.handsFree } })}
+                  />
+                </SettingRow>
+                <div className="py-3">
                   <MicPicker
                     value={voice.micDeviceId}
                     onChange={(deviceId) => save({ voice: { micDeviceId: deviceId } })}
                   />
+                </div>
+                <div className="py-3">
                   <label className="block text-[12px] text-muted">
                     Voice
                     <select
@@ -975,6 +1006,8 @@ export function SettingsModal(): React.JSX.Element | null {
                       ))}
                     </select>
                   </label>
+                </div>
+                <div className="py-3">
                   <label className="block text-[12px] text-muted">
                     Language
                     <select
@@ -990,17 +1023,17 @@ export function SettingsModal(): React.JSX.Element | null {
                       ))}
                     </select>
                   </label>
+                </div>
+                <div className="py-3">
                   <label className="block text-[12px] text-muted">
                     Speed
                     <RateSlider value={voice.rate} onSave={(rate) => save({ voice: { rate } })} />
                   </label>
-                  {testError && (
-                    <p className="text-[11px] leading-4 text-red-400">{testError}</p>
-                  )}
+                </div>
+                <div className="py-3">
+                  {testError && <p className="mb-2 text-[11px] leading-4 text-red-400">{testError}</p>}
                   <div className="flex items-center justify-between gap-2">
-                    <div className="text-[11px] leading-4 text-muted">
-                      {voiceModelHint(voiceModel)}
-                    </div>
+                    <div className="text-[11px] leading-4 text-muted">{voiceModelHint(voiceModel)}</div>
                     <button
                       type="button"
                       className="shrink-0 rounded-lg border border-line px-2.5 py-1 text-[11px] hover:bg-raised"
@@ -1022,22 +1055,59 @@ export function SettingsModal(): React.JSX.Element | null {
                     </button>
                   </div>
                 </div>
-              )}
+              </>
+            )}
+          </div>
+        )
+      case 'memory':
+        return <SharedMemory />
+      case 'secrets':
+        return <SecretsSection />
+      case 'mcp':
+        return <McpSettings />
+      case 'appearance':
+        return (
+          <>
+            <div className="shrink-0 border-b border-line">
+              <SettingRow label="Chat width" help="How wide messages and the composer may grow.">
+                <div data-testid="settings-chat-width" className="flex rounded-md bg-canvas p-0.5">
+                  {CHAT_WIDTHS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      aria-pressed={chatWidth === option.id}
+                      title={option.id === 'full' ? 'Fill the chat pane' : option.width}
+                      className={`rounded px-2.5 py-1 text-[11px] ${
+                        chatWidth === option.id ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+                      }`}
+                      onClick={() => {
+                        saveChatWidth(option.id)
+                        setChatWidth(option.id)
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </SettingRow>
             </div>
+            <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
+              <ThemeEditor />
+            </div>
+          </>
+        )
+      case 'about':
+        return (
+          <div className="divide-y divide-line">
             <UpdateSection />
-            <SecretsSection />
-            <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
-              <SharedMemory />
-            </div>
-            <div className="mt-5 rounded-lg border border-line bg-canvas px-3 py-3">
-              <div className="text-[12px] font-medium text-ink">Support</div>
-              <p className="mt-1 text-[12px] leading-5 text-muted">
-                Datapad Workbench is free. If it helps your work, you can buy me a coffee.
-              </p>
+            <SettingRow
+              label="Support"
+              help="Datapad Workbench is free. If it helps your work, you can buy me a coffee."
+            >
               <button
                 type="button"
                 data-testid="settings-support"
-                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-line bg-raised px-3 py-2 text-[12px] font-medium text-ink hover:bg-surface active:translate-y-px"
+                className="inline-flex items-center gap-2 rounded-lg border border-line bg-raised px-3 py-2 text-[12px] font-medium text-ink hover:bg-surface active:translate-y-px"
                 onClick={() => {
                   void window.workbench.openExternal(SUPPORT_URL)
                 }}
@@ -1045,70 +1115,85 @@ export function SettingsModal(): React.JSX.Element | null {
                 <CoffeeIcon />
                 Buy me a coffee
               </button>
+            </SettingRow>
+          </div>
+        )
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-center justify-center bg-overlay">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        className="corner-marks flex h-[86vh] w-[920px] max-w-[94vw] flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl"
+      >
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-5 py-3">
+          <div className="text-[15px] font-semibold tracking-tight">Settings</div>
+          <button
+            type="button"
+            data-testid="settings-close"
+            aria-label="Close settings"
+            title="Close settings"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-ink"
+            onClick={() => setShowSettings(false)}
+          >
+            <Icon name="close" size={12} />
+          </button>
+        </div>
+        <div className="flex min-h-0 flex-1">
+          <nav aria-label="Settings sections" className="w-[190px] shrink-0 overflow-y-auto border-r border-line px-2 py-3">
+            {SETTINGS_SECTIONS.map((item, index) => (
+              <Fragment key={item.id}>
+                {item.group !== SETTINGS_SECTIONS[index - 1]?.group && (
+                  <div className={`px-2.5 pb-1 text-[11px] font-medium text-faint ${index ? 'pt-4' : ''}`}>
+                    {item.group}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  data-testid={'testId' in item ? item.testId : `settings-nav-${item.id}`}
+                  aria-current={section === item.id ? 'page' : undefined}
+                  className={`block w-full rounded-md px-2.5 py-1.5 text-left text-[12px] ${
+                    section === item.id ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+                  }`}
+                  onClick={() => setSection(item.id)}
+                >
+                  {item.label}
+                </button>
+              </Fragment>
+            ))}
+          </nav>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="shrink-0 px-6 pt-5">
+              <h2 className="text-[14px] font-semibold tracking-tight text-ink">{current.label}</h2>
+              <p className="mt-0.5 text-[12px] leading-5 text-muted">{current.description}</p>
             </div>
-            {saveError && <p className="mt-2 text-[11px] leading-4 text-red-400">{saveError}</p>}
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink"
-                onClick={() => setShowSettings(false)}
-              >
-                Close
-              </button>
-              <button
-                className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-40"
-                disabled={busy}
-                onClick={() => void submit()}
-              >
-                {saved ? 'Saved' : 'Save'}
-              </button>
+            <div
+              key={section}
+              className={`min-h-0 flex-1 px-6 pb-5 pt-4 ${
+                section === 'appearance' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'
+              }`}
+            >
+              {body()}
             </div>
-          </>
-        ) : tab === 'mcp' ? (
-          <McpSettings onClose={() => setShowSettings(false)} />
-        ) : (
-          <>
-            <p className="mt-1 shrink-0 text-[12.5px] leading-5 text-muted">
-              Switch a built-in look, or edit every surface, typeface, and radius. Save as a theme
-              file you can load later.
-            </p>
-            <div className="mt-4 flex shrink-0 items-center justify-between gap-3 rounded-lg border border-line bg-canvas px-3 py-2.5">
-              <div>
-                <div className="text-[12px] font-medium text-ink">Chat width</div>
-                <div className="text-[11px] text-muted">How wide messages and the composer may grow.</div>
-              </div>
-              <div data-testid="settings-chat-width" className="flex rounded-md bg-surface p-0.5">
-                {CHAT_WIDTHS.map((option) => (
+            {section === 'agent' || saveError ? (
+              <div className="flex shrink-0 items-center justify-end gap-3 border-t border-line px-6 py-3">
+                {saveError && <p className="mr-auto text-[11px] leading-4 text-red-400">{saveError}</p>}
+                {section === 'agent' && (
                   <button
-                    key={option.id}
-                    type="button"
-                    aria-pressed={chatWidth === option.id}
-                    title={option.id === 'full' ? 'Fill the chat pane' : option.width}
-                    className={`rounded px-2.5 py-1 text-[11px] ${
-                      chatWidth === option.id ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
-                    }`}
-                    onClick={() => {
-                      saveChatWidth(option.id)
-                      setChatWidth(option.id)
-                    }}
+                    className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px disabled:opacity-40"
+                    disabled={busy}
+                    onClick={() => void submit()}
                   >
-                    {option.label}
+                    {saved ? 'Saved' : 'Save'}
                   </button>
-                ))}
+                )}
               </div>
-            </div>
-            <div className="mt-4 flex min-h-0 flex-1 flex-col overflow-hidden">
-              <ThemeEditor />
-            </div>
-            <div className="mt-4 flex justify-end">
-              <button
-                className="rounded-lg px-3 py-2 text-[12px] text-muted hover:text-ink"
-                onClick={() => setShowSettings(false)}
-              >
-                Close
-              </button>
-            </div>
-          </>
-        )}
+            ) : null}
+          </div>
+        </div>
       </div>
     </div>
   )

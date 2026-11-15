@@ -51,7 +51,7 @@ function nameProblem(name: string, servers: McpServers, previous: string | null)
   return null
 }
 
-export function McpSettings({ onClose }: { onClose: () => void }): React.JSX.Element {
+export function McpSettings(): React.JSX.Element {
   const [servers, setServers] = useState<McpServers | null>(null)
   const [view, setView] = useState<View>({ kind: 'list' })
   const search = useRegistrySearch(view.kind === 'browse')
@@ -102,7 +102,6 @@ export function McpSettings({ onClose }: { onClose: () => void }): React.JSX.Ele
       onBrowse={() => setView({ kind: 'browse' })}
       onEdit={(name) => setView({ kind: 'edit', name })}
       onJson={() => setView({ kind: 'json' })}
-      onClose={onClose}
     />
   )
 }
@@ -128,15 +127,13 @@ function ListView({
   save,
   onBrowse,
   onEdit,
-  onJson,
-  onClose
+  onJson
 }: {
   servers: McpServers | null
   save: SaveServers
   onBrowse: () => void
   onEdit: (name: string | null) => void
   onJson: () => void
-  onClose: () => void
 }): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
@@ -226,11 +223,6 @@ function ListView({
         </button>
         <button type="button" data-testid="mcp-json" className={`${QUIET_BUTTON} ml-auto`} onClick={onJson}>
           Edit as JSON
-        </button>
-      </div>
-      <div className="mt-5 flex justify-end">
-        <button className={QUIET_BUTTON} onClick={onClose}>
-          Close
         </button>
       </div>
     </>
