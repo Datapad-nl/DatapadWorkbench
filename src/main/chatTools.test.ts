@@ -245,6 +245,17 @@ describe('workers', () => {
       expect(await agentHook('plain', { tool_name: 'Agent', tool_use_id: 'a1' })).toEqual({})
     })
 
+    it('refuses every agent and worker when Settings allows none, and lets a conductor edit', async () => {
+      own()
+      chat('boss', { conductor: true })
+      stub.maxSubagents = 0
+      expect(await agentHook('boss', { tool_name: 'Agent', tool_use_id: 'z1' })).toMatchObject({
+        hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: expect.stringContaining('do this work yourself') }
+      })
+      expect(await agentHook('boss', { tool_name: 'Edit', tool_use_id: 'z2' })).toEqual({})
+      await expect(delegated({})).rejects.toThrow('do this work yourself')
+    })
+
     it('drops the model a call asks for when Settings fixes one, and keeps it otherwise', async () => {
       own()
       const call = { tool_input: { prompt: 'rename the flag', model: 'opus' } }

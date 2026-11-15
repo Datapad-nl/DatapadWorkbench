@@ -46,9 +46,10 @@ describe('isFileEditTool', () => {
 })
 
 describe('normalizeMaxSubagents', () => {
-  it('keeps a whole number from 1 to 10 and falls back to 4', () => {
+  it('keeps a whole number from 0 to 10 and falls back to 4', () => {
     expect(normalizeMaxSubagents(6)).toBe(6)
-    expect(normalizeMaxSubagents(0)).toBe(1)
+    expect(normalizeMaxSubagents(0)).toBe(0)
+    expect(normalizeMaxSubagents(-2)).toBe(0)
     expect(normalizeMaxSubagents(99)).toBe(10)
     expect(normalizeMaxSubagents(undefined)).toBe(4)
     expect(normalizeMaxSubagents('3')).toBe(4)
@@ -56,12 +57,31 @@ describe('normalizeMaxSubagents', () => {
 })
 
 describe('agentToolRule', () => {
-  it('tells Claude Code when to start an agent without being asked', () => {
+  it('has Claude Code plan and give the work to agents, then check it', () => {
     for (const rule of [agentToolRule('', 2), agentToolRule('opus', 2)]) {
+      expect(rule).toContain('you think, agents do the work')
       expect(rule).toContain('without being asked')
+      expect(rule).toContain('Give every piece of work that changes files to an agent')
       expect(rule).toContain('in the same turn')
-      expect(rule).toContain('review the diff')
+      expect(rule).toContain("Do not do the agents' work yourself")
+      expect(rule).toContain('check its work against its brief yourself')
     }
+  })
+
+  it('has a worker or bot do its task itself and use agents only beside it', () => {
+    const rule = agentToolRule('', 2, false)
+    expect(rule).toContain('Do your task yourself')
+    expect(rule).toContain('Explore agent')
+    expect(rule).not.toContain('orchestrator')
+    expect(rule).toContain('At most 2 of your agents run at the same time')
+  })
+
+  it('has Claude Code do the work itself when Settings allows no agents', () => {
+    const rule = agentToolRule('', 0)
+    expect(rule).toContain('do this work yourself')
+    expect(rule).toContain('Do not start agents')
+    expect(rule).not.toContain('orchestrator')
+    expect(rule).not.toContain('At most')
   })
 
   it('has Claude Code pick a model per agent when Settings fixes none', () => {

@@ -34,7 +34,7 @@ import {
   slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
-import { DEFAULT_MAX_SUBAGENTS, conductorPrompt, weakOrchestrator } from '../../../shared/conductor'
+import { DEFAULT_MAX_SUBAGENTS, NO_WORKERS_TO_CONDUCT, conductorPrompt, weakOrchestrator } from '../../../shared/conductor'
 import { contextLabel, handoffAdvised, handoffPrompt } from '../../../shared/handoff'
 import { resolveProjectColor } from '../../../shared/projectColor'
 import { botMentionParts, mentionedBots, splitBotMentions } from '../../../shared/botMentions'
@@ -208,6 +208,7 @@ async function runSlash(input: SlashRun): Promise<string | null> {
       return null
     case 'conduct':
       if (!args) return 'Usage: /conduct <the job>'
+      if (input.maxWorkers < 1) return NO_WORKERS_TO_CONDUCT
       await window.workbench.conductChat(input.chatId)
       await sendSlash(input, conductorPrompt(args, input.workerModel, input.maxWorkers))
       {

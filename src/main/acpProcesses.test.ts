@@ -30,6 +30,10 @@ const fake = vi.hoisted(() => ({
   mcp: {} as Record<string, unknown>,
   /** Chats made conductor with /conduct, by id. */
   conductors: new Set<string>(),
+  /** The chat that delegated to each worker, by worker id. */
+  parents: {} as Record<string, string>,
+  /** Most subagents at once, from Settings. */
+  maxSubagents: 2,
   /** The project of each chat, by chat id. */
   projects: {} as Record<string, string>,
   /** Saved secrets by project id. */
@@ -108,7 +112,8 @@ vi.mock('./store', () => ({
   getChat: async (chatId: string) => ({
     id: chatId,
     projectId: fake.projects[chatId] ?? '',
-    conductor: fake.conductors.has(chatId)
+    conductor: fake.conductors.has(chatId),
+    parentChatId: fake.parents[chatId]
   }),
   getEffort: async () => null,
   // As the store reads them: a bot's own model (on Grok) and effort, else none.
@@ -117,7 +122,7 @@ vi.mock('./store', () => ({
     return (bot?.agent === 'grok' && bot.model) || ''
   },
   effortFor: async (chatId?: string) => (chatId ? fake.bots[chatId]?.effort || null : null),
-  getMaxSubagents: async () => 2,
+  getMaxSubagents: async () => fake.maxSubagents,
   getMcpServers: async () => fake.mcp,
   getSubagentModel: async () => null,
   skipNewSession: <T,>(value: T) => value
@@ -155,6 +160,8 @@ afterEach(() => {
   fake.bots = {}
   fake.mcp = {}
   fake.conductors.clear()
+  fake.parents = {}
+  fake.maxSubagents = 2
   fake.projects = {}
   fake.secrets = {}
   fake.steerOutcome = 'injected'
@@ -338,11 +345,40 @@ describe('conductor chats', () => {
       .filter((call) => call.method === 'session/new')
       .map((call) => (call.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text)
     expect(prompts[0]).toContain('You are the conductor of this job')
-    expect(prompts[0]).not.toContain('Do a lookup whose target you already know')
+    expect(prompts[0]).not.toContain('you think, agents do the work')
     expect(prompts[1]).not.toContain('You are the conductor')
-    expect(prompts[1]).toContain('Do a lookup whose target you already know')
+    expect(prompts[1]).toContain('you think, agents do the work')
     const grokNew = grok.calls.find((call) => call.method === 'session/new')
     expect((grokNew?.params._meta as { rules: string }).rules).toContain('You are the conductor of this job')
+  })
+
+  it('has a user chat orchestrate its agents, and a worker or bot do its task itself', async () => {
+    fake.parents.worker = 'boss'
+    fake.bots['bot-chat'] = { agent: 'claude', model: '', effort: '' }
+    await newSession('/project', null, 'claude', 'chat-1')
+    await newSession('/project', null, 'claude', 'worker')
+    await newSession('/project', null, 'claude', 'bot-chat')
+    const prompts = fake.procs
+      .flatMap((proc) => proc.calls)
+      .filter((call) => call.method === 'session/new')
+      .map((call) => (call.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text)
+    expect(prompts[0]).toContain('you think, agents do the work')
+    for (const prompt of prompts.slice(1)) {
+      expect(prompt).toContain('Do your task yourself')
+      expect(prompt).not.toContain('orchestrator')
+    }
+  })
+
+  it('gives a conductor the do-it-yourself rule when Settings allows no subagents', async () => {
+    fake.maxSubagents = 0
+    fake.conductors.add('boss')
+    await newSession('/project', null, 'claude', 'boss')
+    const [claude] = fake.procs
+    const prompt = (claude.calls.find((call) => call.method === 'session/new')?.params.systemPrompt as {
+      content: Array<{ text: string }>
+    }).content[0].text
+    expect(prompt).not.toContain('You are the conductor')
+    expect(prompt).toContain('do this work yourself')
   })
 
   it("refuses a conductor's own file edits, even when its mode lets edits through", async () => {

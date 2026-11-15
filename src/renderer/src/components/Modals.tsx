@@ -876,13 +876,13 @@ export function SettingsModal(): React.JSX.Element | null {
                   >
                     {MAX_SUBAGENTS_CHOICES.map((count) => (
                       <option key={count} value={count}>
-                        {count}
+                        {count === 0 ? 'None' : count}
                       </option>
                     ))}
                   </select>
                 </div>
                 <p className="min-w-0 self-end pb-2 text-[12px] leading-5 text-muted">
-                  A chat that reaches this waits for a subagent to report back before it starts the next.
+                  A Claude Code chat plans the work and gives it to subagents; one that reaches this waits for a subagent to report back. At None it does the work itself.
                 </p>
               </div>
             </div>

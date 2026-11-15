@@ -1105,8 +1105,11 @@ async function sessionConfig(
   const config = { cwd, mcpServers: [...(await browserMcpServers(chatId)), ...toAcpMcpServers(servers)] }
   const subagentModel = await getSubagentModel()
   // A conductor is told its role with every session, not only in the /conduct message.
-  const conductor = chatId ? (await getChat(chatId).catch(() => null))?.conductor : false
-  const role = conductor ? conductorRule(subagentModel, await getMaxSubagents()) : null
+  const chat = chatId ? await getChat(chatId).catch(() => null) : null
+  const conductor = chat?.conductor
+  const maxSubagents = await getMaxSubagents()
+  // With no workers allowed a conductor could do nothing, so it gets the rule that has it do the work itself.
+  const role = conductor && maxSubagents > 0 ? conductorRule(subagentModel, maxSubagents) : null
   if (agent !== 'claude') return { ...config, ...sessionRules(agent, role ? `${rules}\n\n${role}` : rules) }
   // A bot's own skills come with the session, as a plugin in the bot's folder.
   const plugins = pluginDir ? { plugins: [{ type: 'local', path: pluginDir }] } : {}
@@ -1117,8 +1120,13 @@ async function sessionConfig(
     return { ...config, ...session, _meta: { claudeCode: { ...meta, options: plugins } } }
   }
   // Claude Code starts agents of its own with its Agent tool. Settings holds for those too.
-  // A conductor gets its role instead: the Agent rule has a chat do small work itself.
-  const session = sessionRules(agent, `${rules}\n\n${role ?? agentToolRule(subagentModel, await getMaxSubagents())}`)
+  // A conductor gets its role instead: it delegates with `delegate`, and its edits are refused.
+  // A worker and a bot's chat do their task themselves; a user's chat orchestrates its agents.
+  const orchestrate = !bot && !chat?.parentChatId
+  const session = sessionRules(
+    agent,
+    `${rules}\n\n${role ?? agentToolRule(subagentModel, maxSubagents, orchestrate)}`
+  )
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
   // Claude Code takes environment variables per session: the project's secrets, for its shell.
   const env = { ...secrets, ...(subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } : {}) }

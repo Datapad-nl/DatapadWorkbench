@@ -148,6 +148,7 @@ import {
   mutateChat,
   renameChat,
   searchChats,
+  getMaxSubagents,
   getMcpServers,
   getPublicSettings,
   onCliInfoChange,
@@ -156,6 +157,7 @@ import {
   updateProject,
   updateSettings
 } from './store'
+import { NO_WORKERS_TO_CONDUCT } from '../shared/conductor'
 import {
   ensureMicAccess,
   ensureVoiceModel,
@@ -585,6 +587,7 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('chat:conduct', async (_event, chatId: string) => {
+    if ((await getMaxSubagents()) < 1) throw new Error(NO_WORKERS_TO_CONDUCT)
     const chat = await mutateChat(chatId, (latest) => {
       latest.conductor = true
     })

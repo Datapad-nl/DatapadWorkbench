@@ -9,7 +9,11 @@ import type {
   FileMention,
 } from "../shared/types";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
-import { CONDUCTOR_EDIT_REFUSED, isFileEditTool } from "../shared/conductor";
+import {
+  CONDUCTOR_EDIT_REFUSED,
+  NO_SUBAGENTS,
+  isFileEditTool,
+} from "../shared/conductor";
 import { nextCronRun } from "../shared/cron";
 import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
@@ -608,7 +612,8 @@ export async function agentHook(
     // An agent the conductor started does the work, so its edits go through.
     if (!chatId || body.agent_id) return {};
     const chat = await getChat(chatId).catch(() => null);
-    if (!chat?.conductor) return {};
+    // With no workers allowed a conductor could do nothing, so it does the work itself.
+    if (!chat?.conductor || (await getMaxSubagents()) < 1) return {};
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -627,7 +632,10 @@ export async function agentHook(
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: `${running} of your subagents are running, and Settings allows ${most} at the same time. Wait for one to report back, then start this agent again.`,
+        permissionDecisionReason:
+          most < 1
+            ? NO_SUBAGENTS
+            : `${running} of your subagents are running, and Settings allows ${most} at the same time. Wait for one to report back, then start this agent again.`,
       },
     };
   }
@@ -658,6 +666,7 @@ async function startWorker(input: DelegateInput): Promise<unknown> {
   const brief = typeof input.brief === "string" ? input.brief.trim() : "";
   if (!brief) throw new Error("Pass the brief for the other agent.");
   const most = await getMaxSubagents();
+  if (most < 1) throw new Error(NO_SUBAGENTS);
   const running = await runningSubagents(caller.id);
   if (running >= most) {
     throw new Error(
