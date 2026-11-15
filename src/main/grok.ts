@@ -55,6 +55,7 @@ import {
 } from './acp'
 import { emitNotice, finishTurn, startTurn } from './activity'
 import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
+import { listBotDocuments } from './botDocuments'
 import { botRun } from './botRuns'
 import { botFolder, botSessionRules, getBot, readBotMemory, readSharedMemory } from './bots'
 import { endForegroundAgents } from './builtinAgents'
@@ -850,13 +851,14 @@ function chatFolder(chat: Chat, project: Project | undefined): string {
   return chatWorkingDir(chat, project?.path) || (chat.botId ? botFolder(chat.botId) : null) || homedir()
 }
 
-/** A bot's instructions and memory come before the rules of the project it works in. */
+/** A bot's instructions, memory and documents come before the rules of the project it works in. */
 async function chatRules(chat: Chat, project: Project | undefined): Promise<string | null> {
   const bot = chat.botId
     ? botSessionRules(
         await getBot(chat.botId),
         (await readBotMemory(chat.botId)).index,
-        (await readSharedMemory()).index
+        (await readSharedMemory()).index,
+        await listBotDocuments(chat.botId)
       )
     : null
   const rules = [bot, await projectSessionRules(project?.id)].filter(Boolean)

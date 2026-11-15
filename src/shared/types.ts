@@ -295,6 +295,9 @@ export type UnattendedRun = { kind: 'schedule' | 'followUp'; startedAt: string }
 /** A memory folder, a bot's own or the one all bots share: its MEMORY.md index and the other files in it. */
 export type BotMemory = { folder: string; index: string; files: string[] }
 
+/** A book or document a bot can read: converted into one Markdown file per chapter in its own folder. */
+export type BotDocument = { id: string; title: string; source: string; addedAt: string; chapters: number; words: number }
+
 export type ChatSummary = Omit<Chat, 'messages'> & {
   messageCount: number
 }

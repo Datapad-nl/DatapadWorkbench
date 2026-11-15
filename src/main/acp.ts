@@ -7,7 +7,7 @@ import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './br
 import { type AgentProcess, startClaudeAdapter } from './claudeCli'
 import { getGrokCliInfo, grokBinary } from './grokCli'
 import { relPath, snapshotBeforeTool, toolPaths } from './checkpoints'
-import { botMemoryFolder, sharedMemoryFolder } from './bots'
+import { botDocumentsFolder, botMemoryFolder, sharedMemoryFolder } from './bots'
 import {
   askPermission,
   cancelAllPermissions,
@@ -38,7 +38,7 @@ import {
   skipOutcome
 } from './questions'
 import { tmpdir } from 'os'
-import { isAbsolute, sep } from 'path'
+import { isAbsolute, resolve, sep } from 'path'
 import {
   normalizeReasoningEffort,
   type AgentCommand,
@@ -202,17 +202,31 @@ function fullPathsIn(value: unknown, found: string[] = []): string[] {
   return found
 }
 
-/** Whether every path this tool names is inside `folder`, given as a full path. */
-function onlyInside(folder: string, tool: PermissionParams['toolCall']): boolean {
+/** Whether every path this tool names is inside `folder`, given as a full path, or with `orFolder` the folder itself. */
+function onlyInside(folder: string, tool: PermissionParams['toolCall'], orFolder = false): boolean {
   if (!tool) return false
   const named = toolPaths(tool)
   const paths = [...named, ...fullPathsIn(tool.rawInput)]
-  return named.length > 0 && paths.every((path) => isAbsolute(path.trim()) && relPath(folder, path) !== null)
+  const fits = (path: string): boolean =>
+    relPath(folder, path) !== null || (orFolder && resolve(path.trim()) === resolve(folder))
+  return named.length > 0 && paths.every((path) => isAbsolute(path.trim()) && fits(path))
+}
+
+/** Whether every path this tool names is the OUTLINE.md of one document, `<documents>/<id>/OUTLINE.md`. */
+function onlyOutlines(documents: string, tool: PermissionParams['toolCall']): boolean {
+  if (!tool) return false
+  const named = toolPaths(tool)
+  const paths = [...named, ...fullPathsIn(tool.rawInput)]
+  return (
+    named.length > 0 &&
+    paths.every((path) => isAbsolute(path.trim()) && /^[^/]+\/OUTLINE\.md$/.test(relPath(documents, path) ?? ''))
+  )
 }
 
 /**
  * Whether a bot chat may run this tool without asking: the tool is on the bot's list, it is one of the
- * bot's own run tools, it reads or writes only the bot's memory folder, or it only reads the shared memory.
+ * bot's own run tools, it reads or writes only the bot's memory folder, it reads or searches its documents or
+ * writes only their outlines, or it only reads the shared memory.
  */
 async function botAllowsTool(sessionId: string, params: PermissionParams): Promise<boolean> {
   const tool = params.toolCall
@@ -224,6 +238,11 @@ async function botAllowsTool(sessionId: string, params: PermissionParams): Promi
   if (name?.startsWith('mcp__')) return false
   const kind = (tool?.kind ?? '').toLowerCase()
   if (MEMORY_KINDS.has(kind) && onlyInside(botMemoryFolder(bot.id), tool)) return true
+  // Claude Code's Grep and Glob and Grok's grep arrive as `search`, with the folder in the input's `path`.
+  // A search of the documents folder itself looks through every document.
+  const documents = botDocumentsFolder(bot.id)
+  if ((kind === 'read' || kind === 'search') && onlyInside(documents, tool, true)) return true
+  if ((kind === 'edit' || kind === 'write') && onlyOutlines(documents, tool)) return true
   return kind === 'read' && onlyInside(sharedMemoryFolder(), tool)
 }
 

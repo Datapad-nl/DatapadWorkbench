@@ -190,4 +190,19 @@ describe('bots', () => {
     expect(long).toContain('y'.repeat(2000))
     expect(long).not.toContain('y'.repeat(2001))
   })
+
+  it('lists the documents after the memory in the session rules, only when the bot has any', async () => {
+    const bot = await createBot('Reader')
+    expect(botSessionRules(bot)).not.toContain('## Documents')
+    expect(botSessionRules(bot, '', '', [])).not.toContain('## Documents')
+
+    const documents = [
+      { id: 'deep-work', title: 'Deep Work', source: 'deep-work.epub', addedAt: '', chapters: 12, words: 60000 },
+      { id: 'notes', title: 'Notes', source: 'notes.md', addedAt: '', chapters: 1, words: 300 }
+    ]
+    const rules = botSessionRules(bot, '', '', documents)
+    expect(rules).toContain(`## Documents\nThe user gave you books and documents to work from, in the folder ${join(bot.folder, 'documents')}.`)
+    expect(rules.indexOf('## Documents')).toBeGreaterThan(rules.indexOf('### Shared memory'))
+    expect(rules).toMatch(/\n\n- Deep Work \(12 chapters\): deep-work\/OUTLINE\.md\n- Notes \(1 chapter\): notes\/OUTLINE\.md$/)
+  })
 })

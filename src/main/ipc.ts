@@ -112,6 +112,8 @@ import {
   grokCommands
 } from './acp'
 import { addBotSkill, listBotSkills, removeBotSkill, saveBotSkill } from './botSkills'
+import { addBotDocuments, listBotDocuments, outlinePrompt, removeBotDocument } from './botDocuments'
+import { BOOK_EXTENSIONS } from './bookConvert'
 import { downloadSkill, previewSkill, searchSkills } from './skillsDirectory'
 import { fetchClaudeUsage } from './claudeUsage'
 import {
@@ -490,6 +492,32 @@ export function registerIpc(): void {
   ipcMain.handle('bot:saveMemory', (_event, botId: string, index: string) =>
     saveBotMemoryIndex(String(botId), String(index ?? ''))
   )
+  ipcMain.handle('bot:documents', (_event, botId: string) => listBotDocuments(String(botId)))
+  ipcMain.handle('bot:pickDocuments', async (_event, botId: string) => {
+    const window = BrowserWindow.getFocusedWindow()
+    const options = {
+      title: 'Add documents',
+      properties: ['openFile' as const, 'multiSelections' as const],
+      filters: [{ name: 'Books and documents', extensions: BOOK_EXTENSIONS.map((ext) => ext.slice(1)) }]
+    }
+    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options)
+    if (result.canceled || result.filePaths.length === 0) return null
+    const { added, errors } = await addBotDocuments(String(botId), result.filePaths)
+    // The bot writes the outlines in a run of its own. The documents stay added when it cannot be scheduled.
+    if (added.length > 0) {
+      const prompt = outlinePrompt(String(botId), added)
+      await scheduleBotTask({ botId: String(botId), prompt, at: new Date().toISOString() }).catch(() => {})
+      // Its live chats load their session again on their next turn, with the new list in their rules.
+      await reloadBotSessions(String(botId))
+    }
+    if (errors.length > 0) throw new Error(errors.join('\n'))
+    return listBotDocuments(String(botId))
+  })
+  ipcMain.handle('bot:removeDocument', async (_event, botId: string, id: string) => {
+    const documents = await removeBotDocument(String(botId), String(id))
+    await reloadBotSessions(String(botId))
+    return documents
+  })
   ipcMain.handle('memory:shared', () => readSharedMemory())
   ipcMain.handle('memory:saveShared', (_event, index: string) => saveSharedMemoryIndex(String(index ?? '')))
   ipcMain.handle('bot:openFolder', async (_event, botId: string) => {

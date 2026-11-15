@@ -25,10 +25,13 @@
     "@agentclientprotocol/claude-agent-acp": "^0.100.0",
     "@electron-toolkit/utils": "^4.0.0",
     "electron-updater": "^6.8.11",
+    "fflate": "^0.8.3",
+    "htmlparser2": "^12.0.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "unpdf": "^2.2.1"
   },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",

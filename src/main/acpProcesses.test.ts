@@ -104,6 +104,7 @@ vi.mock('./checkpoints', async (importOriginal) => ({
 }))
 vi.mock('./bots', () => ({
   botMemoryFolder: (botId: string) => `/bots/${botId}/memory`,
+  botDocumentsFolder: (botId: string) => `/bots/${botId}/documents`,
   sharedMemoryFolder: () => '/workbench/memory'
 }))
 vi.mock('./sessions', () => ({ readGrokPlan: () => null }))
@@ -336,6 +337,51 @@ describe('agent processes for bots', () => {
     expect(own.replies.map((reply) => (reply as { id: number }).id).sort()).toEqual([911, 912])
     expect(pendingPermissionRequests().map((request) => request.title)).toEqual(
       expect.arrayContaining(['escape', 'relative', 'move out', 'upload'].map((title) => expect.stringContaining(title)))
+    )
+  })
+
+  it('lets a bot read and search its documents and write their outlines without asking, and asks for the rest', async () => {
+    fake.bots['chat-d'] = { id: 'bd', agent: 'grok', model: '', effort: '', allowedTools: [] }
+    const sessionId = await newSession('/project', null, 'grok', 'chat-d', BOT)
+    bindPermissionSession(sessionId, 'chat-d', 'ask')
+    const [own] = fake.procs
+    const options = [
+      { optionId: 'yes', kind: 'allow_once', name: 'Allow' },
+      { optionId: 'no', kind: 'reject_once', name: 'Reject' }
+    ]
+    const ask = (id: number, toolCall: Record<string, unknown>): void => {
+      own.stdout.write(
+        `${JSON.stringify({ jsonrpc: '2.0', id, method: 'session/request_permission', params: { sessionId, options, toolCall } })}\n`
+      )
+    }
+    const docs = '/bots/bd/documents'
+    ask(961, { toolCallId: 'd1', title: 'read chapter', kind: 'read', locations: [{ path: `${docs}/book/01-intro.md` }] })
+    ask(962, { toolCallId: 'd2', title: 'grep', kind: 'search', locations: [], rawInput: { variant: 'Grep', pattern: 'x', path: `${docs}/book` } })
+    ask(963, { toolCallId: 'd3', title: 'edit outline', kind: 'edit', locations: [{ path: `${docs}/book/OUTLINE.md` }] })
+    ask(964, { toolCallId: 'd4', title: 'edit chapter', kind: 'edit', locations: [{ path: `${docs}/book/01-intro.md` }] })
+    ask(965, { toolCallId: 'd5', title: 'outline elsewhere', kind: 'edit', locations: [{ path: '/bots/bd/OUTLINE.md' }] })
+    ask(966, { toolCallId: 'd6', title: 'escape read', kind: 'read', locations: [{ path: `${docs}/../../secrets.json` }] })
+    ask(967, { toolCallId: 'd7', title: 'escape write', kind: 'edit', locations: [{ path: `${docs}/book/../../skills/OUTLINE.md` }] })
+    ask(968, { toolCallId: 'd8', title: 'nested outline', kind: 'edit', locations: [{ path: `${docs}/book/notes/OUTLINE.md` }] })
+    // A search of the documents folder itself looks through every book; its parent and a look-alike still ask.
+    ask(969, { toolCallId: 'd9', title: 'grep all', kind: 'search', locations: [], rawInput: { variant: 'Grep', pattern: 'x', path: docs } })
+    ask(970, { toolCallId: 'd10', title: 'grep bot', kind: 'search', locations: [], rawInput: { variant: 'Grep', pattern: 'x', path: '/bots/bd' } })
+    ask(971, {
+      toolCallId: 'd11',
+      title: 'grep other',
+      kind: 'search',
+      locations: [],
+      rawInput: { variant: 'Grep', pattern: 'x', path: '/bots/bd/documents-other' }
+    })
+
+    await vi.waitFor(() => expect(pendingPermissionRequests()).toHaveLength(7))
+    expect(own.replies.map((reply) => (reply as { id: number }).id).sort()).toEqual([961, 962, 963, 969])
+    expect(pendingPermissionRequests().map((request) => request.title)).toEqual(
+      expect.arrayContaining(
+        ['edit chapter', 'outline elsewhere', 'escape read', 'escape write', 'nested outline', 'grep bot', 'grep other'].map((title) =>
+          expect.stringContaining(title)
+        )
+      )
     )
   })
 

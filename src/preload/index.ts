@@ -12,6 +12,7 @@ import type {
   BrowserBounds,
   BrowserState,
   Bot,
+  BotDocument,
   BotMention,
   BotMemory,
   BotSkill,
@@ -72,6 +73,11 @@ const api = {
   /** The memory folder every bot reads, in the same shape as a bot's own. */
   getSharedMemory: (): Promise<BotMemory> => ipcRenderer.invoke('memory:shared'),
   saveSharedMemory: (index: string): Promise<BotMemory> => ipcRenderer.invoke('memory:saveShared', index),
+  listBotDocuments: (botId: string): Promise<BotDocument[]> => ipcRenderer.invoke('bot:documents', botId),
+  /** Adds the books chosen in a file dialog and returns the bot's documents; null when the dialog was cancelled. */
+  pickBotDocuments: (botId: string): Promise<BotDocument[] | null> => ipcRenderer.invoke('bot:pickDocuments', botId),
+  removeBotDocument: (botId: string, id: string): Promise<BotDocument[]> =>
+    ipcRenderer.invoke('bot:removeDocument', botId, id),
   listBotSkills: (botId: string): Promise<BotSkill[]> => ipcRenderer.invoke('bot:skills', botId),
   saveBotSkill: (input: SaveBotSkillInput): Promise<BotSkill> => ipcRenderer.invoke('bot:saveSkill', input),
   removeBotSkill: (botId: string, name: string): Promise<void> => ipcRenderer.invoke('bot:removeSkill', botId, name),

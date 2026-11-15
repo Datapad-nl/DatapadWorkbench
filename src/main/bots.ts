@@ -5,6 +5,7 @@ import {
   normalizeChatAgent,
   normalizeReasoningEffort,
   type Bot,
+  type BotDocument,
   type BotMemory,
   type UpdateBotInput
 } from '../shared/types'
@@ -115,6 +116,11 @@ export function botMemoryFolder(botId: string): string {
   return join(botFolder(botId), 'memory')
 }
 
+/** The books and documents the user gave the bot, each converted into a folder of its own. */
+export function botDocumentsFolder(botId: string): string {
+  return join(botFolder(botId), 'documents')
+}
+
 /** What every bot knows: who the user is and what they work on. Every bot reads it, and asks before writing in it. */
 export function sharedMemoryFolder(): string {
   return join(app.getPath('userData'), 'workbench', 'memory')
@@ -169,8 +175,28 @@ function shownIndex(index: string, max: number): string {
   return `${text.slice(0, max)}\n… (cut here: keep ${MEMORY_INDEX} short and move details into files)`
 }
 
-/** The bot's instructions and the indexes of its own and the shared memory, as rules for each of its sessions. */
-export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = ''): string {
+/** How the bot finds its way in its documents, with one line per document. Empty when it has none. */
+function documentRules(bot: Bot, documents: BotDocument[]): string {
+  if (documents.length === 0) return ''
+  return [
+    '## Documents',
+    `The user gave you books and documents to work from, in the folder ${botDocumentsFolder(bot.id)}. Each has a folder there with OUTLINE.md, which lists its chapters and what each covers, and one Markdown file per chapter.`,
+    '- When a request touches what one of them covers, read its OUTLINE.md and then the chapters that matter, before you answer. Do not answer from what you remember of a book.',
+    '- When the outline does not point to it, search the document\'s folder for the words.',
+    '- Say which document and chapter an answer rests on.',
+    '- You can read these files without asking. Leave the chapter files as they are. In OUTLINE.md you may add or correct what a chapter covers.',
+    '',
+    ...documents.map(
+      (doc) => `- ${doc.title} (${doc.chapters} ${doc.chapters === 1 ? 'chapter' : 'chapters'}): ${doc.id}/OUTLINE.md`
+    )
+  ].join('\n')
+}
+
+/**
+ * The bot's instructions, the indexes of its own and the shared memory and the list of its documents, as rules
+ * for each of its sessions.
+ */
+export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = '', documents: BotDocument[] = []): string {
   const intro = `You are ${bot.name}, a bot in Datapad Workbench.`
   const instructions = bot.instructions.trim()
   const memory = [
@@ -193,7 +219,7 @@ export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = ''): s
     `#### ${MEMORY_INDEX}`,
     shownIndex(sharedIndex, MAX_SHARED_INDEX_CHARS)
   ].join('\n')
-  return [intro, instructions, memory].filter(Boolean).join('\n\n')
+  return [intro, instructions, memory, documentRules(bot, documents)].filter(Boolean).join('\n\n')
 }
 
 export async function createBot(name: string): Promise<Bot> {

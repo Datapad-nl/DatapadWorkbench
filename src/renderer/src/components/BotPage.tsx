@@ -13,6 +13,7 @@ import {
 } from '../../../shared/types'
 import { BOT_TOOLS, WORKBENCH_MCP_SERVERS, mcpServerTool, toolsForAgent } from '../../../shared/botTools'
 import { BotAvatar, useBots } from '../bots'
+import { BotDocuments } from './BotDocuments'
 import { BotMemory } from './BotMemory'
 import { BotSchedules } from './BotSchedules'
 import { BotSkills } from './BotSkills'
@@ -436,6 +437,8 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
 
           <BotMemory bot={bot} />
 
+          <BotDocuments bot={bot} />
+
           <BotSkills bot={bot} />
 
           <BotSchedules bot={bot} />
@@ -455,8 +458,8 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
             </div>
             <div className="mt-1 text-[11px] text-faint">
               Its skills are saved as <span className="font-mono">skills/&lt;name&gt;/SKILL.md</span> here, and its
-              memory in <span className="font-mono">memory/</span>. Scripts or files a skill uses can go next to its
-              SKILL.md.
+              memory in <span className="font-mono">memory/</span>, and its documents in{' '}
+              <span className="font-mono">documents/</span>. Scripts or files a skill uses can go next to its SKILL.md.
             </div>
           </div>
 
