@@ -7,6 +7,7 @@ import {
   type Bot,
   type BotDocument,
   type BotMemory,
+  type DefaultBotAvatar,
   type UpdateBotInput
 } from '../shared/types'
 import { id, now } from './ids'
@@ -336,6 +337,36 @@ export async function setBotAvatar(botId: string, source: string): Promise<Bot> 
     await saveBots(bots)
     return withFolder(bots[index])
   })
+}
+
+/** The avatars that ship with the app. Dev and packaged builds both reach it from out/main, as the ?asset imports do. */
+const DEFAULT_AVATARS_DIR = join(__dirname, '../../resources/bot-avatars')
+
+async function defaultAvatarFiles(): Promise<string[]> {
+  const entries = await readdir(DEFAULT_AVATARS_DIR).catch(() => [] as string[])
+  return entries.filter((entry) => AVATAR_MIME[extname(entry).toLowerCase()]).sort()
+}
+
+export async function listDefaultAvatars(): Promise<DefaultBotAvatar[]> {
+  const avatars: DefaultBotAvatar[] = []
+  for (const name of await defaultAvatarFiles()) {
+    const ext = extname(name)
+    const data = await readFile(join(DEFAULT_AVATARS_DIR, name)).catch(() => null)
+    if (!data) continue
+    const words = name.slice(0, -ext.length).replace(/-/g, ' ')
+    avatars.push({
+      name,
+      label: words.charAt(0).toUpperCase() + words.slice(1),
+      url: `data:${AVATAR_MIME[ext.toLowerCase()]};base64,${data.toString('base64')}`
+    })
+  }
+  return avatars
+}
+
+/** Sets one of the bundled avatars. The name must be a file in the bundled folder. */
+export async function setDefaultBotAvatar(botId: string, name: string): Promise<Bot> {
+  if (!(await defaultAvatarFiles()).includes(name)) throw new Error('Avatar not found')
+  return setBotAvatar(botId, join(DEFAULT_AVATARS_DIR, name))
 }
 
 export async function clearBotAvatar(botId: string): Promise<Bot> {

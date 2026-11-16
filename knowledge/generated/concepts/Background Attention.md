@@ -27,4 +27,3 @@ The Workbench keeps running when its window is closed, and it tells the user whe
   - `index.ts`: App entry: window lifecycle, tray-hiding, single instance and clean quit.
 - `resources/`: Holds the app's icon artwork, which the packaging step and the main process use.
   - `trayTemplate.png`: Menu bar tray icon template image at standard resolution.
-  - `trayTemplate@2x.png`: Retina (2x) version of the menu bar tray icon template.

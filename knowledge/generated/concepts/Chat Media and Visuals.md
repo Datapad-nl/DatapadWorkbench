@@ -25,9 +25,9 @@ Chats can show images, videos, YouTube transcripts and HTML visuals that agents 
   - `mediaFiles.ts`: Resolves media paths safely within allowed root folders.
   - `visuals.ts`: Stores and serves agent-drawn HTML visuals in sandboxed frames.
   - `youtube.ts`: Fetches and formats YouTube video caption transcripts.
-- `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `media.ts`: Recognizes image and video sources and builds chat media URLs.
-  - `youtube.ts`: YouTube transcript types, video id parsing and watch URL building.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `Markdown.tsx`: Markdown renderer with GFM, local media, visual blocks and vault note links.
-  - `AgentReply.tsx`: Renders an agent reply, folding earlier tool steps and showing visual blocks.
+- `src/shared/`
+  - `media.ts`
+  - `youtube.ts`
+- `src/renderer/src/components/`
+  - `Markdown.tsx`
+  - `AgentReply.tsx`

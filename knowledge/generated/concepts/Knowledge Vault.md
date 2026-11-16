@@ -24,8 +24,8 @@ Each project can have a knowledge vault of Markdown notes describing its modules
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `knowledge.ts`: Maintains, rebuilds, reads and opens a project's knowledge vault.
   - `moduleSummaries.ts`: Outlines files, signs modules and batches briefs for vault module summaries.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `GraphPane.tsx`: Rotating knowledge-vault graph, nodes sized by links and coloured by project area.
-  - `Markdown.tsx`: Markdown renderer with GFM, local media, visual blocks and vault note links.
-- `src/renderer/src/`: The React UI root: it mounts the app, lays out the sidebar, chat and resizable right panes, and provides workspace and bot contexts to the components.
-  - `noteLinks.ts`: Resolves vault wiki-links to note links and strips Obsidian comments.
+- `src/renderer/src/components/`
+  - `GraphPane.tsx`
+  - `Markdown.tsx`
+- `src/renderer/src/`
+  - `noteLinks.ts`

@@ -33,6 +33,7 @@ import {
   botAvatarUrl,
   botFolder,
   clearBotAvatar,
+  listDefaultAvatars,
   createBot,
   getBot,
   listBots,
@@ -42,6 +43,7 @@ import {
   saveBotMemoryIndex,
   saveSharedMemoryIndex,
   setBotAvatar,
+  setDefaultBotAvatar,
   updateBot
 } from './bots'
 import { getBuiltinAgents, startBuiltinAgentsBridge } from './builtinAgents'
@@ -459,6 +461,10 @@ export function registerIpc(): void {
   })
   ipcMain.handle('bot:avatar', (_event, botId: string) => botAvatarUrl(String(botId)))
   ipcMain.handle('bot:clearAvatar', (_event, botId: string) => clearBotAvatar(String(botId)))
+  ipcMain.handle('bot:defaultAvatars', () => listDefaultAvatars())
+  ipcMain.handle('bot:setDefaultAvatar', (_event, botId: string, name: string) =>
+    setDefaultBotAvatar(String(botId), String(name))
+  )
   ipcMain.handle('bot:pickAvatar', async (_event, botId: string) => {
     const window = BrowserWindow.getFocusedWindow()
     const options = {

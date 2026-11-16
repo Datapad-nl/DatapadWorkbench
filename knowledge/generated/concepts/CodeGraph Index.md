@@ -23,6 +23,6 @@ A project can have a CodeGraph index of its symbols that agents query. The main 
 
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `codegraph.ts`: Reads, syncs and caches CodeGraph indexes for projects and reports changes.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `OrientationCard.tsx`: Shows a project's code index status and a button to start indexing.
-  - `StatusBar.tsx`: Status bar showing usage percent with reset countdown and index state.
+- `src/renderer/src/components/`
+  - `OrientationCard.tsx`
+  - `StatusBar.tsx`

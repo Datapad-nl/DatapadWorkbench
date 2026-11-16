@@ -21,9 +21,9 @@ While a long turn runs, the Workbench gives short progress updates so the user k
 
 ## Where it lives
 
-- `src/renderer/src/`: The React UI root: it mounts the app, lays out the sidebar, chat and resizable right panes, and provides workspace and bot contexts to the components.
-  - `progress.ts`: Tracks running chat activity and when to announce spoken progress.
+- `src/renderer/src/`
+  - `progress.ts`
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `taskProgress.ts`: Finds the latest output line of a running shell task.
-- `src/renderer/src/voice/`: Gives the app voice input and output that run locally: Whisper speech recognition and Supertonic text-to-speech on onnxruntime-web, each in a web worker.
-  - `asideTts.worker.ts`: Worker that queues speech synthesis tasks, letting status lines jump ahead of reply sentences.
+- `src/renderer/src/voice/`
+  - `asideTts.worker.ts`

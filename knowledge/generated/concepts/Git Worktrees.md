@@ -26,5 +26,5 @@ A chat can work in its own git worktree, so concurrent chats don't edit the same
   - `git.ts`: Chat worktrees, isolation decisions, uncommitted paths and git snapshots for the UI.
   - `gitLock.ts`: Serializes the app's git writes per repository via a shared lock.
   - `worktreeProcs.ts`: Finds and kills leftover processes running from chat worktrees.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `Sidebar.tsx`: Resizable sidebar of projects, worktrees, chats, bots and their schedules.
+- `src/renderer/src/components/`
+  - `Sidebar.tsx`

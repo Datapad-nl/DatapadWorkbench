@@ -24,5 +24,5 @@ An agent can stop in the middle of a turn to ask the user a question. The main p
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `questions.ts`: Parses agent questions to the user and emits prompt and settle events.
   - `ipc.ts`: Registers IPC handlers, sends turns, and raises notices for chats and bots.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `ChatPane.tsx`: Chat view with messages, live reply, context, schedule, handoff, PR and clash bars.
+- `src/renderer/src/components/`
+  - `ChatPane.tsx`

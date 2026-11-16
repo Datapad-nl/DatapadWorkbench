@@ -25,7 +25,7 @@ Each chat session has a permission mode that sets what the agent may do without 
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `permissions.ts`: Permission modes per session and edit-clash checks against other chats.
   - `activity.ts`: Tracks running turns, notices and permission activity per chat for the activity feed.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `ChatPane.tsx`: Chat view with messages, live reply, context, schedule, handoff, PR and clash bars.
-- `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `types.ts`: Core shared types: projects, messages, attachments, file hits, permission modes, plans.
+- `src/renderer/src/components/`
+  - `ChatPane.tsx`
+- `src/shared/`
+  - `types.ts`

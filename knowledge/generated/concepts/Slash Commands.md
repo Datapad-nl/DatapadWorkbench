@@ -20,9 +20,9 @@ Typing a slash in the composer opens a list of commands. Each agent has its own 
 
 ## Where it lives
 
-- `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `slash.ts`: Slash command definitions, per-agent lists, parsing and filtering as the user types.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `ChatPane.tsx`: Chat view with messages, live reply, context, schedule, handoff, PR and clash bars.
+- `src/shared/`
+  - `slash.ts`
+- `src/renderer/src/components/`
+  - `ChatPane.tsx`
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `grok.ts`: Runs chat turns and streams: start, stop, wait, live events and commands.

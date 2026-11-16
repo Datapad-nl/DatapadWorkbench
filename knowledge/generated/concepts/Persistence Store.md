@@ -28,5 +28,5 @@ The main process keeps all state on disk under Electron's userData/workbench fol
   - `windowState.ts`: Loads and saves the main window's size and position.
   - `bots.ts`: Creates, lists and updates bots, their folders, avatars and session rules.
   - `ids.ts`: Generates ids, timestamps and chat titles from prompts.
-- `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `types.ts`: Core shared types: projects, messages, attachments, file hits, permission modes, plans.
+- `src/shared/`
+  - `types.ts`

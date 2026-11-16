@@ -21,8 +21,8 @@ The git pane is a right-side pane showing the repository state for the current p
 
 ## Where it lives
 
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `GitPane.tsx`: Git pane showing changed files, a branch graph with colored lanes, and status.
+- `src/renderer/src/components/`
+  - `GitPane.tsx`
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `git.ts`: Chat worktrees, isolation decisions, uncommitted paths and git snapshots for the UI.
   - `gitLock.ts`: Serializes the app's git writes per repository via a shared lock.

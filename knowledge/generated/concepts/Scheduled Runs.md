@@ -21,12 +21,12 @@ A bot can run a prompt on a schedule written as a five-field cron expression. Th
 
 ## Where it lives
 
-- `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `cron.ts`: Parses five-field cron expressions and finds the next matching local time.
+- `src/shared/`
+  - `cron.ts`
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `ipc.ts`: Registers IPC handlers, sends turns, and raises notices for chats and bots.
   - `trayMenu.ts`: Builds menu bar labels for bots, their next runs and waiting chats.
   - `bots.ts`: Creates, lists and updates bots, their folders, avatars and session rules.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `Sidebar.tsx`: Resizable sidebar of projects, worktrees, chats, bots and their schedules.
-  - `ChatPane.tsx`: Chat view with messages, live reply, context, schedule, handoff, PR and clash bars.
+- `src/renderer/src/components/`
+  - `Sidebar.tsx`
+  - `ChatPane.tsx`

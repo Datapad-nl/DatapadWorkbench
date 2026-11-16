@@ -9,6 +9,7 @@ files:
   # Run by the Claude adapter's utility process. It stays in the asar, where the integrity check covers it.
   - src/main/claude-acp-host.mjs
   - resources/icon.png
+  - resources/bot-avatars/**
   - resources/trayTemplate*.png
   - package.json
 # The agents start these as their own processes, so they must be real files.
@@ -17,6 +18,7 @@ files:
 # dependencies (zod, diff) are unpacked with it.
 asarUnpack:
   - resources/icon.png
+  - resources/bot-avatars/**
   - resources/trayTemplate*.png
   - node_modules/@agentclientprotocol/**
   - node_modules/@anthropic-ai/**

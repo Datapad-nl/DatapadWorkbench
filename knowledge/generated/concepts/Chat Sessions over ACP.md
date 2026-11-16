@@ -30,5 +30,5 @@ Every chat runs as an agent session over the Agent Client Protocol (ACP), on eit
   - `grokCli.ts`: Locates the Grok CLI and probes its version, channel, models and status.
   - `claudeCli.ts`: Locates the Claude Code CLI, its ACP adapter, and probes sign-in status.
   - `ids.ts`: Generates ids, timestamps and chat titles from prompts.
-- `src/shared/`: Types and small pure helpers used by both the main process and the UI.
-  - `types.ts`: Core shared types: projects, messages, attachments, file hits, permission modes, plans.
+- `src/shared/`
+  - `types.ts`

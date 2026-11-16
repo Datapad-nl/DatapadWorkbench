@@ -23,5 +23,5 @@ The user can point at parts of a page in the BrowserPane and attach notes to the
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `annotatePicker.ts`: Scripts injected into the browser page to pick, cancel and clean up annotations.
   - `browser.ts`: Manages the BrowserPane web contents, URL sanitizing, console log and state.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `BrowserPane.tsx`: Embedded browser pane with page annotation and a queue of notes to send.
+- `src/renderer/src/components/`
+  - `BrowserPane.tsx`

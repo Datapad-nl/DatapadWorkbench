@@ -26,6 +26,6 @@ Before a chat can run, the Workbench has to find the agent CLIs installed on the
   - `claudeCli.ts`: Locates the Claude Code CLI, its ACP adapter, and probes sign-in status.
   - `claudeUsage.ts`: Fetches and parses Claude Code plan usage limits, with caching and retry.
   - `sessions.ts`: Lists and reads Grok sessions on disk, plans and sign-in state.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `Modals.tsx`: New project, settings (agent sign-in, voice language and speed), and usage modals.
-  - `StatusBar.tsx`: Status bar showing usage percent with reset countdown and index state.
+- `src/renderer/src/components/`
+  - `Modals.tsx`
+  - `StatusBar.tsx`

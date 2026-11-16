@@ -21,6 +21,7 @@ import type {
   ChatAgent,
   ChatEvent,
   CreateProjectInput,
+  DefaultBotAvatar,
   FileHit,
   FileMention,
   GitActionResult,
@@ -65,6 +66,9 @@ const api = {
   deleteBot: (botId: string): Promise<void> => ipcRenderer.invoke('bot:delete', botId),
   getBotAvatar: (botId: string): Promise<string | null> => ipcRenderer.invoke('bot:avatar', botId),
   pickBotAvatar: (botId: string): Promise<Bot | null> => ipcRenderer.invoke('bot:pickAvatar', botId),
+  listDefaultBotAvatars: (): Promise<DefaultBotAvatar[]> => ipcRenderer.invoke('bot:defaultAvatars'),
+  setDefaultBotAvatar: (botId: string, name: string): Promise<Bot> =>
+    ipcRenderer.invoke('bot:setDefaultAvatar', botId, name),
   clearBotAvatar: (botId: string): Promise<Bot> => ipcRenderer.invoke('bot:clearAvatar', botId),
   openBotFolder: (botId: string): Promise<void> => ipcRenderer.invoke('bot:openFolder', botId),
   /** The bot's memory folder: its MEMORY.md index and the other files in it. */

@@ -20,16 +20,16 @@ Voice input and output run locally in web workers, using onnxruntime-web. Whispe
 
 ## Where it lives
 
-- `src/renderer/src/voice/`: Gives the app voice input and output that run locally: Whisper speech recognition and Supertonic text-to-speech on onnxruntime-web, each in a web worker.
-  - `VoiceProvider.tsx`: React context provider managing listening, transcribing and speaking state, exposed through useVoice.
-  - `engine.ts`: Voice list and helpers for speakable text, language choice and dropping user echoes.
-  - `whisper.ts`: Loads and shares the Whisper recognition pipeline for the worker and UI-thread fallback.
-  - `asr.worker.ts`: Worker that transcribes audio to text, one request at a time.
-  - `supertonic.ts`: Loads the Supertonic 3 model and synthesizes mono PCM audio from text.
-  - `asideTts.worker.ts`: Worker that queues speech synthesis tasks, letting status lines jump ahead of reply sentences.
-  - `ortAssets.ts`: Exports the bundled URLs of the onnxruntime-web module and WASM files.
-  - `VoiceBlob.tsx`: An animated blob of rings that visualizes voice activity.
+- `src/renderer/src/voice/`
+  - `VoiceProvider.tsx`
+  - `engine.ts`
+  - `whisper.ts`
+  - `asr.worker.ts`
+  - `supertonic.ts`
+  - `asideTts.worker.ts`
+  - `ortAssets.ts`
+  - `VoiceBlob.tsx`
 - `src/main/`: The Electron main process: it stores projects, chats, bots and settings on disk, runs chat turns through the Grok and Claude Code agents over ACP, and answers the renderer over IPC.
   - `voice.ts`: Voice model status, its protocol, and microphone permission.
-- `src/renderer/src/components/`: The React components that make up the Workbench interface: the sidebar of projects, bots and chats, the chat pane with live agent replies, and the side panes for the browser, git, knowledge graph and subagents.
-  - `Modals.tsx`: New project, settings (agent sign-in, voice language and speed), and usage modals.
+- `src/renderer/src/components/`
+  - `Modals.tsx`

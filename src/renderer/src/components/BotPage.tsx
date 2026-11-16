@@ -9,6 +9,7 @@ import {
   type Bot,
   type ChatAgent,
   type ClaudeOptions,
+  type DefaultBotAvatar,
   type ReasoningEffort
 } from '../../../shared/types'
 import { BOT_TOOLS, WORKBENCH_MCP_SERVERS, mcpServerTool, toolsForAgent } from '../../../shared/botTools'
@@ -97,13 +98,15 @@ export function BotHeader({ bot }: { bot: Bot }): React.JSX.Element {
 /** The Settings tab of a bot's window. */
 export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
   const { settings, openBot, chats, deleteChat } = useWorkspace()
-  const { updateBot, deleteBot, pickAvatar, clearAvatar } = useBots()
+  const { updateBot, deleteBot, pickAvatar, setDefaultAvatar, clearAvatar } = useBots()
   const [draft, setDraft] = useState<Draft>(() => draftOf(bot))
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [claudeOptions, setClaudeOptions] = useState<ClaudeOptions | null>(null)
   const [mcpNames, setMcpNames] = useState<string[]>([])
   const [otherTool, setOtherTool] = useState('')
+  const [defaultAvatars, setDefaultAvatars] = useState<DefaultBotAvatar[] | null>(null)
+  const [choosingAvatar, setChoosingAvatar] = useState(false)
 
   // The MCP servers from Settings that are switched on, next to the Workbench's own.
   useEffect(() => {
@@ -119,6 +122,16 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
     setDraft(JSON.parse(savedKey) as Draft)
     setError(null)
   }, [bot.id, savedKey])
+
+  // The grid of bundled avatars closes when another bot opens.
+  useEffect(() => {
+    setChoosingAvatar(false)
+  }, [bot.id])
+
+  const toggleDefaultAvatars = (): void => {
+    setChoosingAvatar((open) => !open)
+    if (!defaultAvatars) void window.workbench.listDefaultBotAvatars().then(setDefaultAvatars).catch(() => setDefaultAvatars([]))
+  }
 
   const saved = draftOf(bot)
   const dirty = (Object.keys(draft) as Array<keyof Draft>).some((key) => draft[key] !== saved[key])
@@ -230,7 +243,15 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
                 disabled={busy}
                 onClick={() => void run(() => pickAvatar(bot.id), 'Could not set the avatar')}
               >
-                {bot.avatar ? 'Change avatar' : 'Choose avatar'}
+                Upload image
+              </button>
+              <button
+                data-testid="bot-default-avatars-toggle"
+                className="rounded-md border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:border-line-strong hover:text-ink disabled:opacity-50"
+                disabled={busy}
+                onClick={toggleDefaultAvatars}
+              >
+                Choose from defaults
               </button>
               {bot.avatar && (
                 <button
@@ -242,6 +263,25 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
                 </button>
               )}
             </div>
+            {choosingAvatar && (
+              <div data-testid="bot-default-avatars" className="flex flex-wrap justify-center gap-2">
+                {(defaultAvatars ?? []).map((avatar) => (
+                  <button
+                    key={avatar.name}
+                    title={avatar.label}
+                    aria-label={avatar.label}
+                    className="h-14 w-14 overflow-hidden rounded-full border border-line hover:border-line-strong hover:ring-2 hover:ring-line-strong disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => {
+                      setChoosingAvatar(false)
+                      void run(() => setDefaultAvatar(bot.id, avatar.name), 'Could not set the avatar')
+                    }}
+                  >
+                    <img src={avatar.url} alt="" className="h-full w-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="text-[11px] text-faint">SVG (animated too), PNG, APNG, JPEG, GIF or WebP, up to 5 MB</div>
           </div>
 

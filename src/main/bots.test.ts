@@ -19,6 +19,7 @@ import {
   getBot,
   isBotFolder,
   listBots,
+  listDefaultAvatars,
   readBotMemory,
   readSharedMemory,
   removeBot,
@@ -26,6 +27,7 @@ import {
   saveSharedMemoryIndex,
   setBotAvatar,
   setBotChat,
+  setDefaultBotAvatar,
   updateBot
 } from './bots'
 
@@ -129,6 +131,25 @@ describe('bots', () => {
     expect((await clearBotAvatar(bot.id)).avatar).toBeNull()
     expect(existsSync(join(bot.folder, 'avatar.gif'))).toBe(false)
     expect(await botAvatarUrl(bot.id)).toBeNull()
+  })
+
+  it('lists the bundled avatars and sets one', async () => {
+    const avatars = await listDefaultAvatars()
+    expect(avatars).toHaveLength(11)
+    expect(avatars.map((avatar) => avatar.name)).toEqual(avatars.map((avatar) => avatar.name).sort())
+    for (const avatar of avatars) expect(avatar.url).toMatch(/^data:image\/webp;base64,/)
+    expect(avatars.find((avatar) => avatar.name === 'accountant.webp')?.label).toBe('Accountant')
+    expect(avatars.find((avatar) => avatar.name === 'ads-checker.webp')?.label).toBe('Ads checker')
+
+    const bot = await createBot('Dressed')
+    expect((await setDefaultBotAvatar(bot.id, 'accountant.webp')).avatar).toBe('avatar.webp')
+    expect(existsSync(join(bot.folder, 'avatar.webp'))).toBe(true)
+  })
+
+  it('refuses a default avatar that is not bundled', async () => {
+    const bot = await createBot('Sneaky')
+    await expect(setDefaultBotAvatar(bot.id, '../icon.png')).rejects.toThrow('Avatar not found')
+    await expect(setDefaultBotAvatar(bot.id, 'nope.webp')).rejects.toThrow('Avatar not found')
   })
 
   it('refuses files that are not images', async () => {

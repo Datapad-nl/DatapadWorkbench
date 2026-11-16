@@ -8,6 +8,7 @@ type BotsContextValue = {
   updateBot: (input: UpdateBotInput) => Promise<Bot>
   deleteBot: (botId: string) => Promise<void>
   pickAvatar: (botId: string) => Promise<void>
+  setDefaultAvatar: (botId: string, name: string) => Promise<void>
   clearAvatar: (botId: string) => Promise<void>
   /** The user has seen the bot's chat. */
   markBotRead: (botId: string) => Promise<void>
@@ -71,6 +72,13 @@ export function BotsProvider({ children }: { children: ReactNode }): React.JSX.E
     [put]
   )
 
+  const setDefaultAvatar = useCallback(
+    async (botId: string, name: string) => {
+      put(await window.workbench.setDefaultBotAvatar(botId, name))
+    },
+    [put]
+  )
+
   const clearAvatar = useCallback(
     async (botId: string) => {
       put(await window.workbench.clearBotAvatar(botId))
@@ -86,8 +94,8 @@ export function BotsProvider({ children }: { children: ReactNode }): React.JSX.E
   )
 
   const value = useMemo(
-    () => ({ bots, createBot, updateBot, deleteBot, pickAvatar, clearAvatar, markBotRead }),
-    [bots, createBot, updateBot, deleteBot, pickAvatar, clearAvatar, markBotRead]
+    () => ({ bots, createBot, updateBot, deleteBot, pickAvatar, setDefaultAvatar, clearAvatar, markBotRead }),
+    [bots, createBot, updateBot, deleteBot, pickAvatar, setDefaultAvatar, clearAvatar, markBotRead]
   )
   return <BotsContext.Provider value={value}>{children}</BotsContext.Provider>
 }

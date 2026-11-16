@@ -35,6 +35,15 @@ export type Bot = {
   updatedAt: string
 }
 
+/** One of the avatars that ship with the app. */
+export type DefaultBotAvatar = {
+  /** File name in the bundled folder, such as accountant.webp. */
+  name: string
+  label: string
+  /** The image as a data URL for an `<img>`. */
+  url: string
+}
+
 export type UpdateBotInput = {
   id: string
   name?: string
