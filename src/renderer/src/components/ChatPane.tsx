@@ -1130,11 +1130,32 @@ function CopyAction({ text }: { text: string }): React.JSX.Element {
   )
 }
 
-function AssistantHeader({ agent, bot, meta }: { agent: ChatAgent; bot?: Bot; meta?: string }): React.JSX.Element {
+function MessageTime({ iso }: { iso: string }): React.JSX.Element | null {
+  const time = clockTime(iso)
+  if (!time) return null
+  return (
+    <span data-testid="message-time" title={new Date(iso).toLocaleString()} className="text-[11px] tabular-nums text-faint">
+      {time}
+    </span>
+  )
+}
+
+function AssistantHeader({
+  agent,
+  bot,
+  meta,
+  createdAt
+}: {
+  agent: ChatAgent
+  bot?: Bot
+  meta?: string
+  createdAt?: string
+}): React.JSX.Element {
   return (
     <div className="flex h-7 items-center gap-2">
       <span className="text-[13px] font-semibold text-ink">{bot ? bot.name : chatAgentLabel(agent)}</span>
       {meta && <span className="text-[11px] tabular-nums text-faint">{meta}</span>}
+      {createdAt && <MessageTime iso={createdAt} />}
     </div>
   )
 }
@@ -1303,6 +1324,7 @@ function MessageList({
                         <div className="flex h-7 items-center gap-2">
                           <span className="text-[13px] font-semibold text-ink">{answeringBot?.name ?? fromBot.name}</span>
                           <span className="text-[11px] text-faint">bot</span>
+                          <MessageTime iso={message.createdAt} />
                           {fromBot.runChatId && (
                             <button
                               type="button"
@@ -1315,7 +1337,12 @@ function MessageList({
                           )}
                         </div>
                       ) : (
-                        <AssistantHeader agent={agent} bot={chatBot} meta={side === 'btw' ? 'side answer' : undefined} />
+                        <AssistantHeader
+                          agent={agent}
+                          bot={chatBot}
+                          meta={side === 'btw' ? 'side answer' : undefined}
+                          createdAt={message.createdAt}
+                        />
                       )}
                       <div className="mt-1 text-[14.5px] leading-[1.65]">
                         {message.content ? <AgentReply text={message.content} chatId={chatId} /> : null}
