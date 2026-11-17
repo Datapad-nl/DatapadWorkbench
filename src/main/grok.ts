@@ -22,6 +22,7 @@ import { contextFromUpdate } from '../shared/handoff'
 import {
   abortAgent,
   acpModeIdFor,
+  agentForSession,
   agentGeneration,
   agentKey,
   grokProcEnv,
@@ -39,6 +40,7 @@ import {
   loadSession,
   newSession,
   onExitPlanPrompt,
+  onSdkMessage,
   onSessionUpdate,
   promptIsolated,
   promptSession,
@@ -53,7 +55,7 @@ import {
   type AgentKey,
   type SessionUpdate
 } from './acp'
-import { emitNotice, finishTurn, startTurn } from './activity'
+import { emitNotice, finishTurn, lookupSession, startTurn } from './activity'
 import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
 import { listBotDocuments } from './botDocuments'
 import { botRun } from './botRuns'
@@ -68,6 +70,7 @@ import {
   cancelSessionPermissions,
   clearSessionStopped,
   forgetChatSessions,
+  isSessionStopped,
   markSessionStopped,
   pendingPermissionRequests,
   resolveChatPlanApproval,
@@ -80,6 +83,7 @@ import { chatWorkingDir, isolateChatIfNeeded } from './git'
 import { projectSessionRules } from './intake'
 import { getApiKey, getChat, listChats, listProjects, mutateChat, skipSessionImport } from './store'
 import { saveVisual, visualFromUpdate } from './visuals'
+import { sdkSignal, selfTurnAction, type SelfTurnSignal } from './selfTurn'
 import { STEP_BREAK, plainReply } from '../shared/steps'
 
 const BTW_INSTRUCTION = [
@@ -140,6 +144,8 @@ type Turn = {
   /** 'preparing' until the prompt goes to the agent. */
   phase: 'preparing' | 'streaming'
   sessionId: string | null
+  /** The agent started this turn itself, for example when a background task ended. No prompt of ours is open for it. */
+  self: boolean
   /** The agent process this turn prompts. Stop kills only that one. */
   agent: AgentKey
   agentGeneration: number
@@ -170,6 +176,8 @@ const DELTA_FLUSH_MS = 50
 
 const turns = new Map<string, Turn>()
 const sessionTurns = new Map<string, Turn>()
+/** Claude Code sessions that last said they were running. */
+const runningSessions = new Set<string>()
 /** Prompts of stopped turns that the agent did not cancel, by session, until they end. */
 const abandonedPrompts = new Map<string, Promise<void>>()
 /** Chats whose rewind is restoring files and messages. */
@@ -191,6 +199,16 @@ export function onChatLive(listener: (event: ChatEvent) => void): () => void {
   liveListeners.add(listener)
   return () => {
     liveListeners.delete(listener)
+  }
+}
+
+const selfReplyListeners = new Set<(chat: Chat) => void>()
+
+/** A reply the agent wrote in a turn it started itself, saved. A normal turn's reply reaches its sender instead. */
+export function onSelfTurnReply(listener: (chat: Chat) => void): () => void {
+  selfReplyListeners.add(listener)
+  return () => {
+    selfReplyListeners.delete(listener)
   }
 }
 
@@ -373,6 +391,7 @@ onSessionUpdate((event) => {
       void hydrateExitPlan(chatId, event.sessionId)
     }
     if (chatId) void snapshotTouched(chatId, event.update)
+    if (event.update.sessionUpdate === 'tool_call' && !fromSubagent(event.update)) outputTurn(event.sessionId)
     showVisual(event.sessionId, event.update)
     const turn = sessionTurns.get(event.sessionId)
     if (turn?.draft.trim()) turn.stepBreak = true
@@ -381,12 +400,90 @@ onSessionUpdate((event) => {
   if (event.update.sessionUpdate !== 'agent_message_chunk') return
   const text = contentText(event.update.content)
   if (!text) return
-  // Text with no turn waiting for it is from a turn that already ended.
-  const turn = sessionTurns.get(event.sessionId)
+  // Text with no turn waiting for it is from a turn that already ended, unless the agent started one itself.
+  const turn = outputTurn(event.sessionId)
   if (!turn) return
   const chunk = turn.stepBreak && turn.draft.trim() ? STEP_BREAK + text : text
   turn.stepBreak = false
   pushDelta(turn, chunk)
+})
+
+/** A tool call of one of Claude Code's subagents, which says nothing about the main conversation's turn. */
+function fromSubagent(update: SessionUpdate['update']): boolean {
+  const meta = update._meta as { claudeCode?: { parentToolUseId?: unknown } } | null | undefined
+  return Boolean(meta?.claudeCode?.parentToolUseId)
+}
+
+/** What `signal` on a session means for a turn the agent starts itself, and the turn it opened if any. */
+function selfTurnStep(sessionId: string, signal: SelfTurnSignal): Turn | null {
+  const chatId = sessionChats.get(sessionId)
+  const open = sessionTurns.get(sessionId)
+  const action = selfTurnAction(
+    {
+      claude: agentForSession(sessionId) === 'claude',
+      open: open ? (open.self ? 'self' : 'prompt') : 'none',
+      free: chatId !== undefined && !turns.has(chatId) && !rewinding.has(chatId),
+      stopped: isSessionStopped(sessionId),
+      running: runningSessions.has(sessionId)
+    },
+    signal
+  )
+  if (action === 'end' && open) void endSelfTurn(open)
+  if (action !== 'open' || !chatId) return null
+  const turn = reserveTurn(chatId)
+  turn.self = true
+  turn.phase = 'streaming'
+  turn.sessionId = sessionId
+  turn.agent = sessionAgentKey(sessionId)
+  turn.agentGeneration = agentGeneration(turn.agent)
+  sessionTurns.set(sessionId, turn)
+  startTurn({
+    chatId,
+    chatTitle: lookupSession(sessionId)?.title ?? '',
+    sessionId,
+    prompt: 'Continued after background work'
+  })
+  return turn
+}
+
+/** The turn that takes output of the session's main conversation: the open one, or one the agent just started itself. */
+function outputTurn(sessionId: string): Turn | null {
+  return selfTurnStep(sessionId, 'output') ?? sessionTurns.get(sessionId) ?? null
+}
+
+/**
+ * End a turn the agent started itself. What it wrote is saved as a reply; a turn that wrote nothing
+ * leaves no message.
+ */
+async function endSelfTurn(turn: Turn): Promise<void> {
+  const sessionId = turn.sessionId
+  if (!sessionId || sessionTurns.get(sessionId) !== turn) return
+  // From here its output is dropped, and a second end signal finds no turn.
+  sessionTurns.delete(sessionId)
+  flushDelta(turn)
+  const draft = turn.draft.trim()
+  let replied = false
+  const saved = await (async () => {
+    const chat = await getChat(turn.chatId)
+    // A chat that moved to another session meanwhile does not get this one's words.
+    if (!draft || chat.grokSessionId !== sessionId) return chat
+    replied = true
+    return saveReply(turn, draft)
+  })().catch(() => null)
+  releaseTurn(turn)
+  finishTurn(turn.chatId, 'done')
+  if (saved) emitLive({ type: 'done', chatId: turn.chatId, turnId: turn.id, chat: saved })
+  else emitLive({ type: 'error', chatId: turn.chatId, turnId: turn.id, error: 'Chat not found' })
+  if (saved && replied) for (const listener of selfReplyListeners) listener(saved)
+  drainAsideSteers(turn.chatId)
+}
+
+onSdkMessage((sessionId, message) => {
+  const signal = sdkSignal(message)
+  if (!signal) return
+  if (signal === 'running') runningSessions.add(sessionId)
+  if (signal === 'idle') runningSessions.delete(sessionId)
+  selfTurnStep(sessionId, signal)
 })
 
 const shownVisuals = new Set<string>()
@@ -440,6 +537,7 @@ function reserveTurn(chatId: string): Turn {
     chatId,
     phase: 'preparing',
     sessionId: null,
+    self: false,
     // Set once the chat is read. Stop only uses it after the prompt is sent.
     agent: 'grok',
     agentGeneration: 0,
@@ -529,6 +627,11 @@ export function stopStream(chatId: string): boolean {
   } catch {
     // the agent is already gone; its exit ends the turn
   }
+  // No prompt returns for a turn the agent started itself, so it ends here.
+  if (turn.self) {
+    void endSelfTurn(turn)
+    return true
+  }
   turn.killTimer = setTimeout(() => {
     turn.killTimer = null
     if (turns.get(chatId) !== turn) return
@@ -592,6 +695,7 @@ function cancelForSteer(turn: Turn, sessionId: string): void {
   } catch {
     // the agent is already gone; its exit ends the turn
   }
+  if (turn.self) void endSelfTurn(turn)
 }
 
 /** Another chat's turn on the same agent, including one still preparing its prompt, that a kill would end. */

@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { BackgroundTask, BackgroundTasksFeed } from '../shared/backgroundTasks'
 import type { BuiltinAgent, BuiltinAgentsFeed } from '../shared/builtinAgents'
 import type { McpServers } from '../shared/mcp'
 import type { RegistrySearchResult } from '../shared/mcpRegistry'
@@ -253,6 +254,15 @@ const api = {
     ipcRenderer.on('builtinAgents:event', wrapped)
     return () => {
       ipcRenderer.removeListener('builtinAgents:event', wrapped)
+    }
+  },
+  getBackgroundTasks: (chatId: string) =>
+    ipcRenderer.invoke('backgroundTasks:get', chatId) as Promise<BackgroundTask[]>,
+  onBackgroundTasks: (listener: (feed: BackgroundTasksFeed) => void) => {
+    const wrapped = (_event: unknown, payload: BackgroundTasksFeed): void => listener(payload)
+    ipcRenderer.on('backgroundTasks:event', wrapped)
+    return () => {
+      ipcRenderer.removeListener('backgroundTasks:event', wrapped)
     }
   },
   getActivity: () => ipcRenderer.invoke('activity:get') as Promise<ActivitySnapshot>,

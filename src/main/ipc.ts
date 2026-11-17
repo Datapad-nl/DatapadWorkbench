@@ -47,6 +47,7 @@ import {
   updateBot
 } from './bots'
 import { getBuiltinAgents, startBuiltinAgentsBridge } from './builtinAgents'
+import { getBackgroundTasks, startBackgroundTasksBridge } from './backgroundTasks'
 import {
   cancelBrowserAnnotate,
   clearBrowserData,
@@ -89,6 +90,7 @@ import {
   liveState,
   loadChat,
   onChatLive,
+  onSelfTurnReply,
   rewindChat,
   switchChatAgent,
   saveMessageToBots,
@@ -315,6 +317,7 @@ export function registerIpc(): void {
   })
   startActivityBridge()
   startBuiltinAgentsBridge()
+  startBackgroundTasksBridge()
   watchAttention()
   onIndexChange((index) => {
     emitIndex({ type: 'status', projectId: index.projectId, index })
@@ -322,6 +325,9 @@ export function registerIpc(): void {
     void maintainVaultForProjectId(index.projectId)
   })
   onChatLive((event) => emit(event))
+  onSelfTurnReply((chat) => {
+    if (!isBotRun(chat.id)) void noticeForReply(chat).catch(() => {})
+  })
   onPermissionPrompt((request) => {
     emit({ type: 'permission', chatId: request.chatId, request })
     void noticeFor(request.chatId, `Needs approval: ${request.title}`, true)
@@ -900,6 +906,7 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('builtinAgents:get', (_event, chatId: string) => getBuiltinAgents(String(chatId ?? '')))
+  ipcMain.handle('backgroundTasks:get', (_event, chatId: string) => getBackgroundTasks(String(chatId ?? '')))
 
   ipcMain.handle('activity:clear', async () => {
     return clearActivity()

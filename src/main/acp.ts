@@ -159,6 +159,9 @@ export function contentText(content: unknown): string | null {
 
 const UPDATE_LISTENERS = new Set<(update: SessionUpdate) => void>()
 const TASK_LISTENERS = new Set<(sessionId: string, message: unknown) => void>()
+const SDK_LISTENERS = new Set<(sessionId: string, message: unknown) => void>()
+/** A session's process is gone or starts over, so none of its background tasks run. */
+const NO_BACKGROUND_TASKS = { type: 'system', subtype: 'background_tasks_changed', tasks: [] }
 const EXIT_PLAN_LISTENERS = new Set<(input: { chatId: string; sessionId: string; markdown: string }) => void>()
 const acpSessionModes = new Map<string, { current: string; available: SessionMode[] }>()
 const acpSessionCommands = new Map<string, AgentCommand[]>()
@@ -858,9 +861,10 @@ function handleIncomingRequest(conn: Conn, message: JsonRpc): boolean {
     return true
   }
 
-  // Claude Code's notice that a background agent ended, asked for in `sessionRules`.
+  // Claude Code's raw messages asked for in `sessionRules`: all go to the SDK listeners, a background agent's end also to the task listeners.
   if (message.method === '_claude/sdkMessage') {
     const params = message.params as { sessionId?: string; message?: { subtype?: string } } | undefined
+    if (params?.sessionId) for (const listener of SDK_LISTENERS) listener(params.sessionId, params.message)
     if (params?.sessionId && params.message?.subtype === 'task_notification') {
       for (const listener of TASK_LISTENERS) listener(params.sessionId, params.message)
     }
@@ -987,6 +991,9 @@ function releaseAgentState(conn: Conn, reason: string): void {
   if (conn.agent === 'claude') resetClaudeOptions()
   conn.inbound.length = 0
   conn.flushScheduled = false
+  // A turn the agent started itself has no prompt to reject. Its session is told it stopped working.
+  const stopped = { type: 'system', subtype: 'session_state_changed', state: 'idle' }
+  for (const sessionId of sessions) for (const listener of SDK_LISTENERS) listener(sessionId, stopped)
   for (const sessionId of sessions) {
     const turn = turnWaits.get(sessionId)
     if (!turn) continue
@@ -1013,6 +1020,7 @@ function releaseAgentState(conn: Conn, reason: string): void {
   for (const sessionId of sessions) {
     acpSessionModes.delete(sessionId)
     acpSessionCommands.delete(sessionId)
+    for (const listener of SDK_LISTENERS) listener(sessionId, NO_BACKGROUND_TASKS)
     if (connForSession(sessionId) === conn) {
       sessionAgents.delete(sessionId)
       sessionConns.delete(sessionId)
@@ -1076,6 +1084,14 @@ export function onSessionUpdate(listener: (update: SessionUpdate) => void): () =
   }
 }
 
+/** Every message of Claude Code's own that `sessionRules` asks for, as it came. */
+export function onSdkMessage(listener: (sessionId: string, message: unknown) => void): () => void {
+  SDK_LISTENERS.add(listener)
+  return () => {
+    SDK_LISTENERS.delete(listener)
+  }
+}
+
 export function onTaskNotification(listener: (sessionId: string, message: unknown) => void): () => void {
   TASK_LISTENERS.add(listener)
   return () => {
@@ -1116,13 +1132,25 @@ export async function ensureAgent(
   }
 }
 
+/** Claude Code's messages that say when a turn it started itself begins and ends (see selfTurn.ts). */
+const SELF_TURN_MESSAGES = [{ type: 'system', subtype: 'session_state_changed' }, { type: 'result' }]
+
 /** Session rules: Grok reads `_meta.rules`, Claude Code appends a system prompt. */
 function sessionRules(agent: ChatAgent, rules: string): Record<string, unknown> {
   if (agent === 'claude') {
     return {
       systemPrompt: { mode: 'append', content: [{ type: 'text', text: rules }] },
-      // Without this nothing says when a background agent ends.
-      _meta: { claudeCode: { emitRawSDKMessages: [{ type: 'system', subtype: 'task_notification' }] } }
+      // Without these nothing says when a background agent or command starts or ends, or when a turn the agent started itself begins and ends.
+      _meta: {
+        claudeCode: {
+          emitRawSDKMessages: [
+            { type: 'system', subtype: 'task_notification' },
+            { type: 'system', subtype: 'task_started' },
+            { type: 'system', subtype: 'background_tasks_changed' },
+            ...SELF_TURN_MESSAGES
+          ]
+        }
+      }
     }
   }
   return { _meta: { rules } }
@@ -1458,6 +1486,7 @@ export async function loadSession(
   bindSession(sessionId, conn)
   leavePreviousConn(sessionId, previous, conn)
   sessionsToReload.delete(sessionId)
+  for (const listener of SDK_LISTENERS) listener(sessionId, NO_BACKGROUND_TASKS)
   const result = await request<unknown>(
     conn,
     'session/load',
@@ -1478,6 +1507,7 @@ export async function closeSession(sessionId: string): Promise<void> {
   const conn = connForSession(sessionId)
   if (!conn.proc || !conn.liveSessions.has(sessionId)) return
   conn.liveSessions.delete(sessionId)
+  for (const listener of SDK_LISTENERS) listener(sessionId, NO_BACKGROUND_TASKS)
   await request(conn, 'session/close', { sessionId }, 10_000).catch(() => {})
 }
 

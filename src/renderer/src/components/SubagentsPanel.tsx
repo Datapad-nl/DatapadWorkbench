@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { chatAgentLabel, normalizeChatAgent, type Chat, type ChatSummary, type Message } from '../../../shared/types'
+import type { BackgroundTask } from '../../../shared/backgroundTasks'
 import type { BuiltinAgent } from '../../../shared/builtinAgents'
 import { replySteps } from '../../../shared/steps'
 import { useChatsProgress } from '../progress'
@@ -401,6 +402,60 @@ function BuiltinAgentRow({ agent, state }: { agent: BuiltinAgent; state: WorkerS
   )
 }
 
+/** Claude Code's background commands and monitors in this chat, kept up to date. */
+function useBackgroundTasks(chatId: string): BackgroundTask[] {
+  const [found, setFound] = useState<{ chatId: string; tasks: BackgroundTask[] }>({ chatId, tasks: [] })
+  useEffect(() => {
+    let cancel = false
+    let live = false
+    void window.workbench.getBackgroundTasks(chatId).then((tasks) => {
+      if (!cancel && !live) setFound({ chatId, tasks })
+    })
+    const off = window.workbench.onBackgroundTasks((feed) => {
+      if (feed.chatId !== chatId) return
+      live = true
+      setFound(feed)
+    })
+    return () => {
+      cancel = true
+      off()
+    }
+  }, [chatId])
+  return found.chatId === chatId ? found.tasks : []
+}
+
+/** A shell command or monitor Claude Code runs in the background. Its summary is all it says. */
+function BackgroundTaskRow({ task, state }: { task: BackgroundTask; state: WorkerState }): React.JSX.Element {
+  const label = state === 'reported' ? 'Finished' : WORKER_STATE_LABEL[state]
+  const line = task.summary ? `${label} · ${clip(task.summary, 160)}` : label
+  return (
+    <li className="border-t border-line py-2 first:border-t-0" data-testid="background-task-row">
+      <div className="flex min-w-0 items-start gap-2 pl-5" title={task.summary || task.title}>
+        <span className="mt-1 flex h-3 w-3 shrink-0 items-center justify-center">
+          <StateMark state={state} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="truncate text-[13px] font-medium text-ink">{task.title}</span>
+            <span className="shrink-0 rounded-full border border-line px-1.5 text-[10.5px] leading-4 text-muted">
+              background
+            </span>
+          </span>
+          <span
+            className={`block truncate text-[12.5px] leading-5 ${state === 'error' ? 'text-danger' : 'text-muted'}`}
+          >
+            {line}
+          </span>
+        </span>
+      </div>
+    </li>
+  )
+}
+
+function counted(count: number, one: string, many: string): string[] {
+  return count === 0 ? [] : [`${count} ${count === 1 ? one : many}`]
+}
+
 /**
  * The subagents of an orchestrator chat: how many there are, what each is doing now,
  * and, opened, what it and the orchestrator said to each other.
@@ -429,8 +484,11 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
   const orchestrating = statuses[chatId]?.status === 'streaming'
   const agents = useBuiltinAgents(chatId)
   const agentStates = agents.map((agent) => builtinAgentState(agent, orchestrating))
+  const tasks = useBackgroundTasks(chatId)
+  // A background task runs on after the turn that started it, like a background agent.
+  const taskStates = tasks.map((task) => builtinAgentState({ status: task.status, background: true }, orchestrating))
   const count = workers.length + agents.length
-  if (count === 0) return null
+  if (count === 0 && tasks.length === 0) return null
   const allStates = [...states, ...agentStates]
   const nodes = [
     ...workers.map((worker) => ({
@@ -452,19 +510,24 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
         >
           <Icon name={open ? 'chevronDown' : 'chevron'} size={12} className="text-faint" />
           <span className="text-[12.5px] font-semibold text-ink">
-            {count} {count === 1 ? 'subagent' : 'subagents'}
+            {[
+              ...counted(count, 'subagent', 'subagents'),
+              ...counted(tasks.length, 'background task', 'background tasks')
+            ].join(' · ')}
           </span>
-          <span className="truncate text-[12.5px] text-muted">{workersSummary(allStates)}</span>
+          <span className="truncate text-[12.5px] text-muted">{workersSummary([...allStates, ...taskStates])}</span>
         </button>
         {open ? (
           <div className="max-h-[42vh] overflow-y-auto border-t border-line px-3">
-            <LinkMap
-              workers={nodes}
-              states={allStates}
-              orchestrating={orchestrating}
-              orchestratorModel={orchestratorModel}
-            />
-            <ul className="border-t border-line">
+            {count > 0 ? (
+              <LinkMap
+                workers={nodes}
+                states={allStates}
+                orchestrating={orchestrating}
+                orchestratorModel={orchestratorModel}
+              />
+            ) : null}
+            <ul className={count > 0 ? 'border-t border-line' : ''}>
               {workers.map((worker, index) => (
                 <WorkerRow
                   key={worker.id}
@@ -476,6 +539,9 @@ export function SubagentsPanel({ chatId }: { chatId: string }): React.JSX.Elemen
               ))}
               {agents.map((agent, index) => (
                 <BuiltinAgentRow key={agent.id} agent={agent} state={agentStates[index]} />
+              ))}
+              {tasks.map((task, index) => (
+                <BackgroundTaskRow key={task.id} task={task} state={taskStates[index]} />
               ))}
             </ul>
           </div>
