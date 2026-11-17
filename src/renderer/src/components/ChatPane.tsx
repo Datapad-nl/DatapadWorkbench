@@ -59,6 +59,7 @@ import { useVoice } from '../voice/VoiceProvider'
 import { useStreamStatuses, useStreams, useWorkspace, type RightPaneId } from '../workspace'
 import { AgentReply } from './AgentReply'
 import { AgentGlyph, Icon, IconButton, type IconName } from './icons'
+import { ZoomImage } from './ImageLightbox'
 import { Markdown } from './Markdown'
 import { ProjectOrientation } from './OrientationCard'
 import { SubagentsPanel } from './SubagentsPanel'
@@ -1269,7 +1270,7 @@ function MessageList({
                 {message.attachments && message.attachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     {message.attachments.map((attachment) => (
-                      <img
+                      <ZoomImage
                         key={attachment.id}
                         src={`data:${attachment.mimeType};base64,${attachment.data}`}
                         alt="Screenshot"

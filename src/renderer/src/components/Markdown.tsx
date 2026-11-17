@@ -4,10 +4,11 @@ import remarkGfm from 'remark-gfm'
 import { isMediaSrc, isRemoteSrc, isVideoSrc, mediaUrl } from '../../../shared/media'
 import { NOTE_HREF } from '../noteLinks'
 import { Icon } from './icons'
+import { ZoomImage } from './ImageLightbox'
 
 const PLUGINS = [remarkGfm]
 
-const FRAME = 'my-2 max-h-[480px] max-w-full cursor-pointer rounded-lg border border-line'
+const FRAME = 'my-2 max-h-[480px] max-w-full rounded-lg border border-line'
 
 function plainText(children: ReactNode): string {
   if (typeof children === 'string' || typeof children === 'number') return String(children)
@@ -29,9 +30,9 @@ function LocalMedia({
     void window.workbench.openMedia(chatId, src)
   }
   if (isVideoSrc(src)) {
-    return <video src={url} controls className={FRAME} />
+    return <video src={url} controls className={`${FRAME} cursor-pointer`} />
   }
-  return <img src={url} alt={alt || ''} className={FRAME} onClick={open} />
+  return <ZoomImage src={url} alt={alt || ''} className={FRAME} onOpenFile={open} />
 }
 
 type Visual = { id: string; title?: string }
@@ -129,7 +130,7 @@ function mediaComponents(chatId: string): Components {
     img: ({ src, alt }) => {
       if (!src) return null
       if (isRemoteSrc(src)) {
-        return <img src={src} alt={alt ?? ''} className={FRAME} />
+        return <ZoomImage src={src} alt={alt ?? ''} className={FRAME} />
       }
       if (!isMediaSrc(src)) return null
       return <LocalMedia chatId={chatId} src={src} alt={alt} />
