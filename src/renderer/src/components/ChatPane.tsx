@@ -2713,7 +2713,7 @@ function Composer({
               ? 'Conversation on · speaking — keep talking to steer'
               : voiceStatus === 'loading'
                 ? 'Conversation on · starting…'
-                : `Conversation on · ${progress || 'working'}`
+                : 'Conversation on · working'
         : voiceStatus === 'listening'
           ? voiceAutoSend || voiceConversation
             ? 'Listening… click the mic or pause to send'
@@ -2725,7 +2725,7 @@ function Composer({
               : voiceStatus === 'loading'
                 ? 'Loading local speech model…'
                 : (pasteError ??
-                  (streaming ? `${progress || 'Still working'} · Esc stops the task` : null))))
+                  (streaming ? 'Esc stops the task' : null))))
 
   return (
     <div className="shrink-0 pt-2 pb-[18px]">
