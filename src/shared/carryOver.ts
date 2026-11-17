@@ -26,7 +26,7 @@ export function carryOverPrompt(earlier: Message[], chatId: string, limit = CARR
 }
 
 /**
- * The project chat's conversation for a bot asked from it, up to and with `lastId`, the chat's last
+ * The conversation of the chat a bot was asked from, up to and with `lastId`, the chat's last
  * message when the bot was asked. When that is the user's message to the bots, it is the question
  * itself and stays out. Null when nothing precedes the question or the message is gone.
  */
@@ -42,7 +42,7 @@ export function askedFromPrompt(
   const conversation = renderConversation(earlier, limit)
   if (!conversation) return null
   return [
-    `You were asked from the project chat "${title}". Here is that chat's conversation up to the question, so you know what was being discussed. Tool calls and their output are not included: read files again where you need them.`,
+    `You were asked from the chat "${title}". Here is that chat's conversation up to the question, so you know what was being discussed. Tool calls and their output are not included: read files again where you need them.`,
     conversation.cut ? 'Only the most recent part is included.' : null,
     '<conversation>',
     conversation.text,

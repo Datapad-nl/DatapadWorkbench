@@ -129,7 +129,8 @@ async function workbenchTool(name: string, args: Args, from: string, signal: Abo
 /** The workbench tools of a chat: a bot's own chat also has the tools of its unattended runs. */
 async function workbenchTools(chatId: string): Promise<McpTool[]> {
   const chat = await getChat(chatId).catch(() => null)
-  if (chat?.botId && !chat.projectId) return [...WORKBENCH_TOOLS, ...BOT_RUN_TOOLS]
+  // A bot's own chat asks other bots. A run another chat asked answers there and asks no bots on, so asking cannot loop.
+  if (chat?.botId && !chat.projectId && !chat.replyTo) return [...WORKBENCH_TOOLS, ...PROJECT_CHAT_TOOLS, ...BOT_RUN_TOOLS]
   return chat?.botId ? WORKBENCH_TOOLS : [...WORKBENCH_TOOLS, ...PROJECT_CHAT_TOOLS]
 }
 

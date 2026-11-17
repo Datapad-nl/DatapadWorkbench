@@ -470,7 +470,7 @@ export function ChatPane({
             projectId={activeChat.projectId}
             chatId={activeChat.id}
             hasFolder={Boolean(activeProject?.path)}
-            bots={activeBot ? [] : bots}
+            bots={activeChat.botId && (activeChat.projectId || activeChat.replyTo) ? [] : bots.filter((bot) => bot.id !== activeChat.botId)}
             drafts={drafts}
             restorers={restorers}
             onSend={(text, attachments, mentions, asked) =>
@@ -2290,7 +2290,7 @@ function Composer({
   projectId: string
   chatId: string
   hasFolder: boolean
-  /** Bots that can be asked with @. Empty in a bot's own chat. */
+  /** Bots that can be asked with @. In a bot's own chat all but that bot; none in a bot's run in a project or one another chat asked. */
   bots: Bot[]
   history: string[]
   drafts: React.RefObject<Map<string, ComposerDraft>>

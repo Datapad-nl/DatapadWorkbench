@@ -2,7 +2,7 @@ import type { BotMention } from './types'
 
 /**
  * Bots written as `@Name` in a message. A message that starts with them is addressed to those bots;
- * a bot named later is part of the sentence, for the project's agent to make sense of.
+ * a bot named later is part of the sentence, for the chat's agent to make sense of.
  */
 
 /** The bot whose `@Name` starts at `index`, the longest name first so "Ads Checker" beats "Ads". */

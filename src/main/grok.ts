@@ -1254,7 +1254,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
     chat.carryOver && !isSlashCommand(userText)
       ? carryOverPrompt(earlierMessages(chat, lastUser, followUp), chat.id)
       : null
-  // A bot asked from a project chat starts with that chat's conversation up to the question.
+  // A bot asked from another chat starts with that chat's conversation up to the question.
   const askedFrom =
     !carried &&
     chat.replyTo &&

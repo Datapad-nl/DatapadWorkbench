@@ -281,12 +281,12 @@ export const WORKBENCH_TOOLS: McpTool[] = [
   }
 ]
 
-/** Only project chats have these: a bot's chats cannot ask bots. */
+/** Project chats and a bot's own chats have these, not a bot's run in a project or one another chat asked: asking cannot loop. */
 export const PROJECT_CHAT_TOOLS: McpTool[] = [
   {
     name: 'ask_bot',
     description:
-      "Ask one of the user's bots, by name, when the user names it with @ in a message and wants something from it: give it something, ask it something or have it do something. A bot is an agent of its own with its own skills and rules; it works in this project's folder in a run of its own and starts with no context, so the message must stand on its own with everything it needs, such as the items to hand over. Waits for the bot to finish and returns its answer, which is also posted in this chat for the user.",
+      "Ask one of the user's bots, by name, when the user names it with @ in a message and wants something from it: give it something, ask it something or have it do something. A bot is an agent of its own with its own skills and rules; it works in a run of its own, in this project's folder or, outside a project, in its own folder, and starts with no context, so the message must stand on its own with everything it needs, such as the items to hand over. Waits for the bot to finish and returns its answer, which is also posted in this chat for the user.",
     inputSchema: {
       type: 'object',
       properties: {

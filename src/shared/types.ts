@@ -90,7 +90,7 @@ export type Message = {
   mentions?: FileMention[]
   /** Bots the user named with @ in this message. */
   bots?: BotMention[]
-  /** The message starts with @bots and went only to them: the project's agent did not answer it. */
+  /** The message starts with @bots and went only to them: the chat's agent did not answer it. */
   toBots?: boolean
   /** Set on a bot's answer posted in a project chat. */
   fromBot?: BotAnswer
@@ -104,9 +104,9 @@ export type BotAnswer = {
   name: string
   /** The bot's own chat the answer comes from. */
   runChatId: string
-  /** What the user asked the bot in a message addressed to it, which the project's agent never got. */
+  /** What the user asked the bot in a message addressed to it, which the chat's agent never got. */
   question?: string
-  /** Set once the project's agent got the answer with a prompt. */
+  /** Set once the chat's agent got the answer with a prompt. */
   delivered?: boolean
 }
 
@@ -219,11 +219,11 @@ export function chatAgentLabel(agent: ChatAgent): string {
 
 export type Chat = {
   id: string
-  /** Empty for a chat of a bot, which works in the bot's folder. A bot's run asked with @ works in this project. */
+  /** Empty for a chat of a bot, which works in the bot's folder. A bot's run asked with @ from a project chat works in this project. */
   projectId: string
   /** The bot this chat belongs to: it runs with the bot's instructions and skills. */
   botId?: string
-  /** A bot's run asked with @: the project chat its answer is posted in. */
+  /** A bot's run asked with @ or ask_bot: the chat its answer is posted in, a project chat or another bot's own chat. */
   replyTo?: string
   /** The last message of the replyTo chat when the bot was asked: its first prompt gets the conversation up to there. */
   askedAfter?: string

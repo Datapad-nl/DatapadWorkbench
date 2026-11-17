@@ -1,6 +1,6 @@
 import type { BotMention, Message } from '../shared/types'
 
-/** What the project's agent is told about the bots asked with @ and the answers they posted. */
+/** What the chat's agent is told about the bots asked with @ and the answers they posted. */
 
 /** Adds `block` to a prompt: after a slash command, which only runs when it starts the prompt, else before. */
 function withBlock(text: string, block: string): string {

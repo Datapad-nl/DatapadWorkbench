@@ -11,11 +11,15 @@ const stub = vi.hoisted(() => ({
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
 vi.mock('./bots', () => {
   const getBot = async (botId: string) => {
+    if (botId === 'accountant') {
+      return { id: 'accountant', name: 'Accountant', agent: 'grok', model: '', folder: '/bots/accountant', chatId: null, unread: 0 }
+    }
     if (botId !== 'scout') throw new Error('Bot not found')
     return { id: 'scout', name: 'Scout', agent: 'claude', model: '', folder: '/bots/scout', ...stub.scout }
   }
   return {
     getBot,
+    listBots: async () => [await getBot('scout'), await getBot('accountant')],
     setBotChat: async (botId: string, chatId: string) => {
       stub.scout.chatId = chatId
       return getBot(botId)
@@ -55,6 +59,7 @@ vi.mock('./store', () => ({
 import {
   agentHook,
   askBot,
+  askBotFromChat,
   botChat,
   delegateTask,
   handoffChat,
@@ -440,6 +445,55 @@ describe('@bot', () => {
       role: 'assistant',
       content: 'Looks fine.',
       fromBot: { botId: 'scout', name: 'Scout', runChatId: 'scout-run' }
+    })
+  })
+
+  it("asks another bot from a bot's own chat: the bot runs in its own folder and answers there", async () => {
+    const sent = asked()
+    stub.chats.set('scout-chat', {
+      id: 'scout-chat',
+      projectId: '',
+      botId: 'scout',
+      title: 'Scheduled: Inbox',
+      messages: [{ id: 'u1', role: 'user', content: 'forward invoices to @Accountant', createdAt: '' }]
+    } as unknown as Chat)
+    const result = await askBotFromChat(
+      { from: 'scout-chat', bot: '@Accountant', message: 'Book this invoice.' },
+      new AbortController().signal
+    )
+
+    expect(result).toEqual({ text: 'Accountant answered:\n\nLooks fine.' })
+    expect(vi.mocked(createChat).mock.lastCall).toEqual([
+      '',
+      { botId: 'accountant', agent: 'grok', title: 'Scout: Book this invoice.' }
+    ])
+    expect(stub.chats.get('scout-run')).toMatchObject({ replyTo: 'scout-chat', askedAfter: 'u1' })
+    expect(sent).toEqual([['scout-run', 'Book this invoice.']])
+    expect(stub.chats.get('scout-chat')!.messages.at(-1)).toMatchObject({
+      content: 'Looks fine.',
+      fromBot: { botId: 'accountant', name: 'Accountant', runChatId: 'scout-run', delivered: true }
+    })
+    // The asked run is no chat of the bot's own: it does not notify, and asks no bots on.
+    await expect(notifyFromBot({ from: 'scout-run', message: 'hi' })).rejects.toThrow("a bot's own chats")
+    await expect(
+      askBotFromChat({ from: 'scout-run', bot: 'Scout', message: 'and you?' }, new AbortController().signal)
+    ).rejects.toThrow('Only a project chat or a bot')
+    await askBot({ botId: 'scout', fromChatId: 'scout-run', content: 'and you?' })
+    expect(stub.chats.get('scout-run')!.messages.at(-1)).toMatchObject({
+      content: "Could not answer: Only a project chat or a bot's own chat can ask a bot."
+    })
+  })
+
+  it('refuses a bot asking itself', async () => {
+    asked()
+    stub.chats.set('scout-chat', { id: 'scout-chat', projectId: '', botId: 'scout', title: 'Scout', messages: [] } as unknown as Chat)
+    await expect(
+      askBotFromChat({ from: 'scout-chat', bot: 'Scout', message: 'hello' }, new AbortController().signal)
+    ).rejects.toThrow('cannot ask itself')
+    await askBot({ botId: 'scout', fromChatId: 'scout-chat', content: 'hello' })
+    expect(createChat).not.toHaveBeenCalled()
+    expect(stub.chats.get('scout-chat')!.messages.at(-1)).toMatchObject({
+      content: 'Could not answer: A bot cannot ask itself.'
     })
   })
 

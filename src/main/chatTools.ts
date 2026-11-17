@@ -187,8 +187,9 @@ export async function send(
 }
 
 /**
- * A bot asked with @ in a project chat. The bot runs in a chat of its own, in the project's folder,
- * next to the project's agent, and its answer is posted in the project chat once it is done.
+ * A bot asked with @ in a project chat or in another bot's own chat. The bot runs in a chat of its own,
+ * in the project's folder next to the project's agent, or in its own folder when there is no project,
+ * and its answer is posted in the asking chat once it is done.
  */
 export async function askBot(input: {
   botId: string;
@@ -196,21 +197,23 @@ export async function askBot(input: {
   content: string;
   attachments?: Attachment[];
   mentions?: FileMention[];
-  /** The user's message addressed to the bot, which the project's agent learns about with the answer. */
+  /** The user's message addressed to the bot, which the chat's agent learns about with the answer. */
   question?: string;
-  /** The project's agent asked with ask_bot and waits: the answer is its tool result, unless it stopped waiting. */
+  /** The chat's agent asked with ask_bot and waits: the answer is its tool result, unless it stopped waiting. */
   waiting?: AbortSignal;
 }): Promise<string> {
   let name = "The bot";
   let runChatId = "";
   try {
     const caller = await getChat(input.fromChatId);
-    if (caller.botId) throw new Error("A bot is asked from a project chat.");
+    if (caller.botId && !isBotsOwn(caller)) throw new Error("Only a project chat or a bot's own chat can ask a bot.");
+    if (caller.botId === input.botId) throw new Error("A bot cannot ask itself.");
     const bot = await getBot(input.botId);
     name = bot.name;
     const project = (await listProjects()).find(
       (item) => item.id === caller.projectId,
     );
+    const from = project?.name ?? (caller.botId ? (await getBot(caller.botId)).name : "Project");
     const firstLine =
       input.content.trim().split("\n")[0] ||
       input.mentions?.[0]?.path ||
@@ -218,7 +221,7 @@ export async function askBot(input: {
     const created = await createChat(caller.projectId, {
       botId: bot.id,
       agent: bot.agent,
-      title: `${project?.name ?? "Project"}: ${clip(firstLine, 50)}`,
+      title: `${from}: ${clip(firstLine, 50)}`,
     });
     runChatId = created.id;
     const run = await mutateChat(created.id, (latest) => {
@@ -257,15 +260,15 @@ function stillWaiting(signal: AbortSignal | undefined): boolean {
 }
 
 /**
- * The ask_bot tool: the project's agent asks a bot the user named in a message. The bot runs as it
- * does when the user asks it, its answer is posted in the project chat, and the agent gets it back.
+ * The ask_bot tool: the chat's agent asks a bot the user named in a message. The bot runs as it
+ * does when the user asks it, its answer is posted in the asking chat, and the agent gets it back.
  */
 export async function askBotFromChat(
   input: { from?: unknown; bot?: unknown; message?: unknown },
   signal: AbortSignal,
 ): Promise<{ text: string }> {
   const caller = await callerChat(input.from);
-  if (caller.botId) throw new Error("Only a project chat can ask a bot.");
+  if (caller.botId && !isBotsOwn(caller)) throw new Error("Only a project chat or a bot's own chat can ask a bot.");
   const wanted = typeof input.bot === "string" ? input.bot.trim().replace(/^@/, "") : "";
   const message = typeof input.message === "string" ? input.message.trim() : "";
   if (!wanted) throw new Error("Pass the name of the bot to ask.");
@@ -278,6 +281,7 @@ export async function askBotFromChat(
     const names = bots.map((item) => item.name).join(", ");
     throw new Error(`No bot is named ${wanted}. ${names ? `The bots are: ${names}.` : "There are no bots."}`);
   }
+  if (bot.id === caller.botId) throw new Error(`You are ${bot.name}: a bot cannot ask itself.`);
   const answer = await askBot({ botId: bot.id, fromChatId: caller.id, content: message, waiting: signal });
   return { text: `${bot.name} answered:\n\n${answer}` };
 }
@@ -882,9 +886,12 @@ async function tellFromBot(
   await botMessage(bot.id, chat.id, content, own ? undefined : runSource(from.title));
 }
 
-/** The chats where a bot runs unattended and speaks with `notify`: its own, outside any project. */
-function isBotsOwn(chat: Pick<Chat, "botId" | "projectId">): chat is Pick<Chat, "projectId"> & { botId: string } {
-  return Boolean(chat.botId) && !chat.projectId;
+/**
+ * The chats where a bot runs unattended and speaks with `notify`: its own, outside any project. A run
+ * another chat asked is not one of them: its answer is posted where it was asked.
+ */
+function isBotsOwn(chat: Pick<Chat, "botId" | "projectId" | "replyTo">): chat is Pick<Chat, "projectId"> & { botId: string } {
+  return Boolean(chat.botId) && !chat.projectId && !chat.replyTo;
 }
 
 /** `notify`: the one way a bot's unattended run reaches the user. */

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 const fake = vi.hoisted(() => ({
   calls: [] as Array<[string, unknown]>,
   delegateDone: false,
-  chat: { botId: undefined as string | undefined, projectId: 'p' }
+  chat: { botId: undefined as string | undefined, projectId: 'p', replyTo: undefined as string | undefined }
 }))
 vi.mock('./store', () => ({ getChat: async (chatId: string) => ({ id: chatId, ...fake.chat }) }))
 
@@ -63,7 +63,7 @@ afterAll(() => server.close())
 beforeEach(() => {
   fake.calls.length = 0
   fake.delegateDone = false
-  fake.chat = { botId: undefined, projectId: 'p' }
+  fake.chat = { botId: undefined, projectId: 'p', replyTo: undefined }
 })
 
 function post(toolset: Toolset, body: unknown, signal?: AbortSignal): Promise<Response> {
@@ -111,10 +111,30 @@ describe('Workbench MCP over HTTP', () => {
       return list.result.tools.map((tool) => tool.name)
     }
     expect(await names()).not.toContain('notify')
-    fake.chat = { botId: 'scout', projectId: 'p' }
+    fake.chat = { botId: 'scout', projectId: 'p', replyTo: undefined }
     expect(await names()).not.toContain('notify')
-    fake.chat = { botId: 'scout', projectId: '' }
+    fake.chat = { botId: 'scout', projectId: '', replyTo: undefined }
     expect(await names()).toEqual(expect.arrayContaining(['notify', 'follow_up', 'request_secret']))
+  })
+
+  it("lists ask_bot in project chats and a bot's own chats, not in a bot's run another chat asked", async () => {
+    const names = async (): Promise<string[]> => {
+      const list = (await (await post('workbench', { jsonrpc: '2.0', id: 12, method: 'tools/list' })).json()) as {
+        result: { tools: Array<{ name: string }> }
+      }
+      return list.result.tools.map((tool) => tool.name)
+    }
+    expect(await names()).toContain('ask_bot')
+    fake.chat = { botId: 'scout', projectId: '', replyTo: undefined }
+    expect(await names()).toContain('ask_bot')
+    fake.chat = { botId: 'scout', projectId: 'p', replyTo: 'project-chat' }
+    expect(await names()).not.toContain('ask_bot')
+    // Asked from another bot's chat: it answers there, and asks no bots on, nor notifies.
+    fake.chat = { botId: 'scout', projectId: '', replyTo: 'accountant-chat' }
+    const asked = await names()
+    expect(asked).not.toContain('ask_bot')
+    expect(asked).not.toContain('notify')
+    expect(asked).toContain('request_secret')
   })
 
   it('runs a tool for the chat of the token, whatever the arguments name', async () => {

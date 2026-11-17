@@ -41,7 +41,7 @@ describe('askedFromPrompt', () => {
 
   it('hands over the conversation in order, without the question or what came after', () => {
     const text = askedFromPrompt(chat, '@Critic do we need to change it when you read this?', 'Marketing')!
-    expect(text).toContain('You were asked from the project chat "Marketing".')
+    expect(text).toContain('You were asked from the chat "Marketing".')
     const user = text.indexOf('### User\nwho is our target audience?')
     const assistant = text.indexOf('### Assistant\nSmall agencies')
     const bot = text.indexOf('### Bot Scout\nRead the report')
