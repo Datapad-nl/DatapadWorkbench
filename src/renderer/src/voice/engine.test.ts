@@ -1,10 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./supertonic', () => ({ loadSupertonic: vi.fn(), synthesize: vi.fn() }))
-vi.mock('./whisper', () => ({ getAsr: vi.fn() }))
+vi.mock('./whisper', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./whisper')>()),
+  getAsr: vi.fn()
+}))
 
 import { DEFAULT_VOICE } from '../../../shared/types'
-import { micLevel, openLiveMicStream, resetSpokenLog, speakableText, speakText, speechDetector, stopSpeaking } from './engine'
+import {
+  micLevel,
+  openLiveMicStream,
+  resetSpokenLog,
+  speakableText,
+  speakText,
+  speechDetector,
+  startRecorder,
+  stopSpeaking,
+  transcribePcm,
+  type PcmClip
+} from './engine'
+import { getAsr } from './whisper'
 
 const SILENCE_MS = 800
 const FRAME_MS = 10
@@ -409,5 +424,245 @@ describe('micLevel', () => {
   it('is 0 for a value that is not a number', () => {
     expect(micLevel(NaN)).toBe(0)
     expect(micLevel(Infinity)).toBe(0)
+  })
+})
+
+const RATE = 16000
+const FRAME = RATE / 100
+// Speech frames carry their own sample value, so a test can count which of them reached a clip.
+const A = 0.05
+const B = 0.06
+
+/** A mic whose frames come from level(), one 10 ms frame per read, on a clock that moves with them. */
+function installFrames(level: (frame: number) => number | null): {
+  stream: MediaStream
+  track: { stopped: boolean }
+  read: () => number
+} {
+  let clock = 0
+  let frame = 0
+  vi.spyOn(performance, 'now').mockImplementation(() => clock)
+  const track = {
+    stopped: false,
+    enabled: false,
+    getSettings: () => ({ sampleRate: RATE }),
+    stop: () => {
+      track.stopped = true
+    }
+  }
+  let cancel = (): void => undefined
+  const cancelled = new Promise<void>((resolve) => {
+    cancel = resolve
+  })
+  vi.stubGlobal(
+    'MediaStreamTrackProcessor',
+    class {
+      readable = {
+        getReader: () => ({
+          cancel: async () => cancel(),
+          read: async () => {
+            await Promise.resolve()
+            const value = track.stopped ? null : level(frame)
+            if (value === null) {
+              await cancelled
+              return { done: true, value: undefined }
+            }
+            frame++
+            clock += 10
+            return {
+              done: false,
+              value: {
+                sampleRate: RATE,
+                allocationSize: () => FRAME * 4,
+                copyTo: (out: Float32Array) => out.fill(value),
+                close: () => undefined
+              }
+            }
+          }
+        })
+      }
+    }
+  )
+  const stream = { getAudioTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream
+  return { stream, track, read: () => frame }
+}
+
+/** Levels for each 10 ms frame of the segments, then null. */
+function script(segments: { level: number; ms: number }[]): (frame: number) => number | null {
+  const levels = segments.flatMap((segment) => Array<number>(segment.ms / 10).fill(segment.level))
+  return (frame) => levels[frame] ?? null
+}
+
+function count(clip: PcmClip | undefined, value: number): number {
+  return clip ? clip.samples.filter((sample) => sample === Math.fround(value)).length : 0
+}
+
+type Recording = {
+  clips: PcmClip[]
+  /** Whether the mic was stopped when each clip was handed on. */
+  stoppedAt: boolean[]
+  track: { stopped: boolean }
+  read: () => number
+  stop: () => Promise<PcmClip>
+}
+
+async function record(
+  level: (frame: number, clips: PcmClip[]) => number | null,
+  continuous: boolean
+): Promise<Recording> {
+  const clips: PcmClip[] = []
+  const stoppedAt: boolean[] = []
+  const { stream, track, read } = installFrames((frame) => level(frame, clips))
+  const rec = await startRecorder({
+    stream,
+    idleStop: true,
+    continuous,
+    onLevel: () => undefined,
+    onAutoStop: (clip) => {
+      clips.push(clip)
+      stoppedAt.push(track.stopped)
+    }
+  })
+  return { clips, stoppedAt, track, read, stop: rec.stop }
+}
+
+/** Waits until the mic has handed out every frame it has. */
+async function drained(rec: Recording, level: (frame: number, clips: PcmClip[]) => number | null): Promise<void> {
+  await until(() => level(rec.read(), rec.clips) === null)
+  await new Promise((resolve) => setTimeout(resolve))
+}
+
+describe('startRecorder', () => {
+  afterEach(() => {
+    vi.mocked(performance.now).mockRestore?.()
+  })
+
+  it('in continuous mode hands on each clip and keeps the same mic open for the next', async () => {
+    const level = script([
+      { level: NOISE, ms: 500 },
+      { level: A, ms: 1000 },
+      { level: NOISE, ms: 1500 },
+      { level: B, ms: 1000 },
+      { level: NOISE, ms: 1500 }
+    ])
+    const rec = await record(level, true)
+    await drained(rec, level)
+    expect(rec.clips).toHaveLength(2)
+    expect(rec.stoppedAt).toEqual([false, false])
+    expect(rec.track.stopped).toBe(false)
+    expect(count(rec.clips[0], A)).toBe(100 * FRAME)
+    expect(count(rec.clips[0], B)).toBe(0)
+    expect(count(rec.clips[1], B)).toBe(100 * FRAME)
+    expect(count(rec.clips[1], A)).toBe(0)
+    await rec.stop()
+    expect(rec.track.stopped).toBe(true)
+  })
+
+  it('in continuous mode keeps speech that starts on the frame after a clip ends', async () => {
+    let first = -1
+    const level = (frame: number, clips: PcmClip[]): number | null => {
+      if (clips.length === 0) return frame < 50 ? NOISE : frame < 150 ? A : NOISE
+      if (first < 0) first = frame
+      const at = frame - first
+      return at < 100 ? B : at < 300 ? NOISE : null
+    }
+    const rec = await record(level, true)
+    await drained(rec, level)
+    const rest = await rec.stop()
+    const second = rec.clips[1] ?? rest
+    expect(count(second, B)).toBe(100 * FRAME)
+    expect(second.samples[0]).toBe(Math.fround(B))
+  })
+
+  it('in continuous mode drops a minute with no speech and carries on recording', async () => {
+    const level = script([
+      { level: NOISE, ms: 61_000 },
+      { level: A, ms: 1000 },
+      { level: NOISE, ms: 1500 }
+    ])
+    const rec = await record((frame, clips) => {
+      // Nothing may come out of the minute of noise.
+      if (frame === 6100) expect(clips).toHaveLength(0)
+      return level(frame)
+    }, true)
+    await drained(rec, level)
+    expect(rec.track.stopped).toBe(false)
+    expect(rec.clips).toHaveLength(1)
+    expect(count(rec.clips[0], A)).toBe(100 * FRAME)
+    // Only the pre-roll of the noise before the speech is in the clip.
+    expect(rec.clips[0]!.samples.length).toBeLessThan(3 * RATE)
+    await rec.stop()
+  })
+
+  it('without continuous mode stops the mic and hands on one clip', async () => {
+    const level = script([
+      { level: NOISE, ms: 500 },
+      { level: A, ms: 1000 },
+      { level: NOISE, ms: 1500 },
+      { level: B, ms: 1000 },
+      { level: NOISE, ms: 1500 }
+    ])
+    const rec = await record(level, false)
+    await until(() => rec.clips.length === 1)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(rec.clips).toHaveLength(1)
+    expect(rec.track.stopped).toBe(true)
+    expect(count(rec.clips[0], A)).toBe(100 * FRAME)
+    expect(count(rec.clips[0], B)).toBe(0)
+  })
+
+  it('starts a clip shortly before the speech in it, and keeps every speech sample', async () => {
+    const level = script([
+      { level: NOISE, ms: 3000 },
+      { level: A, ms: 1000 },
+      { level: NOISE, ms: 1500 }
+    ])
+    const rec = await record(level, false)
+    await until(() => rec.clips.length === 1)
+    const clip = rec.clips[0] as PcmClip
+    const lead = clip.samples.findIndex((sample) => sample === Math.fround(A))
+    expect(lead).toBeGreaterThan(0)
+    expect(lead).toBeLessThanOrEqual(0.4 * RATE)
+    expect(count(clip, A)).toBe(100 * FRAME)
+  })
+
+  it('does not trim a clip that opened while the user was already talking', async () => {
+    const level = script([
+      { level: A, ms: 1500 },
+      { level: NOISE, ms: 3000 }
+    ])
+    const rec = await record(level, false)
+    await until(() => rec.clips.length === 1)
+    const clip = rec.clips[0] as PcmClip
+    expect(clip.heardSpeech).toBe(true)
+    expect(clip.samples[0]).toBe(Math.fround(A))
+    expect(count(clip, A)).toBe(150 * FRAME)
+    expect(clip.samples.length).toBe(rec.read() * FRAME)
+  })
+})
+
+describe('transcribePcm', () => {
+  it('passes the whole clip to Whisper, with windows for audio over 30 s, and no more than a minute', async () => {
+    // The worker cannot start, so recognition runs on this thread.
+    vi.stubGlobal(
+      'Worker',
+      class {
+        constructor() {
+          throw new Error('no workers here')
+        }
+      }
+    )
+    const pipe = vi.fn(async () => ({ text: 'hello there friend' }))
+    vi.mocked(getAsr).mockResolvedValue(pipe)
+    const windows = { chunk_length_s: 30, stride_length_s: 5 }
+
+    expect(await transcribePcm(new Float32Array(10 * RATE), RATE)).toBe('hello there friend')
+    expect(pipe).toHaveBeenLastCalledWith(expect.objectContaining({ length: 10 * RATE }), windows)
+
+    await transcribePcm(new Float32Array(45 * RATE), RATE)
+    expect(pipe).toHaveBeenLastCalledWith(expect.objectContaining({ length: 45 * RATE }), windows)
+
+    await transcribePcm(new Float32Array(70 * RATE), RATE)
+    expect(pipe).toHaveBeenLastCalledWith(expect.objectContaining({ length: 60 * RATE }), windows)
   })
 })

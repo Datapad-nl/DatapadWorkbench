@@ -2,6 +2,10 @@
 
 export type AsrPipeline = (audio: Float32Array, options?: Record<string, unknown>) => Promise<{ text?: string }>
 
+// Whisper hears 30 s at a time, and drops the rest of longer audio unless the pipeline cuts it into
+// overlapping windows. Audio of 30 s or less is still one window, as without these.
+export const ASR_OPTIONS = { chunk_length_s: 30, stride_length_s: 5 }
+
 let asr: AsrPipeline | null = null
 let asrLoading: Promise<AsrPipeline> | null = null
 let transformersReady: Promise<typeof import('@huggingface/transformers')> | null = null

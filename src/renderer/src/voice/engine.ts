@@ -1,7 +1,7 @@
 import type { VoiceLanguage, VoiceSettings } from '../../../shared/types'
 import { plainReply } from '../../../shared/steps'
 import { loadSupertonic, synthesize } from './supertonic'
-import { getAsr } from './whisper'
+import { ASR_OPTIONS, getAsr } from './whisper'
 
 const SAMPLE_RATE = 16000
 const SILENCE_MS = 800
@@ -15,7 +15,8 @@ const FLOOR_FALL_MS = 100
 const FLOOR_RISE_DB = 3
 // 40 ms of sound above the floor counts as speech, so a click or a one-frame spike does not.
 const SPEECH_RUN_MS = 40
-const ASR_MAX_SEC = 8
+// A clip keeps 400 ms before the first sound loud enough to be speech, so a soft first syllable stays in.
+const PRE_ROLL_MS = 400
 
 export type TtsVoice = { voiceURI: string; name: string }
 
@@ -1105,8 +1106,9 @@ export async function transcribePcm(
   heardSpeech = true
 ): Promise<string> {
   const audio = resample(samples, sampleRate, SAMPLE_RATE)
-  const max = SAMPLE_RATE * ASR_MAX_SEC
-  const clipped = audio.length > max ? audio.subarray(audio.length - max) : audio
+  // The recorder ends a clip at MAX_MS, so only a runaway clip is longer.
+  const max = (SAMPLE_RATE * MAX_MS) / 1000
+  const clipped = audio.length > max ? audio.subarray(0, max) : audio
   if (!asrWorkerBroken()) {
     try {
       return cleanTranscript(await transcribeOnWorker(clipped), heardSpeech)
@@ -1117,7 +1119,7 @@ export async function transcribePcm(
   }
   return withOnnx(async () => {
     const pipe = await getAsr()
-    const result = await pipe(clipped)
+    const result = await pipe(clipped, ASR_OPTIONS)
     return cleanTranscript(result.text ?? '', heardSpeech)
   })
 }
@@ -1291,15 +1293,27 @@ export async function openLiveMicStream(preferredId?: string): Promise<MediaStre
   return openMicStream()
 }
 
-/** Tells from each frame's RMS whether the user has spoken, and how long they have been quiet since. */
-export function speechDetector(): (rms: number, dt: number) => { heard: boolean; silentMs: number } {
+/**
+ * Tells from each frame's RMS whether the user has spoken, and how long they have been quiet since.
+ * Once heard, speechAt is the time from the first frame to where the speech began.
+ */
+export function speechDetector(): (
+  rms: number,
+  dt: number
+) => { heard: boolean; silentMs: number; speechAt: number | null } {
   let floor = -1
   let loudest = 0
   let heard = false
   let silentMs = 0
   let span = 0
+  let elapsed = 0
+  let speechAt: number | null = null
   const recent: { rms: number; dt: number }[] = []
+  // Every frame until speech is heard, so its start can be found then.
+  let before: { rms: number; at: number }[] = []
   return (rms, dt) => {
+    if (!heard) before.push({ rms, at: elapsed })
+    elapsed += dt
     if (floor < 0) floor = rms
     else if (rms < floor) floor += (rms - floor) * Math.min(1, dt / FLOOR_FALL_MS)
     else floor = Math.min(rms, floor * 10 ** ((FLOOR_RISE_DB * dt) / 20_000))
@@ -1313,8 +1327,13 @@ export function speechDetector(): (rms: number, dt: number) => { heard: boolean;
     const threshold = Math.max(SPEECH_RMS, floor * SPEECH_RATIO)
     if (heard) silentMs = sustained >= threshold ? 0 : silentMs + dt
     // The recorder may open mid-sentence: that speech only stands out once the floor falls below it.
-    else if (loudest >= threshold) heard = true
-    return { heard, silentMs }
+    else if (loudest >= threshold) {
+      heard = true
+      // The first frame as loud as the threshold that decided. Opened mid-speech, that is the first frame.
+      speechAt = before.find((frame) => frame.rms >= threshold)?.at ?? 0
+      before = []
+    }
+    return { heard, silentMs, speechAt }
   }
 }
 
@@ -1323,6 +1342,8 @@ export async function startRecorder(handlers: {
   deviceId?: string
   stream?: MediaStream
   idleStop?: boolean
+  /** Each clip goes to onAutoStop and recording carries on, on the same stream, until stop. */
+  continuous?: boolean
   onLevel: (rms: number, silentFor: number, heardSpeech: boolean) => void
   onAutoStop: (clip: PcmClip) => void
 }): Promise<Recorder> {
@@ -1333,12 +1354,33 @@ export async function startRecorder(handlers: {
     stream.getTracks().forEach((item) => item.stop())
     throw new Error('No microphone track')
   }
-  const chunks: Float32Array[] = []
+  let chunks: Float32Array[] = []
   let sampleRate = track.getSettings().sampleRate ?? SAMPLE_RATE
-  const detect = speechDetector()
+  let detect = speechDetector()
   let heard = false
-  const started = performance.now()
+  let speechAt: number | null = null
+  let started = performance.now()
   let stopping = false
+
+  function takeClip(): PcmClip {
+    const length = chunks.reduce((n, chunk) => n + chunk.length, 0)
+    const samples = new Float32Array(length)
+    let offset = 0
+    for (const chunk of chunks) {
+      samples.set(chunk, offset)
+      offset += chunk.length
+    }
+    const from = speechAt === null ? 0 : Math.max(0, Math.floor(((speechAt - PRE_ROLL_MS) * sampleRate) / 1000))
+    return { samples: samples.subarray(from), sampleRate, heardSpeech: heard }
+  }
+
+  function nextClip(now: number): void {
+    chunks = []
+    detect = speechDetector()
+    heard = false
+    speechAt = null
+    started = now
+  }
 
   function onPcm(input: Float32Array, rate: number): void {
     if (stopping || input.length === 0) return
@@ -1356,6 +1398,7 @@ export async function startRecorder(handlers: {
     const now = performance.now()
     const speech = detect(rms, (input.length / rate) * 1000)
     heard = speech.heard
+    speechAt = speech.speechAt
     const silentMs = speech.silentMs
     handlers.onLevel(rms, silentMs, heard)
     const voice = Math.min(1, Math.max(peak * 80, rms * 120))
@@ -1371,7 +1414,14 @@ export async function startRecorder(handlers: {
     voiceMotion = { bands, level: voice }
     if (handlers.idleStop === false) return
     if (now - started > MAX_MS || (heard && silentMs >= SILENCE_MS)) {
-      void stop().then(handlers.onAutoStop)
+      if (!handlers.continuous) {
+        void stop().then(handlers.onAutoStop)
+        return
+      }
+      // A clip with no speech in it is not worth transcribing.
+      const clip = heard ? takeClip() : null
+      nextClip(now)
+      if (clip) handlers.onAutoStop(clip)
     }
   }
 
@@ -1407,14 +1457,7 @@ export async function startRecorder(handlers: {
       }
       await pump
       stream.getTracks().forEach((item) => item.stop())
-      const length = chunks.reduce((n, chunk) => n + chunk.length, 0)
-      const samples = new Float32Array(length)
-      let offset = 0
-      for (const chunk of chunks) {
-        samples.set(chunk, offset)
-        offset += chunk.length
-      }
-      return { samples, sampleRate, heardSpeech: heard }
+      return takeClip()
     })()
     return finished
   }

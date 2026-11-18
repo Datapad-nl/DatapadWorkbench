@@ -1,4 +1,4 @@
-import { getAsr } from './whisper'
+import { ASR_OPTIONS, getAsr } from './whisper'
 
 type InMessage = { id: number; audio: Float32Array }
 type OutMessage = { id: number; text: string } | { id: number; error: string }
@@ -15,7 +15,7 @@ scope.onmessage = (event) => {
   chain = chain.then(async () => {
     try {
       const pipe = await getAsr()
-      const result = await pipe(audio)
+      const result = await pipe(audio, ASR_OPTIONS)
       scope.postMessage({ id, text: result.text ?? '' })
     } catch (error) {
       scope.postMessage({ id, error: error instanceof Error ? error.message : 'Speech recognition failed' })

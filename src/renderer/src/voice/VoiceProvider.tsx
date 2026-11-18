@@ -93,6 +93,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
   const pendingLevel = useRef({ heard: false, silentFor: 0 })
   const primedChats = useRef(new Set<string>())
   const clipBusy = useRef<object | null>(null)
+  /** Settles when the last clip in line has been handled. */
+  const clipLine = useRef<Promise<void>>(Promise.resolve())
   const listenLock = useRef<object | null>(null)
   /** Bumped by stopAll. Work that started under an older session drops its result. */
   const micSession = useRef(0)
@@ -189,6 +191,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     liveRef.current = false
     awaitingReply.current = false
     clipBusy.current = null
+    // Clips still in line belong to the old session and drop themselves. New ones need not wait for them.
+    clipLine.current = Promise.resolve()
     listenLock.current = null
     cancelAnimationFrame(levelFrame.current)
     levelFrame.current = 0
@@ -219,7 +223,17 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
 
   const handleClip = useCallback(async (clip: PcmClip, session: number, source?: Recorder) => {
     if (source && recorder.current === source) recorder.current = null
-    if (session !== micSession.current || clipBusy.current) return
+    // A clip that ends while an earlier one is still being handled waits its turn.
+    const earlier = clipLine.current
+    let done = (): void => undefined
+    clipLine.current = new Promise<void>((resolve) => {
+      done = resolve
+    })
+    await earlier
+    if (session !== micSession.current) {
+      done()
+      return
+    }
     const busy = {}
     clipBusy.current = busy
     const stale = (): boolean => session !== micSession.current
@@ -292,7 +306,16 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       setStatus('error')
     } finally {
       if (clipBusy.current === busy) clipBusy.current = null
-      if (liveRef.current && !stale()) void startListenRef.current({ preserveSpeech: true })
+      done()
+      if (liveRef.current && !stale()) {
+        // An open mic with nothing else going on shows as listening, as it did when the mic reopened.
+        // With no mic, startListen would skip a listening or transcribing status.
+        const current = statusRef.current
+        if (current === 'idle' || current === 'listening' || current === 'transcribing' || current === 'error') {
+          setStatus(recorder.current ? 'listening' : 'idle')
+        }
+        if (!recorder.current) void startListenRef.current({ preserveSpeech: true })
+      }
     }
   }, [sendMessage, setStatus])
 
@@ -319,6 +342,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     setError(null)
     // A mic that reopens during a reply keeps the reply's status.
     if (statusRef.current !== 'speaking' && statusRef.current !== 'waiting') setStatus('loading')
+    // A conversation keeps one mic open from clip to clip, so nothing said between two clips is lost.
+    const continuous = liveRef.current
     try {
       const rec: Recorder = await startRecorder({
         context: opts?.context,
@@ -334,8 +359,10 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
           })
         },
         idleStop: true,
+        continuous,
         onAutoStop: (clip) => {
-          void handleClip(clip, session, rec)
+          // A continuous recorder is still open after a clip, so it stays the current one.
+          void handleClip(clip, session, continuous ? undefined : rec)
         }
       })
       if (session !== micSession.current) {
