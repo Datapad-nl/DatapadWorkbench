@@ -568,11 +568,20 @@ describe('project secrets', () => {
     const [withSecrets, without] = fake.procs[0].calls.filter((call) => call.method === 'session/new')
     const options = (call: Call): Record<string, unknown> =>
       (call.params._meta as { claudeCode: { options: Record<string, unknown> } }).claudeCode.options
-    expect(options(withSecrets).env).toEqual({ STRIPE_KEY: 'sk_live_123' })
-    expect(options(without).env).toBeUndefined()
+    expect(options(withSecrets).env).toEqual({ STRIPE_KEY: 'sk_live_123', CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '0' })
+    expect(options(without).env).toEqual({ CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '0' })
     const prompt = (withSecrets.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text
     expect(prompt).toContain('STRIPE_KEY')
     expect(prompt).not.toContain('sk_live_123')
+  })
+
+  it("turns Claude Code's MCP idle limit off, whatever a secret of that name says", async () => {
+    fake.projects['chat-c'] = 'p1'
+    fake.secrets.p1 = { CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '300000' }
+    await newSession('/project', null, 'claude', 'chat-c')
+    const [call] = fake.procs[0].calls.filter((item) => item.method === 'session/new')
+    const options = (call.params._meta as { claudeCode: { options: { env: Record<string, string> } } }).claudeCode.options
+    expect(options.env.CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT).toBe('0')
   })
 
   it('moves a live chat to a process with the new secrets on its next turn, and stops the old one', async () => {

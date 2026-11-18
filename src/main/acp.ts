@@ -1197,7 +1197,12 @@ async function sessionConfig(
   )
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
   // Claude Code takes environment variables per session: the project's secrets, for its shell.
-  const env = { ...secrets, ...(subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } : {}) }
+  // Its MCP idle limit is off, last so no secret overrides it: `delegate`, `ask_bot` and `request_secret` wait as long as the work takes.
+  const env = {
+    ...secrets,
+    ...(subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } : {}),
+    CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '0'
+  }
   return {
     ...config,
     ...session,

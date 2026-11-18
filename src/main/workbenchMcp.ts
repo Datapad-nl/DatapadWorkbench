@@ -297,7 +297,20 @@ export async function handleMcp(
   })
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' })
   res.flushHeaders()
-  const keepalive = setInterval(() => res.write(': keepalive\n\n'), KEEPALIVE_MS)
+  // A comment keeps the socket open but is no message, so a client's idle timer runs on. Claude Code aborts
+  // a silent call after 300 s, so a call that asks for progress also gets a progress notification each tick.
+  const meta = params?._meta as { progressToken?: unknown } | undefined
+  const progressToken =
+    typeof meta?.progressToken === 'string' || typeof meta?.progressToken === 'number' ? meta.progressToken : undefined
+  let progress = 0
+  const keepalive = setInterval(() => {
+    if (abort.signal.aborted || res.writableEnded) return
+    res.write(': keepalive\n\n')
+    if (progressToken === undefined) return
+    progress += 1
+    const note = { jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken, progress } }
+    res.write(`event: message\ndata: ${JSON.stringify(note)}\n\n`)
+  }, KEEPALIVE_MS)
   try {
     const name = typeof params?.name === 'string' ? params.name : ''
     const args = params?.arguments && typeof params.arguments === 'object' ? (params.arguments as Args) : {}

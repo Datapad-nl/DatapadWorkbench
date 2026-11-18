@@ -192,6 +192,33 @@ describe('Workbench MCP over HTTP', () => {
     expect(await events(await delegating)).toHaveLength(1)
   })
 
+  it('sends progress with the keepalive of a call that asks for it, and the result last', async () => {
+    // Only the keepalive interval is faked: the socket and the delegate's polling run on real time.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      const call = (id: number, params: Record<string, unknown>): Promise<Response> =>
+        post('workbench', { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'delegate', arguments: { brief: 'p' }, ...params } })
+      const tracked = call(13, { _meta: { progressToken: 'tok-13' } })
+      const silent = call(14, {})
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      for (let tick = 0; tick < 3; tick++) vi.advanceTimersByTime(15_000)
+      fake.delegateDone = true
+
+      const messages = (await events(await tracked)) as Array<{ method?: string; params?: { progressToken: unknown; progress: number } }>
+      const notes = messages.slice(0, -1)
+      expect(notes).toHaveLength(3)
+      for (const note of notes) {
+        expect(note).toMatchObject({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: 'tok-13' } })
+      }
+      expect(notes.map((note) => note.params?.progress)).toEqual([1, 2, 3])
+      expect(messages.at(-1)).toMatchObject({ jsonrpc: '2.0', id: 13, result: { content: [{ type: 'text' }] } })
+
+      expect(await events(await silent)).toEqual([expect.objectContaining({ id: 14, result: expect.anything() })])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('refuses a batch', async () => {
     const res = await post('workbench', [{ jsonrpc: '2.0', id: 11, method: 'ping' }])
     expect(await res.json()).toMatchObject({ error: { code: -32600 } })
