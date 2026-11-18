@@ -16,13 +16,16 @@ import {
   clearBotAvatar,
   clearBotUnread,
   createBot,
+  ensureChiefBot,
   getBot,
   isBotFolder,
   listBots,
   listDefaultAvatars,
   readBotMemory,
+  readBotMemoryFile,
   readSharedMemory,
   removeBot,
+  saveBotHeartbeat,
   saveBotMemoryIndex,
   saveSharedMemoryIndex,
   setBotAvatar,
@@ -238,5 +241,97 @@ describe('bots', () => {
     const claude = await updateBot({ id: grok.id, agent: 'claude' })
     expect(botSessionRules(claude)).not.toContain('## Images')
     expect(botSessionRules(claude)).not.toContain('image_gen')
+  })
+
+  it('makes the chief of staff when there is none, on the given agent', async () => {
+    await createBot('Scout')
+    const { bot, created } = await ensureChiefBot('claude')
+    expect(created).toBe(true)
+    expect(bot).toMatchObject({ name: 'Chief of staff', agent: 'claude', instructions: '', chief: true })
+    expect(existsSync(bot.folder)).toBe(true)
+    expect(await ensureChiefBot('grok')).toEqual({ bot, created: false })
+    expect((await listBots()).filter((item) => item.chief)).toHaveLength(1)
+  })
+
+  it('lists the chief of staff first, then the other bots by name', async () => {
+    await createBot('Scout')
+    const { bot } = await ensureChiefBot('grok')
+    await createBot('Archie')
+    await updateBot({ id: bot.id, name: 'Zed' })
+    expect((await listBots()).map((item) => item.name)).toEqual(['Zed', 'Archie', 'Scout'])
+  })
+
+  it('keeps the oldest of several chiefs', async () => {
+    mkdirSync(join(stub.dir, 'workbench'), { recursive: true })
+    const bot = { agent: 'grok', model: '', effort: '', instructions: '', allowedTools: [], mcpServers: [], avatar: null }
+    writeFileSync(
+      join(stub.dir, 'workbench', 'bots.json'),
+      JSON.stringify({
+        bots: [
+          { ...bot, id: 'new', name: 'New', chief: true, createdAt: '2026-02-01T00:00:00.000Z', updatedAt: '' },
+          { ...bot, id: 'old', name: 'Old', chief: true, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '' }
+        ]
+      })
+    )
+    expect(await ensureChiefBot('grok')).toMatchObject({ bot: { id: 'old', chief: true }, created: false })
+    expect((await getBot('new')).chief).toBe(false)
+    expect((await listBots()).filter((item) => item.chief).map((item) => item.id)).toEqual(['old'])
+  })
+
+  it('refuses to delete the chief of staff', async () => {
+    const { bot } = await ensureChiefBot('grok')
+    await expect(removeBot(bot.id)).rejects.toThrow('The chief of staff cannot be deleted.')
+    expect(existsSync(bot.folder)).toBe(true)
+    expect((await getBot(bot.id)).chief).toBe(true)
+  })
+
+  it("keeps the chief's checklist in its memory folder", async () => {
+    const chief = await createBot('Chief')
+    expect(await readBotMemoryFile(chief.id, 'HEARTBEAT.md')).toBe('')
+    expect(await saveBotHeartbeat(chief.id, '- Inbox: anything from the bank?')).toBe('- Inbox: anything from the bank?')
+    expect(readFileSync(join(chief.folder, 'memory', 'HEARTBEAT.md'), 'utf8')).toBe('- Inbox: anything from the bank?')
+    expect((await readBotMemory(chief.id)).files).toContain('HEARTBEAT.md')
+    await expect(saveBotHeartbeat('nobody', 'x')).rejects.toThrow('Bot not found')
+  })
+
+  it('has a bot keep its open work in STATUS.md for the chief, by name', async () => {
+    const chief = { ...(await createBot('Chief')), chief: true }
+    const clerk = await updateBot({ id: (await createBot('Clerk')).id, instructions: 'Books invoices.' })
+    const rules = botSessionRules(clerk, '', '', [], [chief, clerk])
+    const status = join(clerk.folder, 'memory', 'STATUS.md')
+    expect(rules).toContain('No other bot reads it, except that Chief, the chief of staff, sees STATUS.md.')
+    expect(rules).toContain(`## Open work\nChief is the chief of staff. On its heartbeat it sees the file ${status}`)
+    expect(rules).toContain('Remove an item once it is done. Leave the file empty when nothing is open.')
+    expect(rules).toContain('also set a follow_up')
+    expect(rules).not.toContain('## Chief of staff')
+    expect(rules.indexOf('## Open work')).toBeGreaterThan(rules.indexOf('### Shared memory'))
+  })
+
+  it('tells the chief the other bots, how a heartbeat goes and where its checklist is', async () => {
+    const chief = { ...(await createBot('Chief')), chief: true }
+    const clerk = await updateBot({ id: (await createBot('Clerk')).id, instructions: '\nBooks invoices.\nAsks before paying.' })
+    const scout = await createBot('Scout')
+    const rules = botSessionRules(chief, '', '', [], [chief, clerk, scout])
+    expect(rules).toContain('## Chief of staff\n')
+    expect(rules).toContain('\n- Clerk: Books invoices.\n- Scout: (no instructions)\n')
+    expect(rules).not.toContain('- Chief:')
+    expect(rules).toContain('with the workbench tool ask_bot, in a message that stands on its own')
+    expect(rules).toContain("Do not do a specialist's work yourself.")
+    expect(rules).toContain('Do not hand out the same item again unless its status changed.')
+    expect(rules).toContain('Tell the user once, with notify, only when something needs them.')
+    expect(rules).toContain(`Your checklist is the file ${join(chief.folder, 'memory', 'HEARTBEAT.md')}.`)
+    expect(rules).toContain(`Your memory is the folder ${join(chief.folder, 'memory')}. No other bot reads it.`)
+    expect(rules).not.toContain('## Open work')
+    expect(botSessionRules(chief, '', '', [], [chief])).toContain('There are no other bots yet.')
+  })
+
+  it('leaves the chief out of the rules when there is none', async () => {
+    const clerk = await createBot('Clerk')
+    const scout = await createBot('Scout')
+    const rules = botSessionRules(clerk, '', '', [], [clerk, scout])
+    expect(rules).toBe(botSessionRules(clerk))
+    expect(rules).toContain('No other bot reads it. It holds')
+    expect(rules).not.toContain('STATUS.md')
+    expect(rules).not.toContain('chief')
   })
 })

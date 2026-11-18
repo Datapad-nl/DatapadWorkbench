@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Message } from '../shared/types'
-import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
+import { hasOpenItems, promptForBotAnswers, promptForBotRun, promptForBotsMentioned, promptForHeartbeat } from './botPrompt'
 
 const answer = (name: string, content: string): Message => ({
   id: name,
@@ -42,5 +42,49 @@ describe('bot prompts', () => {
     expect(scheduled.startsWith('/check-inbox\n\nThis is a scheduled run. It starts in a fresh session')).toBe(true)
     expect(scheduled).toContain('unless you call the workbench tool notify')
     expect(promptForBotRun('Follow-up: deploy?', { kind: 'followUp' })).toContain('the follow-up you set earlier')
+  })
+
+  it('finds no open item in an empty file, headings, comments or empty list items', () => {
+    expect(hasOpenItems('')).toBe(false)
+    expect(hasOpenItems('  \n\n\t')).toBe(false)
+    expect(hasOpenItems('# Status\n\n## Waiting on\n')).toBe(false)
+    expect(hasOpenItems('<!-- what is open goes here -->\n<!--\n- not this\n-->')).toBe(false)
+    expect(hasOpenItems('## Open\n-\n*\n- [ ]\n- [x]\n+')).toBe(false)
+    expect(hasOpenItems('<!-- an unclosed comment\n- still a comment')).toBe(false)
+  })
+
+  it('finds an open item', () => {
+    expect(hasOpenItems('# Status\n- Waiting on the bank until Friday')).toBe(true)
+    expect(hasOpenItems('- [ ] Send the invoice')).toBe(true)
+    expect(hasOpenItems('Check the deploy at 14:00')).toBe(true)
+    expect(hasOpenItems('<!-- note --> Reply to Anna')).toBe(true)
+  })
+
+  it('gives the chief the time, its checklist and the open work of each bot that has any', () => {
+    const now = new Date(2026, 10, 18, 9, 30)
+    const prompt = promptForHeartbeat({
+      now,
+      checklist: '- Inbox: anything from the bank?',
+      work: [
+        { name: 'Accountant', status: '- Book the March invoices by Friday' },
+        { name: 'Scout', status: '# Status\n' },
+        { name: 'Writer', status: 'w'.repeat(3000) }
+      ]
+    })
+    expect(prompt.startsWith(`Heartbeat. It is ${now.toString()}.`)).toBe(true)
+    expect(prompt).toContain('## Your checklist\n\n- Inbox: anything from the bank?')
+    expect(prompt).toContain('### Accountant\n\n- Book the March invoices by Friday')
+    expect(prompt).not.toContain('### Scout')
+    expect(prompt).toContain(`### Writer\n\n${'w'.repeat(2000)}…`)
+    expect(prompt).not.toContain('w'.repeat(2001))
+    expect(prompt).toContain('hand it to the bot it belongs to with the workbench tool ask_bot')
+    expect(prompt).toContain('Leave what is not due yet.')
+    expect(prompt).toContain('call notify once if the user needs to know or act on something')
+  })
+
+  it('says so when the checklist or the work is empty', () => {
+    const prompt = promptForHeartbeat({ now: new Date(), checklist: '# Checklist\n', work: [] })
+    expect(prompt).toContain('## Your checklist\n\n(empty)')
+    expect(prompt).toContain('## Open work of the bots\n\nNo bot has open work.')
   })
 })

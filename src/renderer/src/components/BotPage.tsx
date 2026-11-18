@@ -14,6 +14,7 @@ import {
 } from '../../../shared/types'
 import { BOT_TOOLS, WORKBENCH_MCP_SERVERS, mcpServerTool, toolsForAgent } from '../../../shared/botTools'
 import { BotAvatar, useBots } from '../bots'
+import { BotChief } from './BotChief'
 import { BotDocuments } from './BotDocuments'
 import { BotMemory } from './BotMemory'
 import { BotSchedules } from './BotSchedules'
@@ -481,6 +482,8 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
 
           <BotSkills bot={bot} />
 
+          {bot.chief && <BotChief bot={bot} />}
+
           <BotSchedules bot={bot} />
 
           <div className="rounded-lg border border-line bg-canvas px-3 py-2.5">
@@ -506,28 +509,32 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
           {error && <div className="text-[12px] text-danger">{error}</div>}
 
           <div className="flex items-center gap-2">
-            <button
-              className="rounded-md px-2.5 py-1.5 text-[12px] text-muted hover:text-danger disabled:opacity-50"
-              disabled={busy}
-              onClick={() => {
-                if (
-                  !confirm(
-                    `Delete ${bot.name}?\n\nIts chats and schedules are deleted, and its folder, with its skills and avatar, goes to the Trash.`
+            {bot.chief ? (
+              <span className="text-[11px] text-faint">The chief of staff cannot be deleted.</span>
+            ) : (
+              <button
+                className="rounded-md px-2.5 py-1.5 text-[12px] text-muted hover:text-danger disabled:opacity-50"
+                disabled={busy}
+                onClick={() => {
+                  if (
+                    !confirm(
+                      `Delete ${bot.name}?\n\nIts chats and schedules are deleted, and its folder, with its skills and avatar, goes to the Trash.`
+                    )
                   )
-                )
-                  return
-                void run(async () => {
-                  // Its own chat may not be in the list yet if it was made since the last refresh.
-                  const ids = new Set(chats.filter((item) => item.botId === bot.id).map((item) => item.id))
-                  if (bot.chatId) ids.add(bot.chatId)
-                  for (const id of ids) await deleteChat(id)
-                  await deleteBot(bot.id)
-                  openBot(null)
-                }, 'Could not delete the bot')
-              }}
-            >
-              Delete bot
-            </button>
+                    return
+                  void run(async () => {
+                    // Its own chat may not be in the list yet if it was made since the last refresh.
+                    const ids = new Set(chats.filter((item) => item.botId === bot.id).map((item) => item.id))
+                    if (bot.chatId) ids.add(bot.chatId)
+                    for (const id of ids) await deleteChat(id)
+                    await deleteBot(bot.id)
+                    openBot(null)
+                  }, 'Could not delete the bot')
+                }}
+              >
+                Delete bot
+              </button>
+            )}
             <div className="flex-1" />
             {dirty && (
               <button

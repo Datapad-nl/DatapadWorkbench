@@ -31,6 +31,8 @@ export function BotSchedules({ bot }: { bot: Bot }): React.JSX.Element {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // The heartbeat's cron while it is edited.
+  const [beat, setBeat] = useState<{ chatId: string; cron: string } | null>(null)
   const scheduled = chats.filter((chat) => chat.botId === bot.id && chat.schedule)
   const followUps = chats.filter((chat) => chat.botId === bot.id && chat.wake)
 
@@ -184,6 +186,7 @@ export function BotSchedules({ bot }: { bot: Bot }): React.JSX.Element {
 
       {scheduled.map((chat) => {
         const schedule = chat.schedule!
+        const editingBeat = schedule.heartbeat && beat?.chatId === chat.id ? beat : null
         return (
           <div
             key={chat.id}
@@ -191,30 +194,91 @@ export function BotSchedules({ bot }: { bot: Bot }): React.JSX.Element {
             className="flex items-start gap-3 rounded-lg border border-line bg-canvas px-3 py-2"
           >
             <div className="min-w-0 flex-1">
-              <div className="line-clamp-2 text-[12.5px] text-ink">{schedule.prompt}</div>
-              <div className="mt-0.5 text-[11.5px] text-muted">
-                {schedule.cron ? <span className="font-mono">{schedule.cron}</span> : 'Once'}
-                {schedule.nextRunAt && ` · next ${new Date(schedule.nextRunAt).toLocaleString()}`}
-                {schedule.lastRunAt && ` · last ${new Date(schedule.lastRunAt).toLocaleString()}`}
-              </div>
+              {schedule.heartbeat ? (
+                <>
+                  <div className="text-[12.5px] text-ink">Heartbeat</div>
+                  <div className="text-[11.5px] text-muted">
+                    Checks the checklist and the other bots&apos; open work, and hands out what is due.
+                  </div>
+                </>
+              ) : (
+                <div className="line-clamp-2 text-[12.5px] text-ink">{schedule.prompt}</div>
+              )}
+              {editingBeat ? (
+                <div className="mt-1.5 flex flex-col gap-1.5">
+                  <input
+                    data-testid="bot-heartbeat-cron"
+                    value={editingBeat.cron}
+                    onChange={(event) => setBeat({ chatId: chat.id, cron: event.target.value })}
+                    className={`${field} font-mono text-[12px]`}
+                  />
+                  <span className="text-[11px] text-faint">{cronPreview(editingBeat.cron)}</span>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1" />
+                    <button
+                      className="rounded-md px-2.5 py-1 text-[12px] text-muted hover:text-ink"
+                      disabled={busy}
+                      onClick={() => {
+                        setBeat(null)
+                        setError(null)
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      data-testid="bot-heartbeat-save"
+                      className="rounded-md bg-accent px-3 py-1 text-[12px] font-medium text-accent-ink disabled:opacity-50"
+                      disabled={busy || !editingBeat.cron.trim()}
+                      onClick={() =>
+                        void run(
+                          () => window.workbench.setHeartbeatCron(chat.id, editingBeat.cron),
+                          'Could not save the heartbeat'
+                        ).then((ok) => ok && setBeat(null))
+                      }
+                    >
+                      Save
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-0.5 text-[11.5px] text-muted">
+                  {schedule.cron ? <span className="font-mono">{schedule.cron}</span> : 'Once'}
+                  {schedule.nextRunAt && ` · next ${new Date(schedule.nextRunAt).toLocaleString()}`}
+                  {schedule.lastRunAt && ` · last ${new Date(schedule.lastRunAt).toLocaleString()}`}
+                </div>
+              )}
             </div>
+            {schedule.heartbeat && !editingBeat && (
+              <button
+                data-testid="bot-heartbeat-edit"
+                className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-2 hover:border-line-strong hover:text-ink"
+                onClick={() => {
+                  setError(null)
+                  setBeat({ chatId: chat.id, cron: schedule.cron ?? '' })
+                }}
+              >
+                Edit
+              </button>
+            )}
             <button
               className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11.5px] text-ink-2 hover:border-line-strong hover:text-ink"
               onClick={() => void openChat(chat.id)}
             >
               Open chat
             </button>
-            <button
-              data-testid="bot-schedule-stop"
-              className="shrink-0 rounded-md px-2 py-0.5 text-[11.5px] text-muted hover:text-danger disabled:opacity-50"
-              disabled={busy}
-              onClick={() => {
-                if (!confirm('Stop this schedule? Its chat stays.')) return
-                void run(() => window.workbench.stopSchedule(chat.id), 'Could not stop the schedule')
-              }}
-            >
-              Stop
-            </button>
+            {!schedule.heartbeat && (
+              <button
+                data-testid="bot-schedule-stop"
+                className="shrink-0 rounded-md px-2 py-0.5 text-[11.5px] text-muted hover:text-danger disabled:opacity-50"
+                disabled={busy}
+                onClick={() => {
+                  if (!confirm('Stop this schedule? Its chat stays.')) return
+                  void run(() => window.workbench.stopSchedule(chat.id), 'Could not stop the schedule')
+                }}
+              >
+                Stop
+              </button>
+            )}
           </div>
         )
       })}

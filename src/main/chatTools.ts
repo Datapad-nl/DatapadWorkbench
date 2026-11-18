@@ -4,6 +4,7 @@ import type {
   Chat,
   ChatAgent,
   ChatEvent,
+  ChatSchedule,
   ChatSummary,
   ChatWake,
   FileMention,
@@ -18,13 +19,25 @@ import { nextCronRun } from "../shared/cron";
 import { handoffOpening } from "../shared/handoff";
 import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
-import { addBotUnread, clearBotUnread, getBot, listBots, setBotChat } from "./bots";
+import {
+  HEARTBEAT_FILE,
+  STATUS_FILE,
+  addBotUnread,
+  clearBotUnread,
+  ensureChiefBot,
+  getBot,
+  listBots,
+  readBotMemoryFile,
+  setBotChat,
+} from "./bots";
+import { hasOpenItems, promptForHeartbeat } from "./botPrompt";
 import { endBotRun, startBotRun } from "./botRuns";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { id, now } from "./ids";
 import {
   createChat,
   getChat,
+  getDefaultAgent,
   getMaxSubagents,
   getSubagentModel,
   listChats,
@@ -835,6 +848,65 @@ export async function scheduleTask(input: {
   };
 }
 
+/** Every 30 minutes from 08:00 to 18:59, local time. */
+const HEARTBEAT_CRON = "*/30 8-18 * * *";
+
+/** The chief of staff's heartbeat, a schedule in a chat of its own. Its prompt is made at each run. */
+async function scheduleHeartbeat(bot: Bot): Promise<void> {
+  const next = firstRun(HEARTBEAT_CRON, undefined);
+  const chat = await createChat("", { botId: bot.id, title: "Heartbeat", agent: bot.agent });
+  const saved = await mutateChat(chat.id, (latest) => {
+    latest.schedule = { prompt: "", cron: HEARTBEAT_CRON, nextRunAt: next.toISOString(), heartbeat: true };
+  });
+  emitChat(saved);
+}
+
+/**
+ * At start, before the first check: the built-in chief of staff is there. A new one starts with its heartbeat
+ * on; a later start leaves the heartbeat as the user set it.
+ */
+export async function ensureChief(): Promise<void> {
+  const { bot, created } = await ensureChiefBot(await getDefaultAgent());
+  if (!created) return;
+  emit?.({ type: "bot", bot });
+  await scheduleHeartbeat(bot);
+}
+
+/** The chief's Heartbeat setting: off stops its heartbeat, and its chat stays; on makes one when there is none. */
+export async function setHeartbeat(botId: string, on: boolean): Promise<void> {
+  const bot = await getBot(botId);
+  if (!bot.chief) throw new Error("Only the chief of staff has a heartbeat.");
+  const beats = (await listChats()).filter((chat) => chat.botId === bot.id && chat.schedule?.heartbeat);
+  if (on && beats.length === 0) await scheduleHeartbeat(bot);
+  if (!on) for (const chat of beats) await stopSchedule(chat.id);
+}
+
+/** A new cron for the heartbeat, from the bot's page. */
+export async function setHeartbeatCron(chatId: string, cron: string): Promise<Chat> {
+  const text = cron.trim();
+  if (!text) throw new Error("Write when the heartbeat runs.");
+  const next = firstRun(text, undefined);
+  const chat = await mutateChat(chatId, (latest) => {
+    if (!latest.schedule?.heartbeat) throw new Error("This chat has no heartbeat.");
+    latest.schedule = { ...latest.schedule, cron: text, nextRunAt: next.toISOString() };
+  });
+  emitChat(chat);
+  return chat;
+}
+
+/** The heartbeat's prompt, or null when neither the checklist nor any other bot has an open item. */
+async function heartbeatPrompt(chief: Bot, now: Date): Promise<string | null> {
+  const checklist = await readBotMemoryFile(chief.id, HEARTBEAT_FILE);
+  const work: Array<{ name: string; status: string }> = [];
+  for (const bot of await listBots()) {
+    if (bot.id === chief.id) continue;
+    const status = await readBotMemoryFile(bot.id, STATUS_FILE);
+    if (hasOpenItems(status)) work.push({ name: bot.name, status });
+  }
+  if (!hasOpenItems(checklist) && work.length === 0) return null;
+  return promptForHeartbeat({ now, checklist, work });
+}
+
 export async function stopSchedule(chatId: string): Promise<Chat> {
   const chat = await mutateChat(chatId, (next) => {
     next.schedule = null;
@@ -1000,6 +1072,21 @@ async function runSchedule(summary: ChatSummary, now: Date): Promise<void> {
   const botId = bot && bot.chatId !== summary.id ? bot.id : null;
   // The user may have started a turn here meanwhile: try again on the next check.
   if (chatRunning(summary.id)) return;
+  let prompt = schedule.prompt;
+  if (schedule.heartbeat) {
+    // Only the chief has a heartbeat.
+    if (!bot?.chief) {
+      await stopSchedule(summary.id).catch(() => null);
+      return;
+    }
+    const built = await heartbeatPrompt(bot, now);
+    // Nothing is open: no turn, and the schedule moves on.
+    if (!built) {
+      await moveScheduleOn(summary.id, schedule, next, now);
+      return;
+    }
+    prompt = built;
+  }
   const startedAt = now.toISOString();
   let leftSession: string | null = null;
   const marked = await mutateChat(summary.id, (latest) => {
@@ -1016,7 +1103,7 @@ async function runSchedule(summary: ChatSummary, now: Date): Promise<void> {
   const botRun = botId ? startBotRun(summary.id, { botId, kind: "schedule" }) : null;
   let run: { done: Promise<Chat | null> };
   try {
-    run = await send(summary.id, schedule.prompt);
+    run = await send(summary.id, prompt);
   } catch {
     if (botRun) endBotRun(summary.id, botRun);
     await finishUnattended(summary.id, startedAt);
@@ -1035,7 +1122,17 @@ async function runSchedule(summary: ChatSummary, now: Date): Promise<void> {
   )
     .catch(() => {})
     .finally(() => void finishUnattended(summary.id, startedAt));
-  const chat = await mutateChat(summary.id, (latest) => {
+  await moveScheduleOn(summary.id, schedule, next, now);
+}
+
+/** The run is done or skipped: the schedule moves on to `next`, or ends when there is none. */
+async function moveScheduleOn(
+  chatId: string,
+  schedule: ChatSchedule,
+  next: string | null,
+  now: Date,
+): Promise<void> {
+  const chat = await mutateChat(chatId, (latest) => {
     // Changed or cancelled while the run started: leave the user's schedule alone.
     if (latest.schedule?.nextRunAt !== schedule.nextRunAt) return;
     latest.schedule = next

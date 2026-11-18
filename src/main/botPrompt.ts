@@ -35,6 +35,36 @@ export function promptForBotRun(text: string, run: { kind: 'schedule' | 'followU
   )
 }
 
+/**
+ * Whether a checklist or a bot's STATUS.md holds an open item: anything besides whitespace, Markdown headings,
+ * HTML comments and empty list items such as `-` or `- [ ]`.
+ */
+export function hasOpenItems(text: string): boolean {
+  return text
+    .replace(/<!--[\s\S]*?(-->|$)/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .some((line) => line !== '' && !/^#{1,6}(\s|$)/.test(line) && !/^[-*+](\s*\[[ xX]?\])?$/.test(line))
+}
+
+/** The chief of staff's heartbeat: the time, its checklist and each bot's open work, and what to do with them. */
+export function promptForHeartbeat(input: {
+  now: Date
+  checklist: string
+  work: Array<{ name: string; status: string }>
+}): string {
+  const checklist = hasOpenItems(input.checklist) ? clip(input.checklist, 4000) : '(empty)'
+  const open = input.work.filter((bot) => hasOpenItems(bot.status))
+  const work =
+    open.length > 0 ? open.map((bot) => `### ${bot.name}\n\n${clip(bot.status, 2000)}`).join('\n\n') : 'No bot has open work.'
+  return [
+    `Heartbeat. It is ${input.now.toString()}.`,
+    `## Your checklist\n\n${checklist}`,
+    `## Open work of the bots\n\n${work}`,
+    'For each item that is due now, hand it to the bot it belongs to with the workbench tool ask_bot, in a message that stands on its own. Leave what is not due yet. Then call notify once if the user needs to know or act on something; otherwise finish without it.'
+  ].join('\n\n')
+}
+
 export function promptForBotAnswers(text: string, answers: Message[]): string {
   if (answers.length === 0) return text
   const body = answers

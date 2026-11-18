@@ -6,19 +6,36 @@ const stub = vi.hoisted(() => ({
   subagentModel: '',
   maxSubagents: 4,
   handoffs: [] as string[],
-  scout: { chatId: null as string | null, unread: 0 }
+  scout: { chatId: null as string | null, unread: 0 },
+  chief: null as string | null,
+  /** The agent the last new chief was made on. */
+  chiefAgent: '',
+  /** Files of the bots' memory folders, by `<botId>/<name>`. */
+  memory: {} as Record<string, string>
 }))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
 vi.mock('./bots', () => {
   const getBot = async (botId: string) => {
+    const chief = stub.chief === botId
     if (botId === 'accountant') {
-      return { id: 'accountant', name: 'Accountant', agent: 'grok', model: '', folder: '/bots/accountant', chatId: null, unread: 0 }
+      return { id: 'accountant', name: 'Accountant', agent: 'grok', model: '', folder: '/bots/accountant', chatId: null, unread: 0, chief }
     }
     if (botId !== 'scout') throw new Error('Bot not found')
-    return { id: 'scout', name: 'Scout', agent: 'claude', model: '', folder: '/bots/scout', ...stub.scout }
+    return { id: 'scout', name: 'Scout', agent: 'claude', model: '', folder: '/bots/scout', ...stub.scout, chief }
   }
   return {
+    HEARTBEAT_FILE: 'HEARTBEAT.md',
+    STATUS_FILE: 'STATUS.md',
+    readBotMemoryFile: async (botId: string, name: string) => stub.memory[`${botId}/${name}`] ?? '',
     getBot,
+    ensureChiefBot: async (agent: string) => {
+      const created = stub.chief === null
+      if (created) {
+        stub.chief = 'scout'
+        stub.chiefAgent = agent
+      }
+      return { bot: await getBot(stub.chief!), created }
+    },
     listBots: async () => [await getBot('scout'), await getBot('accountant')],
     setBotChat: async (botId: string, chatId: string) => {
       stub.scout.chatId = chatId
@@ -36,6 +53,7 @@ vi.mock('./bots', () => {
 })
 vi.mock('./store', () => ({
   createChat: vi.fn(),
+  getDefaultAgent: async () => 'grok',
   getChat: async (chatId: string) => {
     const chat = stub.chats.get(chatId)
     if (!chat) throw new Error('Chat not found')
@@ -62,6 +80,7 @@ import {
   askBotFromChat,
   botChat,
   delegateTask,
+  ensureChief,
   handoffChat,
   markBotRead,
   newBotChat,
@@ -70,6 +89,8 @@ import {
   registerChatTools,
   scheduleBotTask,
   setFollowUp,
+  setHeartbeat,
+  setHeartbeatCron,
   startScheduler,
   waitForDelegate
 } from './chatTools'
@@ -775,5 +796,118 @@ describe("the bot's chat", () => {
     }
     expect(notified).toHaveLength(1)
     expect(stub.chats.get(stub.scout.chatId!)!.messages.at(-1)?.fromBot).toMatchObject({ runChatId: 'run' })
+  })
+
+  describe('the heartbeat', () => {
+    afterEach(() => {
+      stub.chief = null
+      stub.memory = {}
+    })
+
+    function beat(nextRunAt: string): void {
+      stub.chats.set('beat', {
+        id: 'beat',
+        projectId: '',
+        botId: 'scout',
+        title: 'Heartbeat',
+        grokSessionId: 'old-beat',
+        messages: [],
+        schedule: { prompt: '', cron: '*/30 * * * *', nextRunAt, heartbeat: true }
+      } as unknown as Chat)
+    }
+
+    it('makes no turn while nothing is open, and hands the open work to the chief once there is', async () => {
+      botChats()
+      vi.useFakeTimers()
+      stub.chief = 'scout'
+      // The chief's own STATUS.md is not open work for it.
+      stub.memory = { 'scout/HEARTBEAT.md': '# Checklist\n- [ ]\n', 'scout/STATUS.md': '- my own work' }
+      const due = new Date(Date.now() - 60_000).toISOString()
+      beat(due)
+      const sent: Array<[string, string, string | null | undefined, unknown]> = []
+      const { tools } = await freshTools(async (chatId, content) => {
+        const chat = stub.chats.get(chatId)!
+        sent.push([chatId, content, chat.grokSessionId, chat.unattended?.kind])
+        return { chat, done: Promise.resolve(structuredClone(chat)) }
+      })
+
+      tools.startScheduler()
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      expect(sent).toEqual([])
+      const skipped = stub.chats.get('beat')!.schedule!
+      expect(Date.parse(skipped.nextRunAt!)).toBeGreaterThan(Date.now())
+      expect(skipped.lastRunAt).toBeDefined()
+      expect(skipped.heartbeat).toBe(true)
+      expect(stub.chats.get('beat')!.unattended).toBeUndefined()
+
+      stub.memory['accountant/STATUS.md'] = '- Book the March invoices by Friday'
+      stub.chats.get('beat')!.schedule!.nextRunAt = due
+      await vi.advanceTimersByTimeAsync(30_000)
+
+      expect(sent).toHaveLength(1)
+      const [chatId, prompt, session, kind] = sent[0]
+      expect([chatId, session, kind]).toEqual(['beat', null, 'schedule'])
+      expect(prompt).toContain('## Your checklist\n\n(empty)')
+      expect(prompt).toContain('### Accountant\n\n- Book the March invoices by Friday')
+      expect(prompt).not.toContain('my own work')
+      expect(Date.parse(stub.chats.get('beat')!.schedule!.nextRunAt!)).toBeGreaterThan(Date.now())
+    })
+
+    it('stops the heartbeat of a bot that is no longer chief', async () => {
+      botChats()
+      vi.useFakeTimers()
+      stub.chief = 'accountant'
+      stub.memory = { 'accountant/STATUS.md': '- something open' }
+      beat(new Date(Date.now() - 60_000).toISOString())
+      const sent: string[] = []
+      const { tools } = await freshTools(async (chatId) => {
+        sent.push(chatId)
+        return { chat: stub.chats.get(chatId)!, done: Promise.resolve(null) }
+      })
+
+      tools.startScheduler()
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      expect(sent).toEqual([])
+      expect(stub.chats.get('beat')!.schedule).toBeNull()
+    })
+
+    it('makes the chief with its heartbeat on, and leaves the heartbeat alone at later starts', async () => {
+      const events = botChats()
+      await ensureChief()
+      expect(stub.chiefAgent).toBe('grok')
+      expect(vi.mocked(createChat).mock.calls).toEqual([['', { botId: 'scout', title: 'Heartbeat', agent: 'claude' }]])
+      const chat = [...stub.chats.values()].find((item) => item.schedule?.heartbeat)!
+      expect(chat.schedule).toMatchObject({ prompt: '', cron: '*/30 8-18 * * *', heartbeat: true })
+      expect(Date.parse(chat.schedule!.nextRunAt!)).toBeGreaterThan(Date.now())
+      expect(events.filter((event) => event.type === 'bot')).toHaveLength(1)
+
+      // The user deleted the Heartbeat chat: the next start does not bring it back.
+      stub.chats.delete(chat.id)
+      await ensureChief()
+      expect(vi.mocked(createChat)).toHaveBeenCalledTimes(1)
+    })
+
+    it('turns the heartbeat off by stopping it, and on by making one when there is none', async () => {
+      botChats()
+      stub.chief = 'scout'
+      await setHeartbeat('scout', true)
+      await setHeartbeat('scout', true)
+      expect(vi.mocked(createChat)).toHaveBeenCalledTimes(1)
+      const chat = [...stub.chats.values()].find((item) => item.schedule?.heartbeat)!
+
+      const changed = await setHeartbeatCron(chat.id, '0 9 * * 1-5')
+      expect(changed.schedule).toMatchObject({ cron: '0 9 * * 1-5', heartbeat: true })
+      await expect(setHeartbeatCron(chat.id, 'nonsense')).rejects.toThrow()
+
+      await setHeartbeat('scout', false)
+      expect(stub.chats.get(chat.id)).toMatchObject({ title: 'Heartbeat', schedule: null })
+      await setHeartbeat('scout', true)
+      expect(vi.mocked(createChat)).toHaveBeenCalledTimes(2)
+      expect([...stub.chats.values()].find((item) => item.schedule?.heartbeat)?.schedule?.cron).toBe('*/30 8-18 * * *')
+
+      await expect(setHeartbeat('accountant', true)).rejects.toThrow('Only the chief of staff has a heartbeat.')
+    })
   })
 })

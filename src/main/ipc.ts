@@ -36,10 +36,13 @@ import {
   listDefaultAvatars,
   createBot,
   getBot,
+  HEARTBEAT_FILE,
   listBots,
   readBotMemory,
+  readBotMemoryFile,
   readSharedMemory,
   removeBot,
+  saveBotHeartbeat,
   saveBotMemoryIndex,
   saveSharedMemoryIndex,
   setBotAvatar,
@@ -140,6 +143,8 @@ import {
   newBotChat,
   registerChatTools,
   scheduleBotTask,
+  setHeartbeat,
+  setHeartbeatCron,
   stopSchedule
 } from './chatTools'
 import { isBotRun } from './botRuns'
@@ -458,6 +463,10 @@ export function registerIpc(): void {
     const bot = await updateBot(input)
     await applyBotToLiveSessions(bot.id)
     if (before && before.mcpServers.join('\n') !== bot.mcpServers.join('\n')) await reloadBotSessions(bot.id)
+    // Every other bot's rules name the chief, so their live chats load their session again.
+    if (bot.chief && before && before.name !== bot.name) {
+      for (const item of await listBots()) if (item.id !== bot.id) await reloadBotSessions(item.id)
+    }
     return bot
   })
   ipcMain.handle('bot:delete', async (_event, botId: string) => {
@@ -503,6 +512,14 @@ export function registerIpc(): void {
   ipcMain.handle('bot:memory', (_event, botId: string) => readBotMemory(String(botId)))
   ipcMain.handle('bot:saveMemory', (_event, botId: string, index: string) =>
     saveBotMemoryIndex(String(botId), String(index ?? ''))
+  )
+  ipcMain.handle('bot:heartbeat', (_event, botId: string) => readBotMemoryFile(String(botId), HEARTBEAT_FILE))
+  ipcMain.handle('bot:saveHeartbeat', (_event, botId: string, text: string) =>
+    saveBotHeartbeat(String(botId), String(text ?? ''))
+  )
+  ipcMain.handle('bot:setHeartbeat', (_event, botId: string, on: boolean) => setHeartbeat(String(botId), on === true))
+  ipcMain.handle('bot:heartbeatCron', (_event, chatId: string, cron: string) =>
+    setHeartbeatCron(String(chatId), String(cron ?? ''))
   )
   ipcMain.handle('bot:documents', (_event, botId: string) => listBotDocuments(String(botId)))
   ipcMain.handle('bot:pickDocuments', async (_event, botId: string) => {

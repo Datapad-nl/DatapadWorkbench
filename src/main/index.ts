@@ -20,7 +20,7 @@ import {
 } from './worktreeProcs'
 import { openBotFromTray, openFromNotice, registerIpc } from './ipc'
 import { hasRunningTurns, stopAllTurnsAndWait } from './grok'
-import { startScheduler } from './chatTools'
+import { ensureChief, startScheduler } from './chatTools'
 import { openedAtLogin, startTray } from './tray'
 import { startPrWatcher } from './pullRequests'
 import {
@@ -206,6 +206,8 @@ app.whenReady().then(async () => {
   // The app still opens if the browser tools' server can't start. The next chat to start tries again.
   await startBrowserAgentServer().catch((error) => console.error('Browser agent server did not start', error))
   registerIpc()
+  // The app still opens if the chief of staff cannot be made. The next start tries again.
+  await ensureChief().catch((error) => console.error('Chief of staff not ready', error))
   startScheduler()
   startPrWatcher()
   killOrphanCodegraphInits()

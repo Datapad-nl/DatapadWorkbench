@@ -237,6 +237,8 @@ async function botAllowsTool(sessionId: string, params: PermissionParams): Promi
   const bot = await chatBot(chatIdForSession(sessionId) ?? undefined).catch(() => null)
   if (!bot) return false
   if (name && (BOT_RUN_TOOL_NAMES.has(name) || isToolAllowed(bot.allowedTools, name))) return true
+  // The chief of staff hands out work on its unattended heartbeat. ask_bot itself refuses outside a bot's own chats.
+  if (bot.chief && name === 'mcp__workbench__ask_bot') return true
   // An MCP tool may send what it reads elsewhere, so only the agent's own file tools count.
   if (name?.startsWith('mcp__')) return false
   const kind = (tool?.kind ?? '').toLowerCase()

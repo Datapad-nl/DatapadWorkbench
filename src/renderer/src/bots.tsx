@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { compareBots } from '../../shared/botOrder'
 import { resolveProjectColor } from '../../shared/projectColor'
 import type { Bot, Chat, UpdateBotInput } from '../../shared/types'
 
@@ -28,7 +29,7 @@ export function BotsProvider({ children }: { children: ReactNode }): React.JSX.E
       const next = current.some((item) => item.id === bot.id)
         ? current.map((item) => (item.id === bot.id ? bot : item))
         : [...current, bot]
-      return next.sort((a, b) => a.name.localeCompare(b.name))
+      return next.sort(compareBots)
     })
   }, [])
 
@@ -181,8 +182,33 @@ function initials(name: string): string {
   return (words[0][0] + words[1][0]).toUpperCase()
 }
 
-/** A round avatar. The image is an `<img>`, so an SVG's scripts never run while its animation plays. */
+/**
+ * A round avatar. The image is an `<img>`, so an SVG's scripts never run while its animation plays. The chief of
+ * staff has a star on it, inside the avatar's own size.
+ */
 export function BotAvatar({ bot, size }: { bot: Bot; size: number }): React.JSX.Element {
+  if (!bot.chief) return <AvatarFace bot={bot} size={size} />
+  const star = Math.max(7, Math.round(size * 0.42))
+  return (
+    <span className="relative flex shrink-0" style={{ width: size, height: size }}>
+      <AvatarFace bot={bot} size={size} />
+      <svg
+        data-testid="bot-chief-star"
+        className="absolute -right-px -bottom-px fill-accent stroke-canvas"
+        width={star}
+        height={star}
+        viewBox="0 0 24 24"
+        strokeWidth={2.5}
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z" />
+      </svg>
+    </span>
+  )
+}
+
+function AvatarFace({ bot, size }: { bot: Bot; size: number }): React.JSX.Element {
   const url = useBotAvatar(bot)
   if (url) {
     return (

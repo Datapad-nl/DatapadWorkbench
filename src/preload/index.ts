@@ -75,6 +75,10 @@ const api = {
   /** The bot's memory folder: its MEMORY.md index and the other files in it. */
   getBotMemory: (botId: string): Promise<BotMemory> => ipcRenderer.invoke('bot:memory', botId),
   saveBotMemory: (botId: string, index: string): Promise<BotMemory> => ipcRenderer.invoke('bot:saveMemory', botId, index),
+  /** The chief of staff's checklist, HEARTBEAT.md in its memory folder. */
+  getBotHeartbeat: (botId: string): Promise<string> => ipcRenderer.invoke('bot:heartbeat', botId),
+  saveBotHeartbeat: (botId: string, text: string): Promise<string> =>
+    ipcRenderer.invoke('bot:saveHeartbeat', botId, text),
   /** The memory folder every bot reads, in the same shape as a bot's own. */
   getSharedMemory: (): Promise<BotMemory> => ipcRenderer.invoke('memory:shared'),
   saveSharedMemory: (index: string): Promise<BotMemory> => ipcRenderer.invoke('memory:saveShared', index),
@@ -100,6 +104,9 @@ const api = {
   /** `cron` repeats; `at` (an ISO time) runs once. */
   scheduleBot: (input: { botId: string; prompt: string; cron?: string; at?: string }): Promise<Chat> =>
     ipcRenderer.invoke('bot:schedule', input),
+  /** The chief's heartbeat: off stops it, on makes one when there is none. */
+  setHeartbeat: (botId: string, on: boolean): Promise<void> => ipcRenderer.invoke('bot:setHeartbeat', botId, on),
+  setHeartbeatCron: (chatId: string, cron: string): Promise<Chat> => ipcRenderer.invoke('bot:heartbeatCron', chatId, cron),
   createChat: (projectId: string) => ipcRenderer.invoke('chat:create', projectId),
   getChat: (chatId: string) => ipcRenderer.invoke('chat:get', chatId),
   searchChats: (query: string): Promise<string[]> => ipcRenderer.invoke('chat:search', query),

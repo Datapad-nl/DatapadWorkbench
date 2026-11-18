@@ -7,9 +7,11 @@ import {
   type Bot,
   type BotDocument,
   type BotMemory,
+  type ChatAgent,
   type DefaultBotAvatar,
   type UpdateBotInput
 } from '../shared/types'
+import { compareBots } from '../shared/botOrder'
 import { id, now } from './ids'
 import { readJsonFile, withLock, writeFileAtomic } from './storeIo'
 
@@ -103,7 +105,7 @@ async function writePluginFolder(bot: StoredBot): Promise<void> {
 
 export async function listBots(): Promise<Bot[]> {
   const bots = await loadBots()
-  return bots.map(withFolder).sort((a, b) => a.name.localeCompare(b.name))
+  return bots.map(withFolder).sort(compareBots)
 }
 
 export async function getBot(botId: string): Promise<Bot> {
@@ -169,6 +171,23 @@ async function saveMemoryIndex(folder: string, index: string): Promise<BotMemory
   return readMemory(folder)
 }
 
+/** A bot's open work, in its own memory folder. The chief of staff sees it on each heartbeat. */
+export const STATUS_FILE = 'STATUS.md'
+/** The chief of staff's standing checklist, in its own memory folder. */
+export const HEARTBEAT_FILE = 'HEARTBEAT.md'
+
+/** One file of the bot's memory folder, such as STATUS.md. Empty when it is not there. */
+export function readBotMemoryFile(botId: string, name: string): Promise<string> {
+  return readFile(join(botMemoryFolder(botId), name), 'utf8').catch(() => '')
+}
+
+export async function saveBotHeartbeat(botId: string, text: string): Promise<string> {
+  await getBot(botId)
+  await mkdir(botMemoryFolder(botId), { recursive: true })
+  await writeFileAtomic(join(botMemoryFolder(botId), HEARTBEAT_FILE), text)
+  return readBotMemoryFile(botId, HEARTBEAT_FILE)
+}
+
 function shownIndex(index: string, max: number): string {
   const text = index.trim()
   if (!text) return '(empty)'
@@ -193,12 +212,60 @@ function documentRules(bot: Bot, documents: BotDocument[]): string {
   ].join('\n')
 }
 
+/** What a bot is for, in one line: the start of its instructions. */
+function botPurpose(bot: Bot): string {
+  const line = bot.instructions.trim().split('\n')[0]?.trim() ?? ''
+  if (!line) return '(no instructions)'
+  return line.length <= 120 ? line : `${line.slice(0, 120)}…`
+}
+
 /**
- * The bot's instructions, the indexes of its own and the shared memory and the list of its documents, as rules
- * for each of its sessions.
+ * With a chief of staff among `bots`: the chief learns the other bots and how a heartbeat goes, and every other
+ * bot keeps its open work in STATUS.md for the chief to see. Empty when there is no chief.
  */
-export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = '', documents: BotDocument[] = []): string {
+function chiefRules(bot: Bot, bots: Bot[]): string {
+  if (bot.chief) {
+    const others = bots.filter((item) => item.id !== bot.id)
+    return [
+      '## Chief of staff',
+      'You are the chief of staff of the bots. You keep the work moving: you hand due work to the bot it belongs to.',
+      '',
+      ...(others.length > 0 ? others.map((item) => `- ${item.name}: ${botPurpose(item)}`) : ['There are no other bots yet.']),
+      '',
+      `On a heartbeat, a scheduled run, you get your checklist and the open work each bot keeps in its ${STATUS_FILE}.`,
+      '- Hand an item that is due to the right bot with the workbench tool ask_bot, in a message that stands on its own, with everything the bot needs. Do not do a specialist\'s work yourself.',
+      '- Save in your own memory what you handed out and when. Do not hand out the same item again unless its status changed.',
+      '- Tell the user once, with notify, only when something needs them.',
+      `- Your checklist is the file ${join(botMemoryFolder(bot.id), HEARTBEAT_FILE)}. When the user asks you to keep an eye on something, add it there. Remove an item once it needs no more checking.`
+    ].join('\n')
+  }
+  const chief = bots.find((item) => item.chief && item.id !== bot.id)
+  if (!chief) return ''
+  return [
+    '## Open work',
+    `${chief.name} is the chief of staff. On its heartbeat it sees the file ${join(botMemoryFolder(bot.id), STATUS_FILE)} and asks you for work that is due. Keep that file current:`,
+    '- List what is unfinished, what you are waiting on and until when, and what should happen next and when.',
+    '- Remove an item once it is done. Leave the file empty when nothing is open.',
+    '- When you wait on something that is due at an exact time, also set a follow_up.'
+  ].join('\n')
+}
+
+/**
+ * The bot's instructions, the indexes of its own and the shared memory, its place next to a chief of staff
+ * among `bots` and the list of its documents, as rules for each of its sessions.
+ */
+export function botSessionRules(
+  bot: Bot,
+  memoryIndex = '',
+  sharedIndex = '',
+  documents: BotDocument[] = [],
+  bots: Bot[] = []
+): string {
   const intro = `You are ${bot.name}, a bot in Datapad Workbench.`
+  const chief = bot.chief ? undefined : bots.find((item) => item.chief && item.id !== bot.id)
+  const readers = chief
+    ? `No other bot reads it, except that ${chief.name}, the chief of staff, sees ${STATUS_FILE}.`
+    : 'No other bot reads it.'
   const instructions = bot.instructions.trim()
   const images =
     bot.agent === 'grok'
@@ -218,7 +285,7 @@ export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = '', do
     '- Save only in these two folders, not in any other memory your agent has: the other bots and the user do not see that one.',
     '',
     '### Your memory',
-    `Your memory is the folder ${botMemoryFolder(bot.id)}. No other bot reads it. It holds your own work: what you already told the user, where unfinished work stands, and how the user wants your job done, with their corrections. You can write in this folder without asking.`,
+    `Your memory is the folder ${botMemoryFolder(bot.id)}. ${readers} It holds your own work: what you already told the user, where unfinished work stands, and how the user wants your job done, with their corrections. You can write in this folder without asking.`,
     '',
     `#### ${MEMORY_INDEX}`,
     shownIndex(memoryIndex, MAX_INDEX_CHARS),
@@ -229,7 +296,46 @@ export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = '', do
     `#### ${MEMORY_INDEX}`,
     shownIndex(sharedIndex, MAX_SHARED_INDEX_CHARS)
   ].join('\n')
-  return [intro, instructions, images, memory, documentRules(bot, documents)].filter(Boolean).join('\n\n')
+  return [intro, instructions, images, memory, chiefRules(bot, bots), documentRules(bot, documents)]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+/**
+ * The built-in chief of staff: exactly one bot is chief. Made when there is none, on `agent`; of several, the
+ * oldest stays chief. `created` says whether it was made now.
+ */
+export async function ensureChiefBot(agent: ChatAgent): Promise<{ bot: Bot; created: boolean }> {
+  return withBotsLock(async () => {
+    const bots = await loadBots()
+    const chiefs = bots.filter((bot) => bot.chief).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    if (chiefs.length === 0) {
+      const timestamp = now()
+      const bot: StoredBot = {
+        id: id(),
+        name: 'Chief of staff',
+        agent,
+        model: '',
+        effort: '',
+        instructions: '',
+        allowedTools: [],
+        mcpServers: [],
+        avatar: null,
+        chief: true,
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }
+      await writePluginFolder(bot)
+      bots.push(bot)
+      await saveBots(bots)
+      return { bot: withFolder(bot), created: true }
+    }
+    if (chiefs.length > 1) {
+      for (const [index, bot] of bots.entries()) if (bot.chief && bot !== chiefs[0]) bots[index] = { ...bot, chief: false }
+      await saveBots(bots)
+    }
+    return { bot: withFolder(chiefs[0]), created: false }
+  })
 }
 
 export async function createBot(name: string): Promise<Bot> {
@@ -319,6 +425,7 @@ export function clearBotUnread(botId: string): Promise<Bot> {
 export async function removeBot(botId: string): Promise<void> {
   await withBotsLock(async () => {
     const bots = await loadBots()
+    if (bots.some((item) => item.id === botId && item.chief)) throw new Error('The chief of staff cannot be deleted.')
     const remaining = bots.filter((item) => item.id !== botId)
     if (remaining.length === bots.length) return
     await saveBots(remaining)

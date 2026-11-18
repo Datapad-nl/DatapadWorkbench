@@ -31,6 +31,8 @@ export type Bot = {
   chatId?: string | null
   /** Messages in the bot's chat that came in since the user last had its Chat tab open. */
   unread?: number
+  /** The built-in chief of staff: it alone has a heartbeat, and hands the other bots their due work. Exactly one bot is. */
+  chief?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -291,6 +293,8 @@ export type ChatSchedule = {
   /** When the next run is due; null once a one-off has run. */
   nextRunAt: string | null
   lastRunAt?: string
+  /** The chief of staff's heartbeat: each run builds its prompt from the checklist and the bots' open work. */
+  heartbeat?: boolean
 }
 
 export type ChatWake = {
