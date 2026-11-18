@@ -1176,7 +1176,14 @@ function isUnusableMic(label: string, deviceId: string): boolean {
   return false
 }
 
-async function openMicStream(deviceId?: string): Promise<MediaStream> {
+/** Meter position 0..1 for an RMS level, linear in dB from -60 dBFS to 0 dBFS. */
+export function micLevel(rms: number): number {
+  if (!Number.isFinite(rms) || rms <= 0) return 0
+  const db = 20 * Math.log10(rms)
+  return Math.min(1, Math.max(0, (db + 60) / 60))
+}
+
+export async function openMicStream(deviceId?: string): Promise<MediaStream> {
   const audio: MediaTrackConstraints = {
     echoCancellation: true,
     noiseSuppression: true,

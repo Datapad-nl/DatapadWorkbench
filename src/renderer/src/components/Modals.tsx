@@ -26,6 +26,8 @@ import {
   isSpeaking,
   listMicInputs,
   listVoices,
+  micLevel,
+  openMicStream,
   primeTtsOutput,
   speakAside,
   speakText,
@@ -248,10 +250,67 @@ function MicPicker({
 }): React.JSX.Element {
   const [mics, setMics] = useState<MicInput[]>([])
   const [picked, setPicked] = useState(value)
+  const [noSignal, setNoSignal] = useState(false)
+  const fillRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setPicked(value)
   }, [value])
+
+  useEffect(() => {
+    let stopped = false
+    let stream: MediaStream | null = null
+    let context: AudioContext | null = null
+    let frame = 0
+    let shown = 0
+    setNoSignal(false)
+    if (fillRef.current) fillRef.current.style.transform = 'scaleX(0)'
+    async function open(): Promise<void> {
+      let next: MediaStream
+      try {
+        next = await openMicStream(picked || undefined)
+      } catch {
+        if (!stopped) setNoSignal(true)
+        return
+      }
+      // The picker may have closed or switched device while the mic was opening.
+      if (stopped) {
+        next.getTracks().forEach((track) => track.stop())
+        return
+      }
+      stream = next
+      let analyser: AnalyserNode
+      try {
+        context = new AudioContext()
+        analyser = context.createAnalyser()
+        analyser.fftSize = 1024
+        // Not connected to the destination, so the user does not hear themselves.
+        context.createMediaStreamSource(next).connect(analyser)
+      } catch {
+        setNoSignal(true)
+        return
+      }
+      const samples = new Float32Array(analyser.fftSize)
+      function draw(): void {
+        analyser.getFloatTimeDomainData(samples)
+        let sum = 0
+        for (let i = 0; i < samples.length; i++) sum += (samples[i] ?? 0) * (samples[i] ?? 0)
+        const level = micLevel(Math.sqrt(sum / samples.length))
+        // Quick rise, slow fall.
+        shown += (level - shown) * (level > shown ? 0.6 : 0.08)
+        if (fillRef.current) fillRef.current.style.transform = `scaleX(${shown})`
+        frame = requestAnimationFrame(draw)
+      }
+      frame = requestAnimationFrame(draw)
+    }
+    void open()
+    return () => {
+      stopped = true
+      cancelAnimationFrame(frame)
+      stream?.getTracks().forEach((track) => track.stop())
+      void context?.close().catch(() => undefined)
+    }
+  }, [picked])
 
   useEffect(() => {
     let cancelled = false
@@ -274,26 +333,46 @@ function MicPicker({
   const known = mics.some((item) => item.deviceId === picked)
 
   return (
-    <label className="block text-[12px] text-muted">
-      Microphone
-      <select
-        className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-[12px] text-ink outline-none"
-        value={picked}
-        onChange={(event) => {
-          const next = event.target.value
-          setPicked(next)
-          onChange(next)
-        }}
-      >
-        <option value="">System default</option>
-        {mics.map((item) => (
-          <option key={item.deviceId} value={item.deviceId}>
-            {item.label}
-          </option>
-        ))}
-        {picked && !known && <option value={picked}>Selected microphone</option>}
-      </select>
-    </label>
+    <>
+      <label className="block text-[12px] text-muted">
+        Microphone
+        <select
+          className="mt-1 w-full rounded-lg border border-line bg-surface px-2 py-1.5 text-[12px] text-ink outline-none"
+          value={picked}
+          onChange={(event) => {
+            const next = event.target.value
+            setPicked(next)
+            onChange(next)
+          }}
+        >
+          <option value="">System default</option>
+          {mics.map((item) => (
+            <option key={item.deviceId} value={item.deviceId}>
+              {item.label}
+            </option>
+          ))}
+          {picked && !known && <option value={picked}>Selected microphone</option>}
+        </select>
+      </label>
+      {noSignal ? (
+        <div className="mt-2 text-[11px] text-muted">No signal from this microphone.</div>
+      ) : (
+        <div
+          data-testid="settings-mic-level"
+          role="meter"
+          aria-label="Microphone input level"
+          aria-valuemin={0}
+          aria-valuemax={1}
+          className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-canvas"
+        >
+          <div
+            ref={fillRef}
+            className="h-full w-full origin-left rounded-full bg-accent"
+            style={{ transform: 'scaleX(0)' }}
+          />
+        </div>
+      )}
+    </>
   )
 }
 

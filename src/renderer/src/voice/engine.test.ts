@@ -4,7 +4,7 @@ vi.mock('./supertonic', () => ({ loadSupertonic: vi.fn(), synthesize: vi.fn() })
 vi.mock('./whisper', () => ({ getAsr: vi.fn() }))
 
 import { DEFAULT_VOICE } from '../../../shared/types'
-import { openLiveMicStream, resetSpokenLog, speakableText, speakText, speechDetector, stopSpeaking } from './engine'
+import { micLevel, openLiveMicStream, resetSpokenLog, speakableText, speakText, speechDetector, stopSpeaking } from './engine'
 
 const SILENCE_MS = 800
 const FRAME_MS = 10
@@ -383,5 +383,31 @@ describe('speakableText', () => {
     expect(
       speakableText('Committed as `a1fd985`. Run `git push -u origin HEAD` or `contexts.get(chatId)` now.')
     ).toBe('Committed as. Run or now.')
+  })
+})
+
+describe('micLevel', () => {
+  it('is 0 for silence', () => {
+    expect(micLevel(0)).toBe(0)
+    expect(micLevel(-0.1)).toBe(0)
+  })
+
+  it('is 0 at -60 dBFS and below', () => {
+    expect(micLevel(0.001)).toBeCloseTo(0)
+    expect(micLevel(0.0001)).toBe(0)
+  })
+
+  it('is about half at -30 dBFS', () => {
+    expect(micLevel(10 ** (-30 / 20))).toBeCloseTo(0.5)
+  })
+
+  it('is 1 at full scale and above', () => {
+    expect(micLevel(1)).toBe(1)
+    expect(micLevel(2)).toBe(1)
+  })
+
+  it('is 0 for a value that is not a number', () => {
+    expect(micLevel(NaN)).toBe(0)
+    expect(micLevel(Infinity)).toBe(0)
   })
 })
