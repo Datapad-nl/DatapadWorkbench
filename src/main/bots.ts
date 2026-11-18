@@ -200,6 +200,15 @@ function documentRules(bot: Bot, documents: BotDocument[]): string {
 export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = '', documents: BotDocument[] = []): string {
   const intro = `You are ${bot.name}, a bot in Datapad Workbench.`
   const instructions = bot.instructions.trim()
+  const images =
+    bot.agent === 'grok'
+      ? [
+          '## Images',
+          '- When the user asks for an image, such as a picture, logo, illustration or ad visual, make it with the image tool, `image_gen`. Change an existing image with `image_edit`.',
+          '- Do not draw it in code instead (SVG, HTML, a script that renders a picture), unless the user asks for a vector or code file.',
+          '- When the image model falls short of something the request needs, such as exact lettering, still deliver the generated images and say what is off. Do not switch method on your own.'
+        ].join('\n')
+      : ''
   const memory = [
     '## Memory',
     'You have two memory folders, your own and one shared with the other bots. They outlive this chat: a new session starts with only these rules and what is saved there.',
@@ -220,7 +229,7 @@ export function botSessionRules(bot: Bot, memoryIndex = '', sharedIndex = '', do
     `#### ${MEMORY_INDEX}`,
     shownIndex(sharedIndex, MAX_SHARED_INDEX_CHARS)
   ].join('\n')
-  return [intro, instructions, memory, documentRules(bot, documents)].filter(Boolean).join('\n\n')
+  return [intro, instructions, images, memory, documentRules(bot, documents)].filter(Boolean).join('\n\n')
 }
 
 export async function createBot(name: string): Promise<Bot> {

@@ -226,4 +226,17 @@ describe('bots', () => {
     expect(rules.indexOf('## Documents')).toBeGreaterThan(rules.indexOf('### Shared memory'))
     expect(rules).toMatch(/\n\n- Deep Work \(12 chapters\): deep-work\/OUTLINE\.md\n- Notes \(1 chapter\): notes\/OUTLINE\.md$/)
   })
+
+  it('tells a Grok bot to use the image tool, and leaves the section out for a Claude bot', async () => {
+    const grok = await createBot('Artist')
+    const rules = botSessionRules(grok)
+    expect(rules).toContain('## Images\n')
+    expect(rules).toContain('`image_gen`')
+    expect(rules).toContain('`image_edit`')
+    expect(rules.indexOf('## Images')).toBeLessThan(rules.indexOf('## Memory'))
+
+    const claude = await updateBot({ id: grok.id, agent: 'claude' })
+    expect(botSessionRules(claude)).not.toContain('## Images')
+    expect(botSessionRules(claude)).not.toContain('image_gen')
+  })
 })
