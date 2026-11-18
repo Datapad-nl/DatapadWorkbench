@@ -1,11 +1,11 @@
 # Datapad Workbench
 
-Unofficial desktop for [Grok Build](https://grok.com/build) and [Claude Code](https://claude.com/claude-code). Projects in a sidebar, multiple chats at once.
+Unofficial desktop for [Grok Build](https://grok.com/build) and [Claude Code](https://claude.com/claude-code). Projects in a sidebar, multiple chats at once, and bots that work in their own folders and on schedules.
 Thought process window, Browser window, Git Window. Talk to your agent with local voice.
 
 Not affiliated with, endorsed by, or sponsored by SpaceXAI / xAI or Anthropic. “Grok” and “Grok Build” are their marks, as are “Claude” and “Claude Code”.
 
-![Datapad Workbench](docs/screenshot.png)
+![Datapad Workbench](docs/screenshot.jpg)
 
 ## Run
 
@@ -91,6 +91,8 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 
 - Native window; size and pane layout persist
 - Projects in a sidebar, each with an optional local folder, color, and rename
+- Blur a project's name and icon in the sidebar for a screen recording
+- The app keeps running when the window closes, with a menu bar icon that lists the bots with their next run and the chats waiting for an answer, plus Open at Login
 
 **Voice**
 
@@ -102,6 +104,7 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 **Chats**
 
 - Multiple chats per project, each on Grok or Claude
+- Each chat has its own model and effort (menu next to Ask · Auto · Plan, or `/model` and `/effort`). A started chat can switch between Claude and Grok and keeps the conversation
 - Concurrent streams: switch tabs without cancelling
 - Real Grok Build and Claude Code sessions — sessions already on disk for a folder show up in that project
 - Search the sidebar by project name, chat title, or anything said in a chat
@@ -110,6 +113,11 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Isolated git worktrees so concurrent chats on the same repo do not clobber each other: a chat gets one when another chat is already working in the folder, or when you ask for an experiment
 - Chats that share a folder ask before editing a file another chat changed and has not committed: wait for that chat, edit anyway, or skip
 - Checkpoints and rewind of files plus later messages
+- Replies show the time they were posted; hover for the full date
+- Click an image in a chat to see it larger in an overlay
+- Questions the agent asks during a turn show in the chat, and your answer goes back to it
+- A Claude chat shows its subagents and background commands above the composer, and the reply the agent writes when that work ends
+- Handoff: when the context passes 60% or 120k tokens, the chat offers to continue in a new chat that starts from a written summary (`/handoff`)
 - First-run project briefing, Codegraph index status, and an orientation card
 
 **Panes**
@@ -124,15 +132,41 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Markdown replies, `@file` / folder mentions, pasted screenshots and attachments
 - Slash-command palette: `/new`, `/rewind`, `/plan`, `/ask`, `/always-approve`, `/commit`, `/review`, `/model`, `/settings`, `/usage`, `/transcribe`, `/btw`, `/export` (save the chat as Markdown), and more
 - The agent’s own commands and skills show in the same palette, such as `/compact` and `/context`. Grok chats also get `/imagine`
-- MCP servers for every chat: Settings → MCP (or `/mcps`) takes the usual `mcpServers` JSON, local commands or `http`/`sse` URLs. They load next to the built-in browser server and each agent’s own MCP config
-- Steer a running task, or `/btw` a side question without dropping it
+- MCP servers for every chat: Settings → MCP (or `/mcps`) takes the usual `mcpServers` JSON, local commands or `http`/`sse` URLs. Search the MCP Registry from there. They load next to the Workbench’s own `browser` and `workbench` servers and each agent’s own MCP config
+- Steer a running task, or `/btw` a side question without dropping it. In a Claude chat a steer goes into the running turn, so its subagents keep going
+
+**Agent tools**
+
+Every chat gets the Workbench's `workbench` MCP server next to `browser`:
+
+- `show_visual`: a chart, diagram or mock-up drawn as HTML, shown sandboxed in the chat
+- `delegate` and `nudge`: hand a task to a child chat on Grok or Claude, optionally in its own worktree, wait for its answer, and send it back with a follow-up. Settings caps how many run at once
+- `/conduct <job>`: the chat plans, hands each task to a subagent with acceptance criteria, and checks what comes back. A Claude chat with subagents allowed orchestrates them the same way
+- `list_chats`, `read_chat` and `start_chat`: look up and open other chats in the same project
+- `schedule_task` and `cancel_schedule`: run a prompt in the project once or on a cron. Each schedule has its own chat in the sidebar with the time to its next run
+- `link_pr`, `pr_status` and `unlink_pr`: link a GitHub pull request to the chat, show its checks and review state, and wake the chat when checks finish, a review comes in or it closes. Uses the GitHub CLI (`gh`)
+- `request_secret`: the agent asks for an API key or token; you type it in a password field, it is kept encrypted with the system keychain per project and set as an environment variable in the agent's shell. The model never sees the value
+
+**Bots**
+
+- A Bots section in the sidebar. A bot is an agent of its own with a name, an avatar, instructions, a model, the tools it may use without asking, skills and schedules, and it works in its own folder
+- Each bot has its own chat, and its schedules are listed under it in the sidebar. A finished scheduled run posts its answer in the bot's chat
+- Type `@` in a chat to ask a bot. A message that starts with `@Name` goes to that bot; a bot named later in a message is asked by the chat's agent with `ask_bot`. The answer is posted in the chat
+- Each bot keeps a memory folder with a `MEMORY.md` index, and all bots share a memory for what every bot should know
+- Documents: add PDF, EPUB, text and Markdown files, converted into one Markdown file per chapter with an outline
+- Skills from [skills.sh](https://skills.sh), and a pick of MCP servers per bot
+- A Grok bot makes images with the image model (`image_gen`, `image_edit`)
+- Chief of staff: a bot the app makes, which cannot be deleted. On a heartbeat (every 30 minutes from 08:00 to 18:59 by default) it reads its checklist and the open work each bot keeps in `STATUS.md`, hands due work to the right bot with `ask_bot`, and notifies you only when something needs you
 
 **Settings**
 
+- One dialog with sections: Agent, Subagents, Voice, Memory, Secrets, MCP servers, Appearance and About
 - Default agent for new chats: Grok or Claude
 - Grok signs in with `grok login` (SuperGrok), with an optional API-key fallback. Claude uses your `claude auth login`
 - Model and effort picker: Grok 4.6 by default; Claude chats list the models and effort levels Claude Code offers
-- Appearance: built-in themes plus import and export of custom themes
+- Subagents: the model for a conductor, the model for every worker, and how many run at once (or None)
+- Secrets: the names kept per project, with delete
+- Appearance: built-in themes plus import and export of custom themes, and a chat width (Standard, Wide, Wider or Full)
 - Usage snapshot in the status bar
 
 ## License
