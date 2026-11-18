@@ -4,9 +4,17 @@ import { loadSupertonic, synthesize } from './supertonic'
 import { getAsr } from './whisper'
 
 const SAMPLE_RATE = 16000
-const SILENCE_MS = 1400
+const SILENCE_MS = 800
 const SPEECH_RMS = 0.0008
 const MAX_MS = 60_000
+// About 10 dB above the noise floor: clear of room noise that auto gain lifts, well below normal speech.
+const SPEECH_RATIO = 3
+// The floor falls to a quieter level within about 100 ms, so it recovers quickly from being seeded by speech.
+const FLOOR_FALL_MS = 100
+// It rises 3 dB a second: about 5 s of unbroken speech before it catches up, and still follows auto gain in a pause.
+const FLOOR_RISE_DB = 3
+// 40 ms of sound above the floor counts as speech, so a click or a one-frame spike does not.
+const SPEECH_RUN_MS = 40
 const ASR_MAX_SEC = 8
 
 export type TtsVoice = { voiceURI: string; name: string }
@@ -436,6 +444,8 @@ type SpeakJob = { text: string; lang: VoiceLanguage; settings: VoiceSettings }
 
 let speakQueue: SpeakJob[] = []
 let drainPromise: Promise<void> | null = null
+/** Starts synthesizing a chunk that arrives while another plays. */
+let lookAhead: (() => void) | null = null
 
 export function stopSpeaking(): void {
   speakGen += 1
@@ -861,6 +871,20 @@ function drainQueue(): Promise<void> {
   if (speakQueue.length === 0) return Promise.resolve()
   const gen = speakGen
   let run: Promise<void> | null = null
+  // The next chunk synthesizes while one plays, so it can start the moment that one ends.
+  // It stays in the queue meanwhile, so dedupe and the fallback text still see it.
+  // Set inside prefetch, so it is typed with as: TypeScript would otherwise narrow it to null in the loop.
+  let ahead = null as { job: SpeakJob; audio: Promise<Pcm> } | null
+  let playing = false
+  const prefetch = (): void => {
+    const job = speakQueue[0]
+    if (!playing || ahead || !job || gen !== speakGen) return
+    const audio = synth(job.text, job.lang, job.settings, false)
+    // Its error is thrown when its turn comes, or dropped if that never comes.
+    audio.catch(() => undefined)
+    ahead = { job, audio }
+  }
+  lookAhead = prefetch
   run = (async () => {
     try {
       while (speakQueue.length) {
@@ -868,10 +892,15 @@ function drainQueue(): Promise<void> {
         const job = speakQueue.shift()
         if (!job) break
         try {
-          const { samples, sampleRate } = await synth(job.text, job.lang, job.settings, false)
+          const audio = ahead?.job === job ? ahead.audio : synth(job.text, job.lang, job.settings, false)
+          ahead = null
+          const { samples, sampleRate } = await audio
           if (gen !== speakGen) return
           if (samples.length === 0) continue
+          playing = true
+          prefetch()
           await playPcm(samples, sampleRate, gen)
+          playing = false
           if (gen !== speakGen) return
           playedKeys.add(normKey(job.text))
         } catch (error) {
@@ -881,6 +910,7 @@ function drainQueue(): Promise<void> {
       }
     } finally {
       if (drainPromise === run) drainPromise = null
+      if (lookAhead === prefetch) lookAhead = null
     }
   })()
   drainPromise = run
@@ -916,6 +946,7 @@ export async function speakText(
     }
   }
   if (speakQueue.length === 0 && !opts?.append) return
+  lookAhead?.()
   const gen = speakGen
   try {
     await drainQueue()
@@ -1253,6 +1284,33 @@ export async function openLiveMicStream(preferredId?: string): Promise<MediaStre
   return openMicStream()
 }
 
+/** Tells from each frame's RMS whether the user has spoken, and how long they have been quiet since. */
+export function speechDetector(): (rms: number, dt: number) => { heard: boolean; silentMs: number } {
+  let floor = -1
+  let loudest = 0
+  let heard = false
+  let silentMs = 0
+  let span = 0
+  const recent: { rms: number; dt: number }[] = []
+  return (rms, dt) => {
+    if (floor < 0) floor = rms
+    else if (rms < floor) floor += (rms - floor) * Math.min(1, dt / FLOOR_FALL_MS)
+    else floor = Math.min(rms, floor * 10 ** ((FLOOR_RISE_DB * dt) / 20_000))
+    // A floor this low never changes a decision, and it lets the floor rise again after digital silence.
+    floor = Math.max(floor, SPEECH_RMS / SPEECH_RATIO)
+    recent.push({ rms, dt })
+    span += dt
+    while (recent.length > 1 && span - (recent[0]?.dt ?? 0) >= SPEECH_RUN_MS) span -= recent.shift()?.dt ?? 0
+    const sustained = span >= SPEECH_RUN_MS ? Math.min(...recent.map((frame) => frame.rms)) : 0
+    loudest = Math.max(loudest, sustained)
+    const threshold = Math.max(SPEECH_RMS, floor * SPEECH_RATIO)
+    if (heard) silentMs = sustained >= threshold ? 0 : silentMs + dt
+    // The recorder may open mid-sentence: that speech only stands out once the floor falls below it.
+    else if (loudest >= threshold) heard = true
+    return { heard, silentMs }
+  }
+}
+
 export async function startRecorder(handlers: {
   context?: AudioContext
   deviceId?: string
@@ -1270,10 +1328,9 @@ export async function startRecorder(handlers: {
   }
   const chunks: Float32Array[] = []
   let sampleRate = track.getSettings().sampleRate ?? SAMPLE_RATE
+  const detect = speechDetector()
   let heard = false
-  let silentMs = 0
-  let last = performance.now()
-  const started = last
+  const started = performance.now()
   let stopping = false
 
   function onPcm(input: Float32Array, rate: number): void {
@@ -1290,14 +1347,9 @@ export async function startRecorder(handlers: {
     }
     const rms = Math.sqrt(sum / input.length)
     const now = performance.now()
-    const dt = now - last
-    last = now
-    if (rms >= SPEECH_RMS || peak >= SPEECH_RMS) {
-      heard = true
-      silentMs = 0
-    } else if (heard) {
-      silentMs += dt
-    }
+    const speech = detect(rms, (input.length / rate) * 1000)
+    heard = speech.heard
+    const silentMs = speech.silentMs
     handlers.onLevel(rms, silentMs, heard)
     const voice = Math.min(1, Math.max(peak * 80, rms * 120))
     const bands = new Array<number>(WAVE_BARS)
