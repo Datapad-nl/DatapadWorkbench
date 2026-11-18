@@ -69,7 +69,8 @@ describe('bot prompts', () => {
         { name: 'Accountant', status: '- Book the March invoices by Friday' },
         { name: 'Scout', status: '# Status\n' },
         { name: 'Writer', status: 'w'.repeat(3000) }
-      ]
+      ],
+      problems: [{ name: 'Scout', file: '/bots/scout/memory/PROBLEMS.md', text: '# Problems\n' }]
     })
     expect(prompt.startsWith(`Heartbeat. It is ${now.toString()}.`)).toBe(true)
     expect(prompt).toContain('## Your checklist\n\n- Inbox: anything from the bank?')
@@ -80,11 +81,41 @@ describe('bot prompts', () => {
     expect(prompt).toContain('hand it to the bot it belongs to with the workbench tool ask_bot')
     expect(prompt).toContain('Leave what is not due yet.')
     expect(prompt).toContain('call notify once if the user needs to know or act on something')
+    expect(prompt).not.toContain('What went wrong')
+    expect(prompt).not.toContain('PROBLEMS.md')
+  })
+
+  it('shows what went wrong for each bot, with the file, and says to learn the lesson', () => {
+    const prompt = promptForHeartbeat({
+      now: new Date(),
+      checklist: '',
+      work: [],
+      problems: [
+        { name: 'Accountant', file: '/bots/accountant/memory/PROBLEMS.md', text: '- 18-11-2026 09:30: The scheduled run failed: disk full' },
+        { name: 'Scout', file: '/bots/scout/memory/PROBLEMS.md', text: '' },
+        { name: 'Writer', file: '/bots/writer/memory/PROBLEMS.md', text: 'p'.repeat(3000) }
+      ]
+    })
+    expect(prompt).toContain(
+      '## Open work of the bots\n\nNo bot has open work.\n\n## What went wrong\n\n### Accountant\n\nFile: /bots/accountant/memory/PROBLEMS.md\n\n- 18-11-2026 09:30: The scheduled run failed: disk full'
+    )
+    expect(prompt).not.toContain('### Scout')
+    expect(prompt).toContain(`### Writer\n\nFile: /bots/writer/memory/PROBLEMS.md\n\n${'p'.repeat(2000)}…`)
+    expect(prompt).not.toContain('p'.repeat(2001))
+    expect(prompt).toContain(
+      'Leave what is not due yet. For each entry under What went wrong, find the cause, write the rule that prevents it in the LESSONS.md next to that PROBLEMS.md, and then remove the entry. Then call notify once'
+    )
   })
 
   it('says so when the checklist or the work is empty', () => {
-    const prompt = promptForHeartbeat({ now: new Date(), checklist: '# Checklist\n', work: [] })
+    const prompt = promptForHeartbeat({ now: new Date(), checklist: '# Checklist\n', work: [], problems: [] })
     expect(prompt).toContain('## Your checklist\n\n(empty)')
     expect(prompt).toContain('## Open work of the bots\n\nNo bot has open work.')
+    // A PROBLEMS.md with nothing open leaves the prompt as it is.
+    const problems = [{ name: 'Scout', file: '/bots/scout/memory/PROBLEMS.md', text: '- [ ]' }]
+    const now = new Date()
+    expect(promptForHeartbeat({ now, checklist: '- a', work: [], problems })).toBe(
+      promptForHeartbeat({ now, checklist: '- a', work: [], problems: [] })
+    )
   })
 })

@@ -9,6 +9,7 @@ import type {
   ChatWake,
   FileMention,
 } from "../shared/types";
+import { join } from "path";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
 import {
   CONDUCTOR_EDIT_REFUSED,
@@ -21,8 +22,11 @@ import { plainReply } from "../shared/steps";
 import { chatAgentLabel, normalizeChatAgent } from "../shared/types";
 import {
   HEARTBEAT_FILE,
+  PROBLEMS_FILE,
   STATUS_FILE,
+  addBotProblem,
   addBotUnread,
+  botMemoryFolder,
   clearBotUnread,
   ensureChiefBot,
   getBot,
@@ -261,6 +265,8 @@ export async function askBot(input: {
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const answer = `Could not answer: ${reason}`;
+    // Only a run that started went wrong for the bot itself.
+    if (runChatId) await addBotProblem(input.botId, answer).catch(() => {});
     await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting)).catch(
       () => {},
     );
@@ -894,17 +900,23 @@ export async function setHeartbeatCron(chatId: string, cron: string): Promise<Ch
   return chat;
 }
 
-/** The heartbeat's prompt, or null when neither the checklist nor any other bot has an open item. */
+/**
+ * The heartbeat's prompt, or null when the checklist, the other bots' open work and every bot's problems,
+ * the chief's own included, hold no open item.
+ */
 async function heartbeatPrompt(chief: Bot, now: Date): Promise<string | null> {
   const checklist = await readBotMemoryFile(chief.id, HEARTBEAT_FILE);
   const work: Array<{ name: string; status: string }> = [];
+  const problems: Array<{ name: string; file: string; text: string }> = [];
   for (const bot of await listBots()) {
+    const text = await readBotMemoryFile(bot.id, PROBLEMS_FILE);
+    if (hasOpenItems(text)) problems.push({ name: bot.name, file: join(botMemoryFolder(bot.id), PROBLEMS_FILE), text });
     if (bot.id === chief.id) continue;
     const status = await readBotMemoryFile(bot.id, STATUS_FILE);
     if (hasOpenItems(status)) work.push({ name: bot.name, status });
   }
-  if (!hasOpenItems(checklist) && work.length === 0) return null;
-  return promptForHeartbeat({ now, checklist, work });
+  if (!hasOpenItems(checklist) && work.length === 0 && problems.length === 0) return null;
+  return promptForHeartbeat({ now, checklist, work, problems });
 }
 
 export async function stopSchedule(chatId: string): Promise<Chat> {
@@ -1117,6 +1129,7 @@ async function runSchedule(summary: ChatSummary, now: Date): Promise<void> {
     async (error: unknown) => {
       // Kept in the chat: the run's live error is gone once the window misses it.
       const text = await recordFailedRun(summary.id, "The scheduled run failed", error);
+      if (isBotsOwn(summary)) await addBotProblem(summary.botId, text).catch(() => {});
       if (botRun && endBotRun(summary.id, botRun)) await tellFromBot(botRun.botId, summary, text);
     },
   )
@@ -1189,6 +1202,7 @@ async function runFollowUp(summary: ChatSummary, now: Date): Promise<void> {
     },
     async (error: unknown) => {
       const text = await recordFailedRun(summary.id, "The follow-up failed", error);
+      await addBotProblem(bot.id, text).catch(() => {});
       if (endBotRun(summary.id, botRun)) await tellFromBot(bot.id, summary, text, true);
     },
   )
@@ -1228,7 +1242,10 @@ async function recordInterruptedRuns(): Promise<void> {
     }).catch(() => null);
     if (!chat) continue;
     emitChat(chat);
-    if (isBotsOwn(summary)) await tellFromBot(summary.botId, summary, content, true).catch(() => {});
+    if (isBotsOwn(summary)) {
+      await tellFromBot(summary.botId, summary, content, true).catch(() => {});
+      await addBotProblem(summary.botId, content).catch(() => {});
+    }
   }
 }
 

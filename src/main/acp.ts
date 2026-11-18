@@ -7,7 +7,7 @@ import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './br
 import { type AgentProcess, startClaudeAdapter } from './claudeCli'
 import { getGrokCliInfo, grokBinary } from './grokCli'
 import { relPath, snapshotBeforeTool, toolPaths } from './checkpoints'
-import { botDocumentsFolder, botMemoryFolder, sharedMemoryFolder } from './bots'
+import { LESSONS_FILE, PROBLEMS_FILE, botDocumentsFolder, botMemoryFolder, botsDir, sharedMemoryFolder } from './bots'
 import {
   askPermission,
   cancelAllPermissions,
@@ -226,10 +226,23 @@ function onlyOutlines(documents: string, tool: PermissionParams['toolCall']): bo
   )
 }
 
+/** Whether every path this tool names is the LESSONS.md or PROBLEMS.md of a bot, `<bots>/<id>/memory/<file>`. */
+function onlyLessonFiles(tool: PermissionParams['toolCall']): boolean {
+  if (!tool) return false
+  const named = toolPaths(tool)
+  const paths = [...named, ...fullPathsIn(tool.rawInput)]
+  const fits = (path: string): boolean => {
+    const [botId, folder, file, ...rest] = (relPath(botsDir(), path) ?? '').split('/')
+    return !!botId && folder === 'memory' && (file === LESSONS_FILE || file === PROBLEMS_FILE) && rest.length === 0
+  }
+  return named.length > 0 && paths.every((path) => isAbsolute(path.trim()) && fits(path))
+}
+
 /**
  * Whether a bot chat may run this tool without asking: the tool is on the bot's list, it is one of the
  * bot's own run tools, it reads or writes only the bot's memory folder, it reads or searches its documents or
- * writes only their outlines, or it only reads the shared memory.
+ * writes only their outlines, or it only reads the shared memory. The chief of staff may also read and write
+ * the LESSONS.md and PROBLEMS.md of every bot.
  */
 async function botAllowsTool(sessionId: string, params: PermissionParams): Promise<boolean> {
   const tool = params.toolCall
@@ -243,6 +256,8 @@ async function botAllowsTool(sessionId: string, params: PermissionParams): Promi
   if (name?.startsWith('mcp__')) return false
   const kind = (tool?.kind ?? '').toLowerCase()
   if (MEMORY_KINDS.has(kind) && onlyInside(botMemoryFolder(bot.id), tool)) return true
+  // The chief learns the lessons of what went wrong for every bot.
+  if (bot.chief && (kind === 'read' || kind === 'edit' || kind === 'write') && onlyLessonFiles(tool)) return true
   // Claude Code's Grep and Glob and Grok's grep arrive as `search`, with the folder in the input's `path`.
   // A search of the documents folder itself looks through every document.
   const documents = botDocumentsFolder(bot.id)

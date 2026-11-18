@@ -32,7 +32,8 @@ export const AVATAR_MIME: Record<string, string> = {
 
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024
 
-function botsDir(): string {
+/** The folder that holds every bot's folder. */
+export function botsDir(): string {
   return join(app.getPath('userData'), 'workbench', 'bots')
 }
 
@@ -175,6 +176,12 @@ async function saveMemoryIndex(folder: string, index: string): Promise<BotMemory
 export const STATUS_FILE = 'STATUS.md'
 /** The chief of staff's standing checklist, in its own memory folder. */
 export const HEARTBEAT_FILE = 'HEARTBEAT.md'
+/** What went wrong for a bot and is not solved yet, in its own memory folder. The chief of staff reviews it. */
+export const PROBLEMS_FILE = 'PROBLEMS.md'
+/** The rules a bot learned from what went wrong, in its own memory folder. Each session starts with them. */
+export const LESSONS_FILE = 'LESSONS.md'
+/** How much of LESSONS.md each session starts with. */
+const MAX_LESSONS_CHARS = 4000
 
 /** One file of the bot's memory folder, such as STATUS.md. Empty when it is not there. */
 export function readBotMemoryFile(botId: string, name: string): Promise<string> {
@@ -188,11 +195,32 @@ export async function saveBotHeartbeat(botId: string, text: string): Promise<str
   return readBotMemoryFile(botId, HEARTBEAT_FILE)
 }
 
-function shownIndex(index: string, max: number): string {
+/** Adds one dated line to the bot's PROBLEMS.md, unless the same text is already there. */
+export async function addBotProblem(botId: string, text: string): Promise<void> {
+  const line = text.replace(/\s+/g, ' ').trim()
+  if (!line) return
+  const entry = line.length <= 500 ? line : `${line.slice(0, 500)}…`
+  await getBot(botId)
+  const file = join(botMemoryFolder(botId), PROBLEMS_FILE)
+  await withLock(file, async () => {
+    const current = await readFile(file, 'utf8').catch(() => '')
+    // A run that fails the same way on every schedule adds one entry, not one per run.
+    if (current.split('\n').some((item) => item.trimEnd().endsWith(`: ${entry}`))) return
+    await mkdir(botMemoryFolder(botId), { recursive: true })
+    const start = current && !current.endsWith('\n') ? `${current}\n` : current
+    await writeFileAtomic(file, `${start}- ${new Date().toLocaleString()}: ${entry}\n`)
+  })
+}
+
+function shownIndex(
+  index: string,
+  max: number,
+  cut = `keep ${MEMORY_INDEX} short and move details into files`
+): string {
   const text = index.trim()
   if (!text) return '(empty)'
   if (text.length <= max) return text
-  return `${text.slice(0, max)}\n… (cut here: keep ${MEMORY_INDEX} short and move details into files)`
+  return `${text.slice(0, max)}\n… (cut here: ${cut})`
 }
 
 /** How the bot finds its way in its documents, with one line per document. Empty when it has none. */
@@ -236,7 +264,15 @@ function chiefRules(bot: Bot, bots: Bot[]): string {
       '- Hand an item that is due to the right bot with the workbench tool ask_bot, in a message that stands on its own, with everything the bot needs. Do not do a specialist\'s work yourself.',
       '- Save in your own memory what you handed out and when. Do not hand out the same item again unless its status changed.',
       '- Tell the user once, with notify, only when something needs them.',
-      `- Your checklist is the file ${join(botMemoryFolder(bot.id), HEARTBEAT_FILE)}. When the user asks you to keep an eye on something, add it there. Remove an item once it needs no more checking.`
+      `- Your checklist is the file ${join(botMemoryFolder(bot.id), HEARTBEAT_FILE)}. When the user asks you to keep an eye on something, add it there. Remove an item once it needs no more checking.`,
+      '',
+      `On a heartbeat you also get what went wrong: the entries in each bot's ${PROBLEMS_FILE}, your own included. The app adds failed and interrupted runs there. For each entry:`,
+      `- Find the cause. Write the rule that prevents it in that bot's ${LESSONS_FILE}, which is next to its ${PROBLEMS_FILE}. The heartbeat gives the full paths.`,
+      '- When the same thing went wrong despite a lesson, sharpen that lesson.',
+      `- Give a lesson that every bot needs to each bot's ${LESSONS_FILE}.`,
+      `- Then remove the entry from ${PROBLEMS_FILE}.`,
+      '- When only the user can fix it, tell them once with notify, then remove the entry too.',
+      `- You can read and write the ${LESSONS_FILE} and ${PROBLEMS_FILE} of every bot without asking.`
     ].join('\n')
   }
   const chief = bots.find((item) => item.chief && item.id !== bot.id)
@@ -250,21 +286,42 @@ function chiefRules(bot: Bot, bots: Bot[]): string {
   ].join('\n')
 }
 
+/** How the bot learns from what went wrong, with its LESSONS.md. A bot next to a chief, or the chief, also logs problems. */
+function lessonRules(bot: Bot, lessons: string, chief: Bot | undefined): string {
+  const folder = botMemoryFolder(bot.id)
+  const problems = bot.chief
+    ? [`- When you cannot work out the cause, or cannot prevent it on your own, add a line to ${join(folder, PROBLEMS_FILE)} saying what happened and when.`]
+    : chief
+      ? [`- When you cannot work out the cause, or cannot prevent it on your own, add a line to ${join(folder, PROBLEMS_FILE)} saying what happened and when. ${chief.name}, the chief of staff, reviews that file.`]
+      : []
+  return [
+    '## Lessons',
+    `You learn from what goes wrong, so it does not happen again. Your lessons are the file ${join(folder, LESSONS_FILE)}, shown below. Follow them.`,
+    '- When something goes wrong, such as a tool or a run that fails, a result that turns out wrong or a correction from the user, work out why. Then add the rule that prevents it next time: one line saying what to do or not to do, and why. Write it for that kind of work, not for the one case.',
+    '- Change or remove a lesson that turned out wrong, and merge lessons that say the same, so the file stays short.',
+    ...problems,
+    '',
+    `#### ${LESSONS_FILE}`,
+    shownIndex(lessons, MAX_LESSONS_CHARS, `keep ${LESSONS_FILE} short and merge lessons that say the same`)
+  ].join('\n')
+}
+
 /**
- * The bot's instructions, the indexes of its own and the shared memory, its place next to a chief of staff
- * among `bots` and the list of its documents, as rules for each of its sessions.
+ * The bot's instructions, the indexes of its own and the shared memory, its lessons, its place next to a chief
+ * of staff among `bots` and the list of its documents, as rules for each of its sessions.
  */
 export function botSessionRules(
   bot: Bot,
   memoryIndex = '',
   sharedIndex = '',
   documents: BotDocument[] = [],
-  bots: Bot[] = []
+  bots: Bot[] = [],
+  lessons = ''
 ): string {
   const intro = `You are ${bot.name}, a bot in Datapad Workbench.`
   const chief = bot.chief ? undefined : bots.find((item) => item.chief && item.id !== bot.id)
   const readers = chief
-    ? `No other bot reads it, except that ${chief.name}, the chief of staff, sees ${STATUS_FILE}.`
+    ? `No other bot reads it, except that ${chief.name}, the chief of staff, sees ${STATUS_FILE} and ${PROBLEMS_FILE}, and may change ${LESSONS_FILE} and ${PROBLEMS_FILE}.`
     : 'No other bot reads it.'
   const instructions = bot.instructions.trim()
   const images =
@@ -296,7 +353,15 @@ export function botSessionRules(
     `#### ${MEMORY_INDEX}`,
     shownIndex(sharedIndex, MAX_SHARED_INDEX_CHARS)
   ].join('\n')
-  return [intro, instructions, images, memory, chiefRules(bot, bots), documentRules(bot, documents)]
+  return [
+    intro,
+    instructions,
+    images,
+    memory,
+    lessonRules(bot, lessons, chief),
+    chiefRules(bot, bots),
+    documentRules(bot, documents)
+  ]
     .filter(Boolean)
     .join('\n\n')
 }

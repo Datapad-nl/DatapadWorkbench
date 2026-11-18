@@ -11,7 +11,9 @@ const stub = vi.hoisted(() => ({
   /** The agent the last new chief was made on. */
   chiefAgent: '',
   /** Files of the bots' memory folders, by `<botId>/<name>`. */
-  memory: {} as Record<string, string>
+  memory: {} as Record<string, string>,
+  /** What addBotProblem was called with, as `[botId, text]`. */
+  problems: [] as Array<[string, string]>
 }))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
 vi.mock('./bots', () => {
@@ -25,7 +27,12 @@ vi.mock('./bots', () => {
   }
   return {
     HEARTBEAT_FILE: 'HEARTBEAT.md',
+    PROBLEMS_FILE: 'PROBLEMS.md',
     STATUS_FILE: 'STATUS.md',
+    botMemoryFolder: (botId: string) => `/bots/${botId}/memory`,
+    addBotProblem: async (botId: string, text: string) => {
+      stub.problems.push([botId, text])
+    },
     readBotMemoryFile: async (botId: string, name: string) => stub.memory[`${botId}/${name}`] ?? '',
     getBot,
     ensureChiefBot: async (agent: string) => {
@@ -134,6 +141,8 @@ describe('scheduled runs', () => {
       ['assistant', 'The scheduled run failed: Run `grok login` first.']
     ])
     expect(events).toContain('chat')
+    // Not a bot's own chat, so no bot logs it as a problem.
+    expect(stub.problems).toEqual([])
   })
 })
 
@@ -527,6 +536,20 @@ describe('@bot', () => {
       content: 'Could not answer: Bot not found',
       fromBot: { botId: 'gone', runChatId: '' }
     })
+    // The run never started, so the bot has no problem to learn from.
+    expect(stub.problems).toEqual([])
+  })
+
+  it("logs a run that started and failed as the asked bot's problem", async () => {
+    asked()
+    registerChatTools({
+      send: async (chatId) => ({ chat: stub.chats.get(chatId)!, done: Promise.reject(new Error('signed out')) }),
+      emit: () => {},
+      isStreaming: () => false
+    })
+    await askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+    expect(stub.problems).toEqual([['scout', 'Could not answer: signed out']])
+    stub.problems = []
   })
 })
 
@@ -668,6 +691,8 @@ describe("the bot's chat", () => {
     expect(stub.chats.get('broken')!.messages.at(-1)?.content).toBe('The scheduled run failed: disk full')
     expect(stub.chats.get('brief')!.unattended).toBeNull()
     expect(stub.chats.get('broken')!.unattended).toBeNull()
+    expect(stub.problems).toEqual([['scout', 'The scheduled run failed: disk full']])
+    stub.problems = []
   })
 
   it('posts what a bot notifies in its own chat, and refuses notify outside its own chats', async () => {
@@ -758,6 +783,8 @@ describe("the bot's chat", () => {
     expect(stub.chats.get(own.id)!.messages.map((message) => message.content)).toEqual(['The follow-up failed: signed out'])
     expect(notified).toEqual(['The follow-up failed: signed out'])
     expect(stub.chats.get('run')!.messages).toEqual([])
+    expect(stub.problems).toEqual([['scout', 'The follow-up failed: signed out']])
+    stub.problems = []
 
     await vi.advanceTimersByTimeAsync(30_000)
     expect(sent).toHaveLength(2)
@@ -796,6 +823,9 @@ describe("the bot's chat", () => {
     }
     expect(notified).toHaveLength(1)
     expect(stub.chats.get(stub.scout.chatId!)!.messages.at(-1)?.fromBot).toMatchObject({ runChatId: 'run' })
+    // Only the bot's run is logged, with the text its chat got.
+    expect(stub.problems).toEqual([['scout', stub.chats.get('run')!.messages.at(-1)!.content]])
+    stub.problems = []
   })
 
   describe('the heartbeat', () => {
@@ -852,6 +882,38 @@ describe("the bot's chat", () => {
       expect(prompt).toContain('### Accountant\n\n- Book the March invoices by Friday')
       expect(prompt).not.toContain('my own work')
       expect(Date.parse(stub.chats.get('beat')!.schedule!.nextRunAt!)).toBeGreaterThan(Date.now())
+    })
+
+    it('runs while only a PROBLEMS.md has an entry, the chief\'s own included', async () => {
+      botChats()
+      vi.useFakeTimers()
+      stub.chief = 'scout'
+      const due = new Date(Date.now() - 60_000).toISOString()
+      stub.memory = { 'scout/PROBLEMS.md': '- 18-11-2026 09:30: The scheduled run failed: disk full' }
+      beat(due)
+      const sent: string[] = []
+      const { tools } = await freshTools(async (chatId, content) => {
+        sent.push(content)
+        return { chat: stub.chats.get(chatId)!, done: Promise.resolve(structuredClone(stub.chats.get(chatId)!)) }
+      })
+
+      tools.startScheduler()
+      await vi.advanceTimersByTimeAsync(5_000)
+
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).toContain('## What went wrong\n\n### Scout\n\nFile: /bots/scout/memory/PROBLEMS.md\n\n- 18-11-2026 09:30: The scheduled run failed: disk full')
+
+      stub.memory = { 'scout/PROBLEMS.md': '', 'accountant/PROBLEMS.md': '- Could not answer: signed out' }
+      stub.chats.get('beat')!.schedule!.nextRunAt = due
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(sent).toHaveLength(2)
+      expect(sent[1]).toContain('### Accountant\n\nFile: /bots/accountant/memory/PROBLEMS.md\n\n- Could not answer: signed out')
+      expect(sent[1]).not.toContain('### Scout')
+
+      stub.memory = {}
+      stub.chats.get('beat')!.schedule!.nextRunAt = due
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(sent).toHaveLength(2)
     })
 
     it('stops the heartbeat of a bot that is no longer chief', async () => {

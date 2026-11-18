@@ -156,7 +156,7 @@ Every chat gets the Workbench's `workbench` MCP server next to `browser`:
 - Documents: add PDF, EPUB, text and Markdown files, converted into one Markdown file per chapter with an outline
 - Skills from [skills.sh](https://skills.sh), and a pick of MCP servers per bot
 - A Grok bot makes images with the image model (`image_gen`, `image_edit`)
-- Chief of staff: a bot the app makes, which cannot be deleted. On a heartbeat (every 30 minutes from 08:00 to 18:59 by default) it reads its checklist and the open work each bot keeps in `STATUS.md`, hands due work to the right bot with `ask_bot`, and notifies you only when something needs you
+- Chief of staff: a bot the app makes, which cannot be deleted. On a heartbeat (every 30 minutes from 08:00 to 18:59 by default) it reads its checklist and the open work each bot keeps in `STATUS.md`, hands due work to the right bot with `ask_bot`, and notifies you only when something needs you. Each bot keeps a `LESSONS.md` in its memory that its sessions start with, and adds a rule there when something goes wrong. What a bot cannot solve itself, and every failed or interrupted run, goes in its `PROBLEMS.md`; the chief reviews those on the heartbeat, writes the lesson in that bot's `LESSONS.md` and removes the entry
 
 **Settings**
 

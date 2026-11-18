@@ -10,6 +10,7 @@ vi.mock('electron', () => ({
 }))
 
 import {
+  addBotProblem,
   addBotUnread,
   botAvatarUrl,
   botSessionRules,
@@ -206,7 +207,7 @@ describe('bots', () => {
       const own = (await readBotMemory(bot.id)).index
       const rules = botSessionRules(bot, own, (await readSharedMemory()).index)
       expect(rules).toContain(`The shared memory is the folder ${folder}.`)
-      expect(rules).toMatch(/### Shared memory\n[^\n]+\n\n#### MEMORY\.md\n- \[Peter\]\(peter\.md\) — how he likes answers$/)
+      expect(rules).toMatch(/### Shared memory\n[^\n]+\n\n#### MEMORY\.md\n- \[Peter\]\(peter\.md\) — how he likes answers\n\n## Lessons\n/)
       expect(rules.includes('what Scout reported')).toBe(bot === scout)
     }
 
@@ -299,7 +300,9 @@ describe('bots', () => {
     const clerk = await updateBot({ id: (await createBot('Clerk')).id, instructions: 'Books invoices.' })
     const rules = botSessionRules(clerk, '', '', [], [chief, clerk])
     const status = join(clerk.folder, 'memory', 'STATUS.md')
-    expect(rules).toContain('No other bot reads it, except that Chief, the chief of staff, sees STATUS.md.')
+    expect(rules).toContain(
+      'No other bot reads it, except that Chief, the chief of staff, sees STATUS.md and PROBLEMS.md, and may change LESSONS.md and PROBLEMS.md.'
+    )
     expect(rules).toContain(`## Open work\nChief is the chief of staff. On its heartbeat it sees the file ${status}`)
     expect(rules).toContain('Remove an item once it is done. Leave the file empty when nothing is open.')
     expect(rules).toContain('also set a follow_up')
@@ -323,6 +326,49 @@ describe('bots', () => {
     expect(rules).toContain(`Your memory is the folder ${join(chief.folder, 'memory')}. No other bot reads it.`)
     expect(rules).not.toContain('## Open work')
     expect(botSessionRules(chief, '', '', [], [chief])).toContain('There are no other bots yet.')
+    expect(rules).toContain("On a heartbeat you also get what went wrong: the entries in each bot's PROBLEMS.md, your own included.")
+    expect(rules).toContain("Write the rule that prevents it in that bot's LESSONS.md, which is next to its PROBLEMS.md.")
+    expect(rules).toContain('When the same thing went wrong despite a lesson, sharpen that lesson.')
+    expect(rules).toContain('Then remove the entry from PROBLEMS.md.')
+    expect(rules).toContain('You can read and write the LESSONS.md and PROBLEMS.md of every bot without asking.')
+  })
+
+  it('logs a problem once per text, on one dated line', async () => {
+    const bot = await createBot('Clerk')
+    const file = join(bot.folder, 'memory', 'PROBLEMS.md')
+    await addBotProblem(bot.id, 'The scheduled run failed:\n  disk full')
+    await addBotProblem(bot.id, 'The scheduled run failed: disk full')
+    await addBotProblem(bot.id, 'x'.repeat(600))
+    const lines = readFileSync(file, 'utf8').split('\n')
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toMatch(/^- .+: The scheduled run failed: disk full$/)
+    expect(lines[1]).toMatch(new RegExp(`^- .+: ${'x'.repeat(500)}…$`))
+    expect(lines[2]).toBe('')
+    expect(await readBotMemoryFile(bot.id, 'PROBLEMS.md')).toBe(lines.join('\n'))
+    await expect(addBotProblem('nobody', 'x')).rejects.toThrow('Bot not found')
+  })
+
+  it('gives every bot its lessons, and a place for problems only next to a chief', async () => {
+    const chief = { ...(await createBot('Chief')), chief: true }
+    const clerk = await createBot('Clerk')
+    const lessons = join(clerk.folder, 'memory', 'LESSONS.md')
+    const problems = join(clerk.folder, 'memory', 'PROBLEMS.md')
+
+    const alone = botSessionRules(clerk, '', '', [], [clerk])
+    expect(alone).toContain(`## Lessons\nYou learn from what goes wrong, so it does not happen again. Your lessons are the file ${lessons}, shown below. Follow them.`)
+    expect(alone).toMatch(/#### LESSONS\.md\n\(empty\)$/)
+    expect(alone.indexOf('## Lessons')).toBeGreaterThan(alone.indexOf('### Shared memory'))
+    expect(alone).not.toContain('PROBLEMS.md')
+
+    const next = botSessionRules(clerk, '', '', [], [chief, clerk], '- Check the bank export before booking: it was empty once.')
+    expect(next).toContain(`add a line to ${problems} saying what happened and when. Chief, the chief of staff, reviews that file.`)
+    expect(next).toContain('#### LESSONS.md\n- Check the bank export before booking: it was empty once.')
+    expect(next.indexOf('## Lessons')).toBeLessThan(next.indexOf('## Open work'))
+
+    const own = botSessionRules(chief, '', '', [], [chief, clerk], 'l'.repeat(5000))
+    expect(own).toContain(`add a line to ${join(chief.folder, 'memory', 'PROBLEMS.md')} saying what happened and when.`)
+    expect(own).toContain(`${'l'.repeat(4000)}\n… (cut here: keep LESSONS.md short and merge lessons that say the same)`)
+    expect(own).not.toContain('l'.repeat(4001))
   })
 
   it('leaves the chief out of the rules when there is none', async () => {

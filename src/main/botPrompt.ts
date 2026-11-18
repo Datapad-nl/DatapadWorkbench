@@ -47,21 +47,37 @@ export function hasOpenItems(text: string): boolean {
     .some((line) => line !== '' && !/^#{1,6}(\s|$)/.test(line) && !/^[-*+](\s*\[[ xX]?\])?$/.test(line))
 }
 
-/** The chief of staff's heartbeat: the time, its checklist and each bot's open work, and what to do with them. */
+/**
+ * The chief of staff's heartbeat: the time, its checklist, each bot's open work and what went wrong for each bot,
+ * and what to do with them. `file` is the full path of that bot's PROBLEMS.md.
+ */
 export function promptForHeartbeat(input: {
   now: Date
   checklist: string
   work: Array<{ name: string; status: string }>
+  problems: Array<{ name: string; file: string; text: string }>
 }): string {
   const checklist = hasOpenItems(input.checklist) ? clip(input.checklist, 4000) : '(empty)'
   const open = input.work.filter((bot) => hasOpenItems(bot.status))
   const work =
     open.length > 0 ? open.map((bot) => `### ${bot.name}\n\n${clip(bot.status, 2000)}`).join('\n\n') : 'No bot has open work.'
+  const problems = input.problems.filter((bot) => hasOpenItems(bot.text))
+  const wrong =
+    problems.length > 0
+      ? [
+          `## What went wrong\n\n${problems.map((bot) => `### ${bot.name}\n\nFile: ${bot.file}\n\n${clip(bot.text, 2000)}`).join('\n\n')}`
+        ]
+      : []
+  const learn =
+    problems.length > 0
+      ? ' For each entry under What went wrong, find the cause, write the rule that prevents it in the LESSONS.md next to that PROBLEMS.md, and then remove the entry.'
+      : ''
   return [
     `Heartbeat. It is ${input.now.toString()}.`,
     `## Your checklist\n\n${checklist}`,
     `## Open work of the bots\n\n${work}`,
-    'For each item that is due now, hand it to the bot it belongs to with the workbench tool ask_bot, in a message that stands on its own. Leave what is not due yet. Then call notify once if the user needs to know or act on something; otherwise finish without it.'
+    ...wrong,
+    `For each item that is due now, hand it to the bot it belongs to with the workbench tool ask_bot, in a message that stands on its own. Leave what is not due yet.${learn} Then call notify once if the user needs to know or act on something; otherwise finish without it.`
   ].join('\n\n')
 }
 

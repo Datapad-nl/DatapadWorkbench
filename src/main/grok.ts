@@ -59,7 +59,16 @@ import { emitNotice, finishTurn, lookupSession, startTurn } from './activity'
 import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
 import { listBotDocuments } from './botDocuments'
 import { botRun } from './botRuns'
-import { botFolder, botSessionRules, getBot, listBots, readBotMemory, readSharedMemory } from './bots'
+import {
+  LESSONS_FILE,
+  botFolder,
+  botSessionRules,
+  getBot,
+  listBots,
+  readBotMemory,
+  readBotMemoryFile,
+  readSharedMemory
+} from './bots'
 import { endForegroundAgents } from './builtinAgents'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
@@ -968,7 +977,8 @@ async function chatRules(chat: Chat, project: Project | undefined): Promise<stri
         (await readBotMemory(chat.botId)).index,
         (await readSharedMemory()).index,
         await listBotDocuments(chat.botId),
-        await listBots()
+        await listBots(),
+        await readBotMemoryFile(chat.botId, LESSONS_FILE)
       )
     : null
   const rules = [bot, await projectSessionRules(project?.id)].filter(Boolean)

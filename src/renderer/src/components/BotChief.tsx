@@ -85,7 +85,9 @@ export function BotChief({ bot }: { bot: Bot }): React.JSX.Element {
       </label>
       <span className="text-[11px] text-faint">
         This bot is the chief of staff. On each heartbeat it checks its checklist and the other bots&apos; open work,
-        hands due work to the right bot, and tells you only when something needs you.
+        hands due work to the right bot, and tells you only when something needs you. It also reviews what went wrong
+        for each bot, in its <span className="font-mono">PROBLEMS.md</span>, and saves the lesson in that bot&apos;s{' '}
+        <span className="font-mono">LESSONS.md</span>.
       </span>
       <div className="text-[12px] text-muted">Checklist</div>
       <textarea
@@ -100,7 +102,8 @@ export function BotChief({ bot }: { bot: Bot }): React.JSX.Element {
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 text-[11px] text-faint">
           Saved as <span className="font-mono">memory/HEARTBEAT.md</span>. The bot adds to it too when you ask it to
-          keep an eye on something. With nothing open here or in any bot&apos;s work, a heartbeat does not run.
+          keep an eye on something. With nothing open here, in any bot&apos;s work or in any bot&apos;s problems, a heartbeat
+          does not run.
         </span>
         {editing.current && (
           <>
