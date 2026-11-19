@@ -1077,7 +1077,15 @@ function dayLabel(date: Date): string {
 function clockTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const today = new Date()
+  if (date.toDateString() === today.toDateString()) return time
+  const day = date.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+    year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric'
+  })
+  return `${day}, ${time}`
 }
 
 function DayDivider({ label }: { label: string }): React.JSX.Element {
