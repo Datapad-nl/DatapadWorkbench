@@ -1,6 +1,6 @@
 import { Menu, clipboard, ipcMain, shell } from 'electron'
 import type { BrowserWindow, ContextMenuParams, MenuItemConstructorOptions, WebContents } from 'electron'
-import { navigateBrowser, sanitizeUrl } from './browser'
+import { activeBrowserScope, navigateBrowser, sanitizeUrl } from './browser'
 
 const SEARCH_URL = 'https://www.google.com/search?q='
 
@@ -49,7 +49,7 @@ function menuFor(contents: WebContents, params: ContextMenuParams): MenuItemCons
   const link = params.linkURL ? sanitizeUrl(params.linkURL) : null
   if (link) {
     sections.push([
-      { label: 'Open Link', click: () => void navigateBrowser(link) },
+      { label: 'Open Link', click: () => void navigateBrowser(activeBrowserScope(), link) },
       { label: 'Open Link in Default Browser', click: () => void shell.openExternal(link) },
       { label: 'Copy Link', click: () => clipboard.writeText(link) }
     ])
@@ -83,7 +83,7 @@ function menuFor(contents: WebContents, params: ContextMenuParams): MenuItemCons
 
   if (text) {
     const lookups: MenuItemConstructorOptions[] = [
-      { label: 'Search with Google', click: () => void navigateBrowser(SEARCH_URL + encodeURIComponent(text)) }
+      { label: 'Search with Google', click: () => void navigateBrowser(activeBrowserScope(), SEARCH_URL + encodeURIComponent(text)) }
     ]
     if (process.platform === 'darwin') {
       lookups.push({ label: `Look Up “${excerpt(text)}”`, click: () => contents.showDefinitionForSelection() })

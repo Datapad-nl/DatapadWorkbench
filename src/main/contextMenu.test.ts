@@ -26,6 +26,7 @@ vi.mock('electron', async () => {
 
 vi.mock('./browser', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./browser')>()),
+  activeBrowserScope: () => 'p',
   navigateBrowser: fake.navigate
 }))
 
@@ -100,7 +101,7 @@ describe('context menu', () => {
     expect(contents.send).toHaveBeenCalledWith('contextMenu:quote', '  some reply text  ')
 
     template!.find((item) => item.label === 'Search with Google')!.click!({} as never, undefined, {} as never)
-    expect(fake.navigate).toHaveBeenCalledWith('https://www.google.com/search?q=some%20reply%20text')
+    expect(fake.navigate).toHaveBeenCalledWith('p', 'https://www.google.com/search?q=some%20reply%20text')
   })
 
   it('leaves out quoting when no composer is open', () => {

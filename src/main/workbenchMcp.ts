@@ -134,37 +134,45 @@ async function workbenchTools(chatId: string): Promise<McpTool[]> {
   return chat?.botId ? WORKBENCH_TOOLS : [...WORKBENCH_TOOLS, ...PROJECT_CHAT_TOOLS]
 }
 
-async function browserTool(name: string, args: Args): Promise<unknown> {
-  if (name === 'get_state') return getBrowserState()
+/** The browser page a chat drives: its project's, or for a bot's own chat, the bot's. */
+async function browserScope(chatId: string): Promise<string> {
+  const chat = await getChat(chatId)
+  if (chat.projectId) return chat.projectId
+  if (chat.botId) return `bot:${chat.botId}`
+  throw new Error('This chat has no project, so it has no browser page.')
+}
+
+async function browserTool(name: string, args: Args, scope: string): Promise<unknown> {
+  if (name === 'get_state') return getBrowserState(scope)
   if (name === 'navigate') {
-    requestShowBrowser()
-    return navigate(String(args.url ?? ''))
+    requestShowBrowser(scope)
+    return navigate(scope, String(args.url ?? ''))
   }
   if (name === 'back') {
-    requestShowBrowser()
-    return back()
+    requestShowBrowser(scope)
+    return back(scope)
   }
   if (name === 'forward') {
-    requestShowBrowser()
-    return forward()
+    requestShowBrowser(scope)
+    return forward(scope)
   }
-  if (name === 'reload') return reload()
-  if (name === 'stop') return stopBrowser()
-  if (name === 'screenshot') return screenshot()
-  if (name === 'snapshot') return snapshot(num(args.maxChars))
+  if (name === 'reload') return reload(scope)
+  if (name === 'stop') return stopBrowser(scope)
+  if (name === 'screenshot') return screenshot(scope)
+  if (name === 'snapshot') return snapshot(scope, num(args.maxChars))
   if (name === 'click') {
     const target = targetOf(args)
     if (!target) throw new Error('Pass ref, selector or text')
-    return click(target)
+    return click(scope, target)
   }
   if (name === 'type') {
     const field = targetOf({ ref: args.ref, selector: args.selector, text: args.field })
-    return type(field, typeof args.text === 'string' ? args.text : '', args.clear === true)
+    return type(scope, field, typeof args.text === 'string' ? args.text : '', args.clear === true)
   }
-  if (name === 'press') return press(str(args.key) ?? '', Array.isArray(args.modifiers) ? args.modifiers.map(String) : [])
-  if (name === 'wait_for') return waitFor(str(args.selector), str(args.text), num(args.timeoutMs))
-  if (name === 'evaluate') return { result: await evaluate(str(args.expression) ?? 'undefined') }
-  if (name === 'console') return consoleLog(str(args.level), num(args.limit))
+  if (name === 'press') return press(scope, str(args.key) ?? '', Array.isArray(args.modifiers) ? args.modifiers.map(String) : [])
+  if (name === 'wait_for') return waitFor(scope, str(args.selector), str(args.text), num(args.timeoutMs))
+  if (name === 'evaluate') return { result: await evaluate(scope, str(args.expression) ?? 'undefined') }
+  if (name === 'console') return consoleLog(scope, str(args.level), num(args.limit))
   if (name === 'transcribe_youtube') return transcribeYoutube(String(args.url ?? ''), str(args.lang))
   throw new Error(`Unknown tool: ${name}`)
 }
@@ -230,7 +238,9 @@ export async function callTool(
 ): Promise<Record<string, unknown>> {
   try {
     const data =
-      toolset === 'workbench' ? await workbenchTool(name, args, chatId, signal) : await browserTool(name, args)
+      toolset === 'workbench'
+        ? await workbenchTool(name, args, chatId, signal)
+        : await browserTool(name, args, await browserScope(chatId))
     return { content: toContent(name, data) }
   } catch (error) {
     return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true }

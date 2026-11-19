@@ -282,6 +282,8 @@ const api = {
     }
   },
   getBrowserState: () => ipcRenderer.invoke('browser:getState') as Promise<BrowserState>,
+  setBrowserScope: (scope: string | null) =>
+    ipcRenderer.invoke('browser:setScope', scope) as Promise<BrowserState>,
   setBrowserVisible: (visible: boolean) =>
     ipcRenderer.invoke('browser:setVisible', visible) as Promise<BrowserState>,
   setBrowserBounds: (bounds: BrowserBounds) =>
@@ -292,6 +294,7 @@ const api = {
   browserForward: () => ipcRenderer.invoke('browser:forward') as Promise<BrowserState>,
   reloadBrowser: () => ipcRenderer.invoke('browser:reload') as Promise<BrowserState>,
   stopBrowser: () => ipcRenderer.invoke('browser:stop') as Promise<BrowserState>,
+  toggleBrowserDevTools: () => ipcRenderer.invoke('browser:devTools') as Promise<void>,
   clearBrowserData: () => ipcRenderer.invoke('browser:clearData') as Promise<BrowserState>,
   startBrowserAnnotate: () =>
     ipcRenderer.invoke('browser:annotateStart') as Promise<BrowserAnnotationHit | null>,

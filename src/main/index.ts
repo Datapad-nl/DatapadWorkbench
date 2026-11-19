@@ -5,7 +5,7 @@ import { startUpdater, stopUpdater } from './updater'
 import { stopAgents } from './acp'
 import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
-import { attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
+import { activeBrowserScope, attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
 import { augmentPath, killOrphanCodegraphInits, stopCodegraphJobs } from './codegraph'
 import { appIndexPath, devServerUrl, isAppUrl } from './appUrl'
 import { attachContextMenu } from './contextMenu'
@@ -150,7 +150,7 @@ function createWindow(hidden = false): void {
   function openInAppBrowser(url: string): void {
     const clean = sanitizeUrl(url)
     if (clean) {
-      void navigateBrowser(clean)
+      void navigateBrowser(activeBrowserScope(), clean)
       return
     }
     // Other schemes (file:, smb: and the like) could open or run something local, so only mail goes out.

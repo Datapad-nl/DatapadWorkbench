@@ -58,6 +58,7 @@ export function BrowserPane(): React.JSX.Element {
     swapRightPanes,
     activeChatId,
     activeProjectId,
+    activeBotId,
     openChat,
     sendMessage
   } = useWorkspace()
@@ -157,6 +158,15 @@ export function BrowserPane(): React.JSX.Element {
     setNote('')
     setPasted([])
   }, [overlay])
+
+  // Another project's page replaces this one, so a note about this page is dropped; main ends the pick.
+  useEffect(() => {
+    pickGen.current += 1
+    setMode('off')
+    setHit(null)
+    setNote('')
+    setPasted([])
+  }, [activeProjectId, activeBotId])
 
   useEffect(() => {
     if (mode === 'comment') noteRef.current?.focus()
@@ -387,6 +397,13 @@ export function BrowserPane(): React.JSX.Element {
               {transcript ? 'Video' : 'Transcript'}
             </button>
           )}
+          <IconButton
+            label="Developer Tools"
+            disabled={!state.url}
+            onClick={() => void window.workbench.toggleBrowserDevTools()}
+          >
+            <CodeIcon />
+          </IconButton>
           <button
             type="button"
             className="h-7 shrink-0 rounded-[7px] px-1.5 text-[11px] text-muted hover:bg-hover hover:text-ink"
@@ -790,6 +807,20 @@ function CrosshairIcon(): React.JSX.Element {
         stroke="currentColor"
         strokeWidth="1.4"
         strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function CodeIcon(): React.JSX.Element {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M4.5 3.5 1.25 7l3.25 3.5M9.5 3.5 12.75 7 9.5 10.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
     </svg>
   )

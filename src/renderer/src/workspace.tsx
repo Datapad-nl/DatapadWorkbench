@@ -480,6 +480,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     [setShowBrowser]
   )
 
+  // The browser pane shows the page of the project or bot on screen; main keeps one page for each.
+  useEffect(() => {
+    void window.workbench.setBrowserScope(activeBotId ? `bot:${activeBotId}` : activeProjectId)
+  }, [activeBotId, activeProjectId])
+
   useEffect(() => {
     function onClick(event: MouseEvent): void {
       if (event.defaultPrevented || event.button !== 0) return

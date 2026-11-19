@@ -12,7 +12,7 @@ export const BROWSER_TOOLS: McpTool[] = [
   {
     name: 'navigate',
     description:
-      'Open a URL in the Datapad Workbench BrowserPane — the in-app browser. Always use this instead of an external browser. Shows the pane if it is hidden. Use http or https only.',
+      'Open a URL in the Datapad Workbench BrowserPane — the in-app browser. Always use this instead of an external browser. Shows the pane if it is hidden and the user has the project of this chat open. Use http or https only.',
     inputSchema: {
       type: 'object',
       properties: {

@@ -1,12 +1,12 @@
 import {
   browserContents,
   browserConsole,
+  browserPainted,
   getBrowserState,
   goBack,
   goForward,
   navigateBrowser,
   reloadBrowser,
-  requestShowBrowser,
   type ConsoleEntry
 } from './browser'
 import type { BrowserState } from '../shared/types'
@@ -74,9 +74,9 @@ const find = (t) => {
 };
 `
 
-function run<T>(body: string, arg: unknown = null): Promise<T> {
+function run<T>(scope: string, body: string, arg: unknown = null): Promise<T> {
   const script = `(async (arg) => { ${PAGE_HELPERS}\n${body} })(${JSON.stringify(arg)})`
-  return withTimeout(browserContents().executeJavaScript(script, true) as Promise<T>, 15_000)
+  return withTimeout(browserContents(scope).executeJavaScript(script, true) as Promise<T>, 15_000)
 }
 
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
@@ -97,45 +97,45 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-let queue: Promise<unknown> = Promise.resolve()
+const queues = new Map<string, Promise<unknown>>()
 
-/** Runs drive calls one at a time, so parallel tool calls cannot interleave focus and typing. */
-function serial<A extends unknown[], T>(op: (...args: A) => Promise<T>): (...args: A) => Promise<T> {
-  return (...args) => {
-    const next = queue.then(() => op(...args))
-    queue = next.catch(() => undefined)
+/**
+ * Runs a scope's drive calls one at a time, so parallel tool calls cannot interleave focus and typing.
+ * Each scope has its own page, so one project never waits on another.
+ */
+function serial<A extends unknown[], T>(
+  op: (scope: string, ...args: A) => Promise<T>
+): (scope: string, ...args: A) => Promise<T> {
+  return (scope, ...args) => {
+    const next = (queues.get(scope) ?? Promise.resolve()).then(() => op(scope, ...args))
+    queues.set(scope, next.catch(() => undefined))
     return next
   }
 }
 
 // Navigation waits its turn too, so a click or typing cannot land on the page that replaces it.
-export const navigate = serial(async (url: string): Promise<BrowserState> => navigateBrowser(url))
-export const back = serial(async (): Promise<BrowserState> => goBack())
-export const forward = serial(async (): Promise<BrowserState> => goForward())
-export const reload = serial(async (): Promise<BrowserState> => reloadBrowser())
+export const navigate = serial(async (scope: string, url: string): Promise<BrowserState> => navigateBrowser(scope, url))
+export const back = serial(async (scope: string): Promise<BrowserState> => goBack(scope))
+export const forward = serial(async (scope: string): Promise<BrowserState> => goForward(scope))
+export const reload = serial(async (scope: string): Promise<BrowserState> => reloadBrowser(scope))
 
-function requirePage(): void {
-  const { url } = getBrowserState()
+function requirePage(scope: string): void {
+  const { url } = getBrowserState(scope)
   if (!url) throw new Error('No page is open. Call navigate first.')
 }
 
-async function settle(): Promise<BrowserState> {
+async function settle(scope: string): Promise<BrowserState> {
   await pause(250)
-  const wc = browserContents()
+  const wc = browserContents(scope)
   for (let i = 0; i < 20 && wc.isLoading(); i += 1) await pause(250)
-  return getBrowserState()
+  return getBrowserState(scope)
 }
 
-export const screenshot = serial(async (): Promise<{ png: string; width: number; height: number }> => {
-  requirePage()
-  if (!getBrowserState().visible) {
-    requestShowBrowser()
-    // The view is on screen once the pane has opened and sent its bounds.
-    for (let i = 0; i < 10 && !getBrowserState().visible; i += 1) await pause(200)
-    await pause(200)
-  }
-  let image = await browserContents().capturePage()
-  if (image.isEmpty()) throw new Error('The BrowserPane is hidden or has no size, so there is nothing to capture.')
+export const screenshot = serial(async (scope: string): Promise<{ png: string; width: number; height: number }> => {
+  requirePage(scope)
+  // A page off screen is still painted, so it is captured without showing it. A capture can stall, so it is timed.
+  let image = await withTimeout(browserContents(scope).capturePage(), 15_000)
+  if (image.isEmpty()) throw new Error('The Workbench window is not open, so there is nothing to capture.')
   // Keep the long side within 1568px: a 1280×1617 capture came back to the agent as UnknownVizError.
   const { width, height } = image.getSize()
   const scale = Math.min(1280 / width, 1568 / height, 1)
@@ -144,9 +144,10 @@ export const screenshot = serial(async (): Promise<{ png: string; width: number;
   return { png: image.toPNG().toString('base64'), width: size.width, height: size.height }
 })
 
-export const snapshot = serial(async (maxChars: number = 6000): Promise<Snapshot> => {
-  requirePage()
+export const snapshot = serial(async (scope: string, maxChars: number = 6000): Promise<Snapshot> => {
+  requirePage(scope)
   return run<Snapshot>(
+    scope,
     `
 document.querySelectorAll('[data-wb-ref]').forEach((el) => el.removeAttribute('data-wb-ref'));
 const elements = [];
@@ -176,9 +177,10 @@ return { url: location.href, title: document.title, text: text.length > arg ? te
   )
 })
 
-export const click = serial(async (target: Target): Promise<BrowserState> => {
-  requirePage()
+export const click = serial(async (scope: string, target: Target): Promise<BrowserState> => {
+  requirePage(scope)
   const point = await run<{ x: number; y: number } | null>(
+    scope,
     `
 const el = find(arg);
 el.scrollIntoView({ block: 'center', inline: 'center' });
@@ -192,25 +194,27 @@ return null;
 `,
     target
   )
-  const state = getBrowserState()
-  if (point && state.visible) {
-    const wc = browserContents()
+  // A parked page is painted too, so real mouse events reach it as on screen.
+  if (point && browserPainted(scope)) {
+    const wc = browserContents(scope)
     wc.sendInputEvent({ type: 'mouseMove', x: point.x, y: point.y })
     wc.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 })
     wc.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 })
   } else if (point) {
-    await run('find(arg).click(); return null;', target)
+    await run(scope, 'find(arg).click(); return null;', target)
   }
-  return settle()
+  return settle(scope)
 })
 
 export const type = serial(async (
+  scope: string,
   target: Target | null,
   text: string,
   clear: boolean
 ): Promise<BrowserState & { value: string | null }> => {
-  requirePage()
+  requirePage(scope)
   const kind = await run<'select' | 'field' | 'editable' | 'other'>(
+    scope,
     `
 const el = arg.target ? find(arg.target) : document.activeElement;
 if (!el || el === document.body) throw new Error('No field is focused. Pass ref, selector or text.');
@@ -237,10 +241,11 @@ return el.isContentEditable ? 'editable' : 'other';
 `,
     { target, text, clear }
   )
-  if (kind !== 'select') browserContents().insertText(text)
+  if (kind !== 'select') browserContents(scope).insertText(text)
   // insertText goes through the page's own input path, so frameworks see real input events.
   // If it did not land (some pages swallow it), set the value the way React expects.
   const value = await run<string | null>(
+    scope,
     `
 const el = document.querySelector('[data-wb-typing]');
 if (!el) return null;
@@ -257,7 +262,7 @@ return el.type === 'password' ? '••••' : String(el.value).slice(0, 200);
 `,
     { target, text, clear }
   )
-  return { ...(await settle()), value }
+  return { ...(await settle(scope)), value }
 })
 
 const KEY_NAMES: Record<string, string> = {
@@ -274,35 +279,37 @@ const KEY_NAMES: Record<string, string> = {
 type Modifier = 'shift' | 'control' | 'alt' | 'meta'
 const MODIFIERS = new Set<Modifier>(['shift', 'control', 'alt', 'meta'])
 
-export const press = serial(async (key: string, modifiers: string[] = []): Promise<BrowserState> => {
-  requirePage()
+export const press = serial(async (scope: string, key: string, modifiers: string[] = []): Promise<BrowserState> => {
+  requirePage(scope)
   const raw = key.trim()
   if (!raw) throw new Error('Pass a key, for example Enter or Escape')
   const keyCode = KEY_NAMES[raw.toLowerCase()] ?? raw
   const mods = modifiers
     .map((m) => m.toLowerCase().replace(/^(ctrl|cmd|command|option)$/, (word) => (word === 'ctrl' ? 'control' : word === 'option' ? 'alt' : 'meta')))
     .filter((m): m is Modifier => MODIFIERS.has(m as Modifier))
-  const wc = browserContents()
+  const wc = browserContents(scope)
   wc.sendInputEvent({ type: 'keyDown', keyCode, modifiers: mods })
   const printable = keyCode.length === 1 ? keyCode : keyCode === 'Enter' ? '\r' : keyCode === 'Space' ? ' ' : null
   if (printable && !mods.some((m) => m === 'control' || m === 'meta')) {
     wc.sendInputEvent({ type: 'char', keyCode: printable, modifiers: mods })
   }
   wc.sendInputEvent({ type: 'keyUp', keyCode, modifiers: mods })
-  return settle()
+  return settle(scope)
 })
 
 export const waitFor = serial(async (
+  scope: string,
   selector: string | undefined,
   text: string | undefined,
   timeoutMs: number = 5000
 ): Promise<BrowserState & { found: boolean; waitedMs: number }> => {
-  requirePage()
+  requirePage(scope)
   if (!selector && !text) throw new Error('Pass selector or text')
   const limit = Math.min(Math.max(timeoutMs, 100), 30_000)
   const started = Date.now()
   while (true) {
     const found = await run<boolean>(
+      scope,
       `
 if (arg.selector) { const el = document.querySelector(arg.selector); if (!el || !shown(el)) return false; }
 if (arg.text && !(document.body && document.body.innerText.toLowerCase().includes(arg.text.toLowerCase()))) return false;
@@ -311,20 +318,20 @@ return true;
       { selector, text }
     ).catch(() => false)
     const waitedMs = Date.now() - started
-    if (found || waitedMs >= limit) return { ...getBrowserState(), found, waitedMs }
+    if (found || waitedMs >= limit) return { ...getBrowserState(scope), found, waitedMs }
     await pause(200)
   }
 })
 
-export const evaluate = serial(async (expression: string): Promise<unknown> => {
-  requirePage()
+export const evaluate = serial(async (scope: string, expression: string): Promise<unknown> => {
+  requirePage(scope)
   // Inlined rather than eval'd, so pages whose CSP forbids eval still work.
   const script = `(async () => { const value = await (\n${expression}\n); try { return JSON.parse(JSON.stringify(value ?? null)); } catch { return String(value); } })()`
-  return withTimeout(browserContents().executeJavaScript(script, true) as Promise<unknown>, 15_000)
+  return withTimeout(browserContents(scope).executeJavaScript(script, true) as Promise<unknown>, 15_000)
 })
 
-export function consoleLog(level?: string, limit = 50): ConsoleEntry[] {
+export function consoleLog(scope: string, level?: string, limit = 50): ConsoleEntry[] {
   const wanted = level === 'error' ? ['error'] : level === 'warning' ? ['warning', 'error'] : null
-  const rows = browserConsole().filter((row) => !wanted || wanted.includes(row.level))
+  const rows = browserConsole(scope).filter((row) => !wanted || wanted.includes(row.level))
   return rows.slice(-Math.min(Math.max(limit, 1), 200))
 }

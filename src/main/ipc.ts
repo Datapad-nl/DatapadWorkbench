@@ -52,6 +52,7 @@ import {
 import { getBuiltinAgents, startBuiltinAgentsBridge } from './builtinAgents'
 import { getBackgroundTasks, startBackgroundTasksBridge } from './backgroundTasks'
 import {
+  activeBrowserScope,
   cancelBrowserAnnotate,
   clearBrowserData,
   getBrowserState,
@@ -61,9 +62,11 @@ import {
   reloadBrowser,
   sanitizeUrl,
   setBrowserBounds,
+  setBrowserScope,
   setBrowserVisible,
   startBrowserAnnotate,
-  stopBrowser
+  stopBrowser,
+  toggleBrowserDevTools
 } from './browser'
 import { openChatMedia } from './media'
 import { searchMcpRegistry } from './mcpRegistry'
@@ -929,14 +932,19 @@ export function registerIpc(): void {
     return clearActivity()
   })
 
-  ipcMain.handle('browser:getState', () => getBrowserState())
+  // The user's own browser actions act on the page the window shows.
+  ipcMain.handle('browser:getState', () => getBrowserState(activeBrowserScope()))
+  ipcMain.handle('browser:setScope', (_event, scope: unknown) =>
+    setBrowserScope(typeof scope === 'string' && scope ? scope : null)
+  )
   ipcMain.handle('browser:setVisible', (_event, next: boolean) => setBrowserVisible(Boolean(next)))
   ipcMain.handle('browser:setBounds', (_event, bounds: BrowserBounds) => setBrowserBounds(bounds))
-  ipcMain.handle('browser:navigate', (_event, url: string) => navigateBrowser(String(url ?? '')))
-  ipcMain.handle('browser:back', () => goBack())
-  ipcMain.handle('browser:forward', () => goForward())
-  ipcMain.handle('browser:reload', () => reloadBrowser())
-  ipcMain.handle('browser:stop', () => stopBrowser())
+  ipcMain.handle('browser:navigate', (_event, url: string) => navigateBrowser(activeBrowserScope(), String(url ?? '')))
+  ipcMain.handle('browser:back', () => goBack(activeBrowserScope()))
+  ipcMain.handle('browser:forward', () => goForward(activeBrowserScope()))
+  ipcMain.handle('browser:reload', () => reloadBrowser(activeBrowserScope()))
+  ipcMain.handle('browser:stop', () => stopBrowser(activeBrowserScope()))
+  ipcMain.handle('browser:devTools', () => toggleBrowserDevTools())
   ipcMain.handle('browser:clearData', () => clearBrowserData())
   ipcMain.handle('browser:annotateStart', () => startBrowserAnnotate())
   ipcMain.handle('browser:annotateCancel', () => cancelBrowserAnnotate())

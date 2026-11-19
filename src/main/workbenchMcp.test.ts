@@ -15,8 +15,8 @@ vi.mock('./browser', () => ({
   stopBrowser: () => ({ ok: true })
 }))
 vi.mock('./browserDrive', () => ({
-  navigate: async (url: string) => {
-    fake.calls.push(['navigate', url])
+  navigate: async (scope: string, url: string) => {
+    fake.calls.push(['navigate', [scope, url]])
     return { url }
   }
 }))
@@ -161,11 +161,24 @@ describe('Workbench MCP over HTTP', () => {
       params: { name: 'navigate', arguments: { url: 'http://localhost:5173' } }
     })
     expect(await events(res)).toHaveLength(1)
-    expect(fake.calls).toEqual([['navigate', 'http://localhost:5173']])
+    expect(fake.calls).toEqual([['navigate', ['p', 'http://localhost:5173']]])
 
     const wrong = await post('browser', { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'delegate', arguments: {} } })
     expect(await events(wrong)).toEqual([
       { jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'Unknown tool: delegate' }], isError: true } }
+    ])
+  })
+
+  it("drives the browser page of the chat's project, or of its bot", async () => {
+    const navigate = (id: number): Promise<Response> =>
+      post('browser', { jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'navigate', arguments: { url: 'http://localhost:3000' } } })
+    fake.chat = { botId: undefined, projectId: 'other', replyTo: undefined }
+    await events(await navigate(15))
+    fake.chat = { botId: 'scout', projectId: '', replyTo: undefined }
+    await events(await navigate(16))
+    expect(fake.calls).toEqual([
+      ['navigate', ['other', 'http://localhost:3000']],
+      ['navigate', ['bot:scout', 'http://localhost:3000']]
     ])
   })
 
