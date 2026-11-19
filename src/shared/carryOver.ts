@@ -53,10 +53,10 @@ export function askedFromPrompt(
     .join('\n\n')
 }
 
-/** The turns as Markdown, newest kept within `limit`. Side answers (/btw) stay out. */
+/** The turns as Markdown, newest kept within `limit`. Side answers (/btw) and bots' acknowledgements stay out. */
 function renderConversation(earlier: Message[], limit: number): { text: string; cut: boolean } | null {
   const turns = earlier
-    .filter((message) => message.kind !== 'btw' && message.content.trim())
+    .filter((message) => message.kind !== 'btw' && !message.fromBot?.pending && message.content.trim())
     .map((message) => {
       const who = message.role === 'user' ? 'User' : message.fromBot ? `Bot ${message.fromBot.name}` : 'Assistant'
       return `### ${who}\n${message.content.trim()}`

@@ -1248,8 +1248,10 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   )
   const asked = followText ? attached.text : promptForBotsMentioned(attached.text, lastUser!.bots)
   const mentioned = unattended ? promptForBotRun(asked, unattended) : asked
-  // Bot answers posted since the agent's last prompt: it sees them now, once.
-  const answers = chat.messages.filter((message) => message.fromBot && !message.fromBot.delivered)
+  // Bot answers posted since the agent's last prompt: it sees them now, once. An acknowledgement is no answer yet.
+  const answers = chat.messages.filter(
+    (message) => message.fromBot && !message.fromBot.delivered && !message.fromBot.pending
+  )
   if (answers.length > 0) {
     const ids = new Set(answers.map((message) => message.id))
     await step(

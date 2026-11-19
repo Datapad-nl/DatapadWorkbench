@@ -170,7 +170,7 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
     if (primedChats.current.has(activeChatId)) return
     primedChats.current.add(activeChatId)
     const last = chatsById[activeChatId]?.messages.at(-1)
-    if (last?.role === 'assistant') speechState(activeChatId).ids.add(last.id)
+    if (last?.role === 'assistant' && !last.fromBot?.pending) speechState(activeChatId).ids.add(last.id)
   }, [activeChatId, chatsById])
 
   // A deleted chat leaves chatsById, and its speech state goes with it.
@@ -547,7 +547,8 @@ export function VoiceProvider({ children }: { children: ReactNode }): React.JSX.
       })
       return
     }
-    if (!last || last.role !== 'assistant' || spoken.ids.has(last.id)) {
+    // A bot's "On it." is not said: its answer takes the same message's place and is said then.
+    if (!last || last.role !== 'assistant' || last.fromBot?.pending || spoken.ids.has(last.id)) {
       // A turn that ended with no new reply, such as a stopped chat, also ends the wait.
       if (awaitingReply.current && statusRef.current === 'waiting') {
         awaitingReply.current = false

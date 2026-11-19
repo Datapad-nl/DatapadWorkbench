@@ -1221,6 +1221,7 @@ function MessageList({
   let lastDay = ''
   const { bots } = useBots()
   const { openChat } = useWorkspace()
+  const streams = useStreamStatuses()
   // In a bot's chat the replies are the bot's, under its own name and avatar.
   const chatBot = chat.botId ? bots.find((bot) => bot.id === chat.botId) : undefined
 
@@ -1362,6 +1363,13 @@ function MessageList({
                         {message.content ? <AgentReply text={message.content} chatId={chatId} /> : null}
                         {message.kind === 'btw' && !message.content ? <span className="cursor" /> : null}
                       </div>
+                      {/* An acknowledgement works only while its run does: after a restart mid-run it stays still. */}
+                      {fromBot?.pending && streams[fromBot.runChatId]?.status === 'streaming' && (
+                        <div data-testid="bot-working" className="mt-1 flex items-center gap-2 text-[13px] text-muted">
+                          <span className="streaming-dot h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
+                          Working
+                        </div>
+                      )}
                       {extras}
                       {message.content && (
                         <div className="mt-2 flex items-center gap-0.5">

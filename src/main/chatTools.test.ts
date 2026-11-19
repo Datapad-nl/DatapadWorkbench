@@ -577,6 +577,111 @@ describe('@bot', () => {
     })
   })
 
+  it('says it is on it while the run works, and its answer takes that message', async () => {
+    asked()
+    let finish: (chat: Chat) => void = () => {}
+    registerChatTools({
+      send: async (chatId) => {
+        const chat = stub.chats.get(chatId)!
+        return { chat, done: new Promise<Chat>((resolve) => (finish = resolve)) }
+      },
+      emit: () => {},
+      isStreaming: () => false
+    })
+    const answer = askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+    const botMessages = () => stub.chats.get('project-chat')!.messages.filter((message) => message.fromBot)
+    await vi.waitFor(() => expect(botMessages()).toHaveLength(1))
+    const [ack] = botMessages()
+    expect(ack).toMatchObject({
+      role: 'assistant',
+      content: 'On it.',
+      fromBot: { botId: 'scout', name: 'Scout', runChatId: 'scout-run', pending: true }
+    })
+    // The bot's first prompt brings the asking chat up to the question, not its own acknowledgement.
+    expect(stub.chats.get('scout-run')!.askedAfter).toBe('u1')
+
+    const run = stub.chats.get('scout-run')!
+    run.messages.push({ id: 'a1', role: 'assistant', content: 'Looks fine.', createdAt: '' })
+    finish(structuredClone(run))
+    expect(await answer).toBe('Looks fine.')
+    expect(botMessages()).toEqual([
+      {
+        id: ack.id,
+        role: 'assistant',
+        content: 'Looks fine.',
+        fromBot: { botId: 'scout', name: 'Scout', runChatId: 'scout-run' },
+        createdAt: ack.createdAt
+      }
+    ])
+  })
+
+  it('replaces its acknowledgement with why a run that started could not answer', async () => {
+    asked()
+    let fail: (error: Error) => void = () => {}
+    registerChatTools({
+      send: async (chatId) => ({
+        chat: stub.chats.get(chatId)!,
+        done: new Promise<Chat>((_resolve, reject) => (fail = reject))
+      }),
+      emit: () => {},
+      isStreaming: () => false
+    })
+    const answer = askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+    const botMessages = () => stub.chats.get('project-chat')!.messages.filter((message) => message.fromBot)
+    await vi.waitFor(() => expect(botMessages()).toMatchObject([{ content: 'On it.' }]))
+    fail(new Error('signed out'))
+    expect(await answer).toBe('Could not answer: signed out')
+    expect(botMessages()).toHaveLength(1)
+    expect(botMessages()[0].content).toBe('Could not answer: signed out')
+    expect(botMessages()[0].fromBot!.pending).toBeUndefined()
+    stub.problems = []
+  })
+
+  it('posts the answer last, without its acknowledgement, when the chat went on after it', async () => {
+    asked()
+    let finish: (chat: Chat) => void = () => {}
+    registerChatTools({
+      send: async (chatId) => ({
+        chat: stub.chats.get(chatId)!,
+        done: new Promise<Chat>((resolve) => (finish = resolve))
+      }),
+      emit: () => {},
+      isStreaming: () => false
+    })
+    const answer = askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+    const project = stub.chats.get('project-chat')!
+    await vi.waitFor(() => expect(project.messages.at(-1)).toMatchObject({ content: 'On it.' }))
+    project.messages.push({ id: 'u2', role: 'user', content: 'meanwhile', createdAt: '' })
+    const run = stub.chats.get('scout-run')!
+    run.messages.push({ id: 'a1', role: 'assistant', content: 'Looks fine.', createdAt: '' })
+    finish(structuredClone(run))
+    await answer
+    expect(project.messages.map((message) => message.content)).toEqual(['review the login', 'meanwhile', 'Looks fine.'])
+    expect(project.messages.at(-1)!.fromBot).toEqual({ botId: 'scout', name: 'Scout', runChatId: 'scout-run' })
+  })
+
+  it('posts the answer as a new message when its acknowledgement was deleted', async () => {
+    asked()
+    let finish: (chat: Chat) => void = () => {}
+    registerChatTools({
+      send: async (chatId) => ({
+        chat: stub.chats.get(chatId)!,
+        done: new Promise<Chat>((resolve) => (finish = resolve))
+      }),
+      emit: () => {},
+      isStreaming: () => false
+    })
+    const answer = askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+    const project = stub.chats.get('project-chat')!
+    await vi.waitFor(() => expect(project.messages).toHaveLength(2))
+    project.messages = project.messages.filter((message) => !message.fromBot)
+    const run = stub.chats.get('scout-run')!
+    run.messages.push({ id: 'a1', role: 'assistant', content: 'Looks fine.', createdAt: '' })
+    finish(structuredClone(run))
+    await answer
+    expect(project.messages.filter((message) => message.fromBot)).toMatchObject([{ content: 'Looks fine.' }])
+  })
+
   it('answers with the first reply when the run has no follow-up', async () => {
     asked()
     const answer = await askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })

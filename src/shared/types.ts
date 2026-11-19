@@ -114,6 +114,8 @@ export type BotAnswer = {
   question?: string
   /** Set once the chat's agent got the answer with a prompt. */
   delivered?: boolean
+  /** The bot's acknowledgement while its run works: no answer yet. The answer replaces it, posted last. */
+  pending?: boolean
 }
 
 export type PermissionMode = 'ask' | 'accept' | 'plan'

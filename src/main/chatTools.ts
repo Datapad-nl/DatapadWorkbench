@@ -222,6 +222,8 @@ export async function askBot(input: {
 }): Promise<string> {
   let name = "The bot";
   let runChatId = "";
+  // The bot's "On it." in the asking chat, which its answer replaces.
+  let ackId: string | undefined;
   try {
     const caller = await getChat(input.fromChatId);
     if (caller.botId && !isBotsOwn(caller)) throw new Error("Only a project chat or a bot's own chat can ask a bot.");
@@ -256,6 +258,10 @@ export async function askBot(input: {
       input.attachments,
       input.mentions,
     );
+    // The user knows at once that the bot is on it; the answer takes this message's place.
+    ackId = await postBotAnswer(input, name, runChatId, "On it.", false, { pending: true }).catch(
+      () => undefined,
+    );
     // A run that saved a secret goes on in a turn of its own: its answer is that turn's reply.
     const finished = await afterFollowUps(run.id, await done);
     const reply = finished?.messages.at(-1);
@@ -264,16 +270,16 @@ export async function askBot(input: {
       : reply?.role === "assistant"
         ? plainReply(reply.content) || "(empty answer)"
         : "(no answer)";
-    await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting));
+    await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting), { replace: ackId });
     return answer;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const answer = `Could not answer: ${reason}`;
     // Only a run that started went wrong for the bot itself.
     if (runChatId) await addBotProblem(input.botId, answer).catch(() => {});
-    await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting)).catch(
-      () => {},
-    );
+    await postBotAnswer(input, name, runChatId, answer, stillWaiting(input.waiting), {
+      replace: ackId,
+    }).catch(() => {});
     return answer;
   } finally {
     if (runChatId) setRunShownIn(runChatId, null);
@@ -311,31 +317,46 @@ export async function askBotFromChat(
   return { text: `${bot.name} answered:\n\n${answer}` };
 }
 
-/** `delivered`: the chat's own agent wrote it, so its next prompt need not bring it. */
+/**
+ * `delivered`: the chat's own agent wrote it, so its next prompt need not bring it. `pending`: the
+ * bot's acknowledgement, no answer yet. `replace`: the acknowledgement this answer takes the place
+ * of. While it is the chat's last message the answer takes its place and time; after newer messages
+ * it is removed and the answer is posted last, so it is not missed up in the history. Returns the
+ * id of the message that holds the answer.
+ */
 async function postBotAnswer(
   input: { botId: string; fromChatId: string; question?: string },
   name: string,
   runChatId: string,
   content: string,
   delivered = false,
-): Promise<void> {
+  options: { pending?: boolean; replace?: string } = {},
+): Promise<string> {
   const question = input.question?.trim();
+  const fromBot = {
+    botId: input.botId,
+    name,
+    runChatId,
+    ...(question ? { question } : {}),
+    ...(delivered ? { delivered } : {}),
+    ...(options.pending ? { pending: true } : {}),
+  };
+  let messageId = id();
   const chat = await mutateChat(input.fromChatId, (latest) => {
-    latest.messages.push({
-      id: id(),
-      role: "assistant",
-      content,
-      fromBot: {
-        botId: input.botId,
-        name,
-        runChatId,
-        ...(question ? { question } : {}),
-        ...(delivered ? { delivered } : {}),
-      },
-      createdAt: now(),
-    });
+    const last = latest.messages.at(-1);
+    if (options.replace && last?.id === options.replace && last.fromBot) {
+      messageId = last.id;
+      last.content = content;
+      last.fromBot = fromBot;
+      return;
+    }
+    if (options.replace) {
+      latest.messages = latest.messages.filter((message) => message.id !== options.replace || !message.fromBot);
+    }
+    latest.messages.push({ id: messageId, role: "assistant", content, fromBot, createdAt: now() });
   });
   emitChat(chat);
+  return messageId;
 }
 
 // Opening the window and a run's answer can ask at the same time; they get the same chat.

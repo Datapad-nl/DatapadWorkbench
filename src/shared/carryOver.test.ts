@@ -22,6 +22,19 @@ describe('carryOverPrompt', () => {
     expect(text).not.toContain('read_chat')
   })
 
+  it("leaves out a bot's acknowledgement, which is no answer yet", () => {
+    const text = carryOverPrompt(
+      [
+        msg('user', '@Scout review it', { toBots: true }),
+        msg('assistant', 'On it.', { fromBot: { botId: 'b1', name: 'Scout', runChatId: 'r1', pending: true } })
+      ],
+      'c1'
+    )!
+    expect(text).toContain('### User\n@Scout review it')
+    expect(text).not.toContain('Bot Scout')
+    expect(text).not.toContain('On it.')
+  })
+
   it('keeps the newest turns and points at read_chat when cut', () => {
     const text = carryOverPrompt([msg('user', 'old '.repeat(50)), msg('assistant', 'newest')], 'c9', 40)!
     expect(text).toContain('newest')
