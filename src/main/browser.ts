@@ -305,7 +305,9 @@ function ensurePage(scope: string): Page {
       nodeIntegration: false,
       webSecurity: true,
       // A parked page is painted for captures even when the user's windows cover it.
-      backgroundThrottling: false
+      backgroundThrottling: false,
+      // A new document would take keyboard focus from the chat the user is typing in. The user's own clicks still focus the page.
+      focusOnNavigation: false
     }
   })
   view.setBackgroundColor('#141414')
