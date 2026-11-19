@@ -67,6 +67,7 @@ import wordmark from '../assets/wordmark.png'
 
 const MAX_IMAGES = 6
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_FILE_BYTES = 25 * 1024 * 1024
 
 /** The model a chat without one of its own runs on. Grok's default is the CLI's, unnamed here. */
 function chatDefaultModel(chat: Chat, settings: PublicSettings | null): string {
@@ -1269,14 +1270,18 @@ function MessageList({
                 )}
                 {message.attachments && message.attachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {message.attachments.map((attachment) => (
-                      <ZoomImage
-                        key={attachment.id}
-                        src={`data:${attachment.mimeType};base64,${attachment.data}`}
-                        alt="Screenshot"
-                        className="max-h-64 max-w-full rounded-[8px] border border-line"
-                      />
-                    ))}
+                    {message.attachments.map((attachment) =>
+                      attachment.path ? (
+                        <FileChip key={attachment.id} attachment={attachment} />
+                      ) : (
+                        <ZoomImage
+                          key={attachment.id}
+                          src={`data:${attachment.mimeType};base64,${attachment.data}`}
+                          alt="Screenshot"
+                          className="max-h-64 max-w-full rounded-[8px] border border-line"
+                        />
+                      )
+                    )}
                   </div>
                 )}
               </>
@@ -1430,17 +1435,12 @@ async function fileToAttachment(file: Blob, mimeType: string): Promise<Attachmen
   }
 }
 
-async function attachmentsFromClipboard(event: React.ClipboardEvent): Promise<Attachment[]> {
-  const next: Attachment[] = []
-  const items = [...event.clipboardData.items]
-  for (const item of items) {
-    if (!item.type.startsWith('image/')) continue
-    const file = item.getAsFile()
-    if (!file) continue
-    const attachment = await fileToAttachment(file, item.type || 'image/png')
-    if (attachment) next.push(attachment)
-  }
-  return next
+/** The files on the clipboard, read while the paste event lasts. */
+function filesFromClipboard(event: React.ClipboardEvent): File[] {
+  return [...event.clipboardData.items].flatMap((item) => {
+    const file = item.kind === 'file' ? item.getAsFile() : null
+    return file ? [file] : []
+  })
 }
 
 function caretOnFirstLine(el: HTMLTextAreaElement): boolean {
@@ -2204,6 +2204,26 @@ function MentionChip({
   )
 }
 
+/** A file attached to a message, other than an image. */
+function FileChip({ attachment, onRemove }: { attachment: Attachment; onRemove?: () => void }): React.JSX.Element {
+  const name = attachment.name || 'File'
+  return (
+    <span
+      data-testid="file-chip"
+      title={name}
+      className="inline-flex max-w-64 items-center gap-1 self-start rounded-md border border-line bg-canvas px-2 py-0.5 font-mono text-[11px] text-ink"
+    >
+      <Icon name="clip" size={12} className="shrink-0 text-muted" />
+      <span className="truncate">{name}</span>
+      {onRemove && (
+        <button type="button" className="text-muted hover:text-ink" onClick={onRemove} aria-label={`Remove ${name}`}>
+          ×
+        </button>
+      )}
+    </span>
+  )
+}
+
 /** A user's message, with each bot named as @Name shown inline with its avatar. */
 function MessageText({ text, bots: named }: { text: string; bots?: BotMention[] }): React.JSX.Element {
   const { bots } = useBots()
@@ -2634,15 +2654,18 @@ function Composer({
     setValue(list[nextIndex])
   }
 
-  async function addImages(incoming: Attachment[]): Promise<void> {
-    if (incoming.length === 0) return
+  async function addAttachments(incoming: Attachment[], skipped: string | null = null): Promise<void> {
+    if (incoming.length === 0) {
+      if (skipped) setPasteError(skipped)
+      return
+    }
     setAttachments((current) => {
       const room = MAX_IMAGES - current.length
       if (room <= 0) {
-        setPasteError(`Up to ${MAX_IMAGES} images per message`)
+        setPasteError(`Up to ${MAX_IMAGES} files per message`)
         return current
       }
-      setPasteError(null)
+      setPasteError(skipped)
       return [...current, ...incoming.slice(0, room)]
     })
   }
@@ -2691,13 +2714,32 @@ function Composer({
     })
   }
 
-  async function attachFiles(files: FileList | null): Promise<void> {
-    const images = [...(files ?? [])].filter((file) => file.type.startsWith('image/'))
+  /** Images go as themselves. Any other file is saved by the app, and the agent gets its path. */
+  async function attachFiles(files: File[]): Promise<void> {
+    const images = files.filter((file) => file.type.startsWith('image/'))
+    const others = files.filter((file) => !file.type.startsWith('image/'))
+    const skipped: string[] = []
     const incoming = (await Promise.all(images.map((file) => fileToAttachment(file, file.type)))).filter(
       (item): item is Attachment => item !== null
     )
-    if (images.length > incoming.length) setPasteError('Images over 8 MB were skipped')
-    await addImages(incoming)
+    if (images.length > incoming.length) skipped.push('Images over 8 MB were skipped')
+    const large = others.filter((file) => file.size > MAX_FILE_BYTES)
+    if (large.length > 0) skipped.push(`Files over 25 MB were skipped: ${large.map((file) => file.name).join(', ')}`)
+    const saved = await Promise.all(
+      others
+        .filter((file) => file.size <= MAX_FILE_BYTES)
+        .map(async (file) => {
+          try {
+            const bytes = await file.arrayBuffer()
+            return await window.workbench.saveAttachment({ chatId, name: file.name, mimeType: file.type, bytes })
+          } catch (error) {
+            skipped.push(errorText(error, `Could not attach ${file.name}`))
+            return null
+          }
+        })
+    )
+    incoming.push(...saved.filter((item): item is Attachment => item !== null))
+    await addAttachments(incoming, skipped.length > 0 ? skipped.join('. ') : null)
   }
 
   const empty = !value.trim() && attachments.length === 0 && mentions.length === 0
@@ -2791,23 +2833,31 @@ function Composer({
                 }
               />
             ))}
-            {attachments.map((attachment) => (
-              <div key={attachment.id} className="relative">
-                <img
-                  src={`data:${attachment.mimeType};base64,${attachment.data}`}
-                  alt=""
-                  className="h-16 w-16 rounded-md border border-line object-cover"
+            {attachments.map((attachment) =>
+              attachment.path ? (
+                <FileChip
+                  key={attachment.id}
+                  attachment={attachment}
+                  onRemove={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
                 />
-                <button
-                  className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-raised text-[10px] text-muted hover:text-ink"
-                  onClick={() =>
-                    setAttachments((current) => current.filter((item) => item.id !== attachment.id))
-                  }
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+              ) : (
+                <div key={attachment.id} className="relative">
+                  <img
+                    src={`data:${attachment.mimeType};base64,${attachment.data}`}
+                    alt=""
+                    className="h-16 w-16 rounded-md border border-line object-cover"
+                  />
+                  <button
+                    className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-raised text-[10px] text-muted hover:text-ink"
+                    onClick={() =>
+                      setAttachments((current) => current.filter((item) => item.id !== attachment.id))
+                    }
+                  >
+                    ×
+                  </button>
+                </div>
+              )
+            )}
           </div>
         )}
         <div className="relative">
@@ -2927,14 +2977,10 @@ function Composer({
             }
           }}
           onPaste={(event) => {
-            const hasImage = [...event.clipboardData.items].some((item) =>
-              item.type.startsWith('image/')
-            )
-            if (!hasImage) return
+            const files = filesFromClipboard(event)
+            if (files.length === 0) return
             event.preventDefault()
-            void attachmentsFromClipboard(event).then((incoming) => {
-              void addImages(incoming)
-            })
+            void attachFiles(files)
           }}
           onKeyDown={(event) => {
             if (event.nativeEvent.isComposing) return
@@ -3041,20 +3087,19 @@ function Composer({
         </div>
         <div className="mt-2 flex items-center gap-1">
           <label
-            title="Attach images"
+            title="Attach files"
             className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-[7px] text-muted hover:bg-hover hover:text-ink focus-within:outline-2 focus-within:outline-accent-line"
           >
             <Icon name="clip" />
             <input
               type="file"
-              accept="image/*"
               multiple
-              aria-label="Attach images"
+              aria-label="Attach files"
               data-testid="composer-attach"
               className="sr-only"
               onChange={(event) => {
                 const input = event.currentTarget
-                void attachFiles(input.files).finally(() => {
+                void attachFiles([...(input.files ?? [])]).finally(() => {
                   input.value = ''
                 })
               }}

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,7 +14,7 @@ vi.mock('electron', () => ({
   }
 }))
 
-import { createChat, deleteChat, ensureStore, getApiKey, listChats, mutateChat, setThemeId } from './store'
+import { createChat, deleteChat, ensureStore, getApiKey, listChats, mutateChat, saveAttachment, setThemeId } from './store'
 
 let chats = ''
 
@@ -84,6 +84,35 @@ describe('listChats', () => {
     expect(list).toHaveLength(2)
     await deleteChat('b')
     expect((await listChats()).map((chat) => chat.id)).toEqual(['a'])
+  })
+})
+
+describe('saveAttachment', () => {
+  it('saves the file in the chat\'s folder under its own name, and deleting the chat removes it', async () => {
+    put('a', 'First', '2026-01-01T00:00:00.000Z', 1_700_000_000)
+    const bytes = new TextEncoder().encode('%PDF-1.7')
+    const attachment = await saveAttachment({ chatId: 'a', name: 'report.pdf', mimeType: 'application/pdf', bytes })
+    expect(attachment).toMatchObject({ mimeType: 'application/pdf', data: '', name: 'report.pdf' })
+    expect(attachment.path).toBe(join(stub.dir, 'workbench', 'attachments', 'a', attachment.id, 'report.pdf'))
+    expect(readFileSync(attachment.path!, 'utf8')).toBe('%PDF-1.7')
+    await deleteChat('a')
+    expect(existsSync(join(stub.dir, 'workbench', 'attachments', 'a'))).toBe(false)
+  })
+
+  it('keeps a name or chat id with path parts inside the attachments folder', async () => {
+    const bytes = new Uint8Array([1])
+    const attachment = await saveAttachment({ chatId: '../x', name: '../../evil.sh', mimeType: '', bytes })
+    expect(attachment.name).toBe('evil.sh')
+    expect(attachment.mimeType).toBe('application/octet-stream')
+    expect(attachment.path!.startsWith(join(stub.dir, 'workbench', 'attachments') + '/')).toBe(true)
+    expect(attachment.path).not.toContain('..')
+  })
+
+  it('refuses a file over 25 MB', async () => {
+    const bytes = new Uint8Array(25 * 1024 * 1024 + 1)
+    await expect(saveAttachment({ chatId: 'a', name: 'big.zip', mimeType: 'application/zip', bytes })).rejects.toThrow(
+      'big.zip is over 25 MB'
+    )
   })
 })
 

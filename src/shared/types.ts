@@ -66,10 +66,14 @@ export type SkillListing = { id: string; source: string; skill: string; installs
 /** A listed skill's SKILL.md and the paths of all its files, to look at before adding it to a bot. */
 export type SkillPreview = BotSkill & { source: string; skill: string; files: string[] }
 
+/** An image carries its base64 `data`. Any other file has `data` '' and `path`, its copy in the app's folder. */
 export type Attachment = {
   id: string
   mimeType: string
   data: string
+  /** A file's original name. */
+  name?: string
+  path?: string
 }
 
 export type FileMention = {

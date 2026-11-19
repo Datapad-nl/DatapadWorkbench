@@ -163,6 +163,7 @@ import {
   listProjects,
   mutateChat,
   renameChat,
+  saveAttachment,
   searchChats,
   getMaxSubagents,
   getMcpServers,
@@ -758,6 +759,21 @@ export function registerIpc(): void {
     done.catch(() => {})
     return chat
   })
+
+  ipcMain.handle(
+    'chat:saveAttachment',
+    async (_event, input: { chatId: string; name: string; mimeType: string; bytes: Uint8Array | ArrayBuffer }) => {
+      if (typeof input?.chatId !== 'string' || typeof input.name !== 'string') throw new Error('Invalid attachment')
+      const bytes = input.bytes instanceof ArrayBuffer ? new Uint8Array(input.bytes) : input.bytes
+      if (!(bytes instanceof Uint8Array)) throw new Error('Invalid attachment')
+      return saveAttachment({
+        chatId: input.chatId,
+        name: input.name,
+        mimeType: typeof input.mimeType === 'string' ? input.mimeType : '',
+        bytes
+      })
+    }
+  )
 
   // The turn ends itself and sends done once its reply is saved. False when nothing was running.
   ipcMain.handle('chat:stop', async (_event, chatId: string) => {

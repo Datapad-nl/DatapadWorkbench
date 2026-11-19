@@ -7,6 +7,7 @@ import type { ThemeFile, ThemeSummary } from '../shared/theme'
 import type { YoutubeTranscriptResult } from '../shared/youtube'
 import type {
   AgentCommand,
+  Attachment,
   ActivityFeed,
   ActivitySnapshot,
   BrowserAnnotationHit,
@@ -138,6 +139,9 @@ const api = {
     conversation?: string,
     bots?: BotMention[]
   ) => ipcRenderer.invoke('chat:send', { chatId, content, attachments, mentions, conversation, bots }),
+  /** Saves a file, other than an image, for a message in the chat, and returns its attachment. */
+  saveAttachment: (input: { chatId: string; name: string; mimeType: string; bytes: ArrayBuffer }) =>
+    ipcRenderer.invoke('chat:saveAttachment', input) as Promise<Attachment>,
   /** Ending a voice conversation takes back the corrections said in it that the agent has not received. */
   endConversation: (conversation: string) =>
     ipcRenderer.invoke('chat:endConversation', conversation) as Promise<void>,

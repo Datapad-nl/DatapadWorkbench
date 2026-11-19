@@ -56,6 +56,7 @@ import {
   type SessionUpdate
 } from './acp'
 import { emitNotice, finishTurn, lookupSession, startTurn } from './activity'
+import { attachmentTitle, isFileAttachment, promptForAttachments } from './attachments'
 import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
 import { listBotDocuments } from './botDocuments'
 import { botRun } from './botRuns'
@@ -671,8 +672,8 @@ function interruptForSteer(turn: Turn): void {
 function steerIntoTurn(turn: Turn, sessionId: string): void {
   const notes = takeAsideSteers(turn.chatId)
   if (notes.length === 0) return
-  const images = notes.flatMap((note) => note.attachments)
-  void steerSession(sessionId, steerPrompt(notes), images).then(
+  const attached = promptForAttachments(steerPrompt(notes), notes.flatMap((note) => note.attachments))
+  void steerSession(sessionId, attached.text, attached.images).then(
     (outcome) => {
       if (outcome === 'idle') requeueSteers(turn, sessionId, notes, false)
     },
@@ -1052,7 +1053,7 @@ async function appendUserMessage(
     if (chat.title === 'New chat') {
       chat.title = content
         ? titleFromPrompt(content)
-        : mentions[0]?.path ?? (attachments.length > 0 ? 'Screenshot' : 'New chat')
+        : mentions[0]?.path ?? (attachments.length > 0 ? attachmentTitle(attachments) : 'New chat')
     }
   })
   return getChat(chatId)
@@ -1222,7 +1223,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   const mode = normalizePermissionMode(chat.mode)
   await step(turn, applyAcpMode(sessionId, mode))
 
-  const opening = followText || lastUser?.content || 'Screenshot'
+  const opening = followText || lastUser?.content || attachmentTitle(lastUser?.attachments ?? [])
   try {
     // Not raced against stop: the turn has to know its checkpoint to close it.
     const checkpoint = await startCheckpoint({
@@ -1240,9 +1241,12 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
 
   const userText = followText || lastUser!.content
   const unattended = followText ? undefined : botRun(chat.id)
-  const asked = followText
-    ? followText
-    : promptForBotsMentioned(promptForMentions(lastUser!.content, lastUser!.mentions), lastUser!.bots)
+  // Files go into the text as paths, images as themselves.
+  const attached = promptForAttachments(
+    followText || promptForMentions(lastUser!.content, lastUser!.mentions),
+    followUp ? followUp.attachments : lastUser!.attachments
+  )
+  const asked = followText ? attached.text : promptForBotsMentioned(attached.text, lastUser!.bots)
   const mentioned = unattended ? promptForBotRun(asked, unattended) : asked
   // Bot answers posted since the agent's last prompt: it sees them now, once.
   const answers = chat.messages.filter((message) => message.fromBot && !message.fromBot.delivered)
@@ -1276,7 +1280,6 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
       : null
   const handed = carried ?? askedFrom
   const cued = handed ? `${handed}\n\n${moded}` : moded
-  const images = followUp ? (followUp.attachments ?? []) : (lastUser!.attachments ?? [])
 
   // From here the agent owns the turn. Nothing is awaited until the prompt is sent.
   turn.phase = 'streaming'
@@ -1289,7 +1292,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   bindPermissionSession(sessionId, chat.id, mode)
   startTurn({ chatId: chat.id, chatTitle: chat.title, sessionId, prompt: opening })
   endForegroundAgents(chat.id)
-  const prompt = promptSession(sessionId, cued, images)
+  const prompt = promptSession(sessionId, cued, attached.images)
   prompt.catch(() => {})
   // The conversation is in the session now.
   if (chat.carryOver && !isSlashCommand(userText)) {
@@ -1452,7 +1455,12 @@ function takeAsideSteers(chatId: string): SteerNote[] {
 
 function steerPrompt(notes: SteerNote[]): string {
   const line = (note: SteerNote): string =>
-    note.text || (note.attachments.length > 0 ? 'See the attached screenshot.' : '')
+    note.text ||
+    (note.attachments.length === 0
+      ? ''
+      : note.attachments.every(isFileAttachment)
+        ? 'See the attached file.'
+        : 'See the attached screenshot.')
   const body =
     notes.length === 1
       ? line(notes[0])
@@ -1537,7 +1545,7 @@ async function startSteer(
     chat.messages.push({
       id: messageId,
       role: 'user',
-      content: question || 'Screenshot',
+      content: question || attachmentTitle(attachments),
       kind: 'steer',
       attachments: attachments.length > 0 ? attachments : undefined,
       mentions: mentions.length > 0 ? mentions : undefined,
@@ -1552,7 +1560,7 @@ async function startSteer(
     chatId,
     chatTitle: started.title,
     title: 'Steer',
-    detail: question || 'Screenshot'
+    detail: question || attachmentTitle(attachments)
   })
   queueAsideSteer(chatId, { text: promptForBotsMentioned(question, bots), attachments, messageId, conversation })
   drainAsideSteers(chatId)
@@ -1579,7 +1587,7 @@ export async function startAside(
     chat.messages.push({
       id: id(),
       role: 'user',
-      content: question || 'Screenshot',
+      content: question || attachmentTitle(attachments),
       kind: 'btw',
       attachments: attachments.length > 0 ? attachments : undefined,
       mentions: mentions.length > 0 ? mentions : undefined,
@@ -1634,7 +1642,7 @@ async function runAside(
     chatId,
     chatTitle: started.title,
     title: 'Aside',
-    detail: question || 'Screenshot'
+    detail: question || attachmentTitle(attachments)
   })
 
   const cwd = chatFolder(started, project)
@@ -1642,10 +1650,11 @@ async function runAside(
   let steer = false
   try {
     const latest = await getChat(chatId).catch(() => started)
+    const attached = promptForAttachments(promptForBotsMentioned(question, bots), attachments)
     assembled = await promptIsolated(
       cwd,
-      asidePrompt(promptForBotsMentioned(question, bots), asideContext(latest, replyId)),
-      attachments,
+      asidePrompt(attached.text, asideContext(latest, replyId)),
+      attached.images,
       emitAsideDelta(chatId, replyId),
       abort.signal,
       { agent, timeoutMs: ASIDE_TIMEOUT_MS }

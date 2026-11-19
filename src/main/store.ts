@@ -1,6 +1,6 @@
 import { normalizeMaxSubagents } from '../shared/conductor'
 import { app, safeStorage } from 'electron'
-import { mkdir, readdir, rm, stat } from 'fs/promises'
+import { mkdir, readdir, rm, stat, writeFile } from 'fs/promises'
 import { join, normalize } from 'path'
 import { type McpServers, parseMcpServers } from '../shared/mcp'
 import { normalizeHexColor, pickProjectColor } from '../shared/projectColor'
@@ -12,6 +12,7 @@ import {
   normalizeChatAgent,
   normalizeReasoningEffort,
   normalizeVoiceSettings,
+  type Attachment,
   type Bot,
   type Chat,
   type ChatAgent,
@@ -22,6 +23,7 @@ import {
   type UpdateProjectInput,
   type VoiceSettings
 } from '../shared/types'
+import { MAX_FILE_BYTES, safeFileName } from './attachments'
 import { botFolder, getBot, isBotFolder, listBots } from './bots'
 import { forgetProjectIndex, isUnsafeProjectPath, queueIndex } from './codegraph'
 import { id, now, titleFromPrompt } from './ids'
@@ -146,6 +148,27 @@ export async function saveHandoff(chatId: string, markdown: string): Promise<str
   const file = join(dir, `${chatId.replace(/[^\w-]/g, '_')}-${Date.now()}.md`)
   await writeFileAtomic(file, markdown)
   return file
+}
+
+function attachmentsDir(chatId: string): string {
+  return join(dataDir(), 'attachments', chatId.replace(/[^\w-]/g, '_'))
+}
+
+/** Saves a file attached to a message in the chat's own folder, and returns its attachment. */
+export async function saveAttachment(input: {
+  chatId: string
+  name: string
+  mimeType: string
+  bytes: Uint8Array
+}): Promise<Attachment> {
+  const name = safeFileName(input.name)
+  if (input.bytes.byteLength > MAX_FILE_BYTES) throw new Error(`${name} is over 25 MB`)
+  const attachmentId = id()
+  const dir = join(attachmentsDir(input.chatId), attachmentId)
+  await mkdir(dir, { recursive: true })
+  const path = join(dir, name)
+  await writeFile(path, input.bytes)
+  return { id: attachmentId, mimeType: input.mimeType || 'application/octet-stream', data: '', name, path }
 }
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
@@ -987,6 +1010,7 @@ export async function deleteChat(chatId: string): Promise<void> {
   await withLock(chatId, async () => {
     await rm(chatPath(chatId), { force: true })
   })
+  await rm(attachmentsDir(chatId), { recursive: true, force: true })
 }
 
 /** Changes only the title, so an imported chat keeps reading its history from its session file. */
