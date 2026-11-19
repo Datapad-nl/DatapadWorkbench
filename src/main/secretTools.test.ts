@@ -10,7 +10,11 @@ const fake = vi.hoisted(() => ({
 }))
 
 vi.mock('./chatTools', () => ({
-  callerChat: async (from: unknown) => ({ id: String(from), projectId: from === 'loose' ? '' : 'p1' }),
+  callerChat: async (from: unknown) => ({
+    id: String(from),
+    projectId: from === 'loose' ? '' : 'p1',
+    botId: from === 'bot-run' ? 'b1' : undefined
+  }),
   chatRunning: () => fake.running,
   expectFollowUp: (chatId: string, reply: Promise<unknown>) => fake.followUps.push([chatId, reply]),
   send: async (chatId: string, content: string) => {
@@ -24,10 +28,14 @@ vi.mock('./store', () => ({
 vi.mock('./secrets', () => ({
   secretNameError: (name: string) =>
     /^[A-Za-z_]\w*$/.test(name) ? (name.startsWith('ANTHROPIC_') ? `${name} is used by the agent itself` : null) : 'bad',
-  secretScope: (chat: { projectId: string }) => chat.projectId || null,
+  secretScope: (chat: { projectId: string; botId?: string }) =>
+    chat.botId ? `bot:${chat.botId}` : chat.projectId || null,
   setSecret: async (scope: string, name: string, value: string) => {
     fake.saved.push([scope, name, value])
   }
+}))
+vi.mock('./bots', () => ({
+  getBot: async (botId: string) => ({ id: botId, name: 'Master Chief' })
 }))
 
 import { onUserQuestionPrompt, resolveUserQuestion } from './questions'
@@ -87,6 +95,32 @@ describe('request_secret', () => {
     // A delegated run answers with the reply of that turn.
     expect(fake.followUps.map(([chatId]) => chatId)).toEqual(['chat-1'])
     await expect(fake.followUps[0][1]).resolves.toEqual({ id: 'chat-1', reply: 'continued' })
+  })
+
+  it("keeps a bot's secret with the bot, also on its run in a project, and a project chat's with the project", async () => {
+    vi.useFakeTimers()
+    const prompted = nextPrompt()
+    const { requestId } = await requestSecret({ from: 'bot-run', name: 'BOT_TOKEN' })
+    const request = await prompted
+    expect(request.title).toBe('A secret for Master Chief')
+    resolveUserQuestion(request.requestId, { type: 'submit', answers: [['made-up-bot']] })
+    expect((await waitForSecret({ requestId, ms: 1_000 })).text).toContain('Saved BOT_TOKEN for Master Chief.')
+    // The run continues once its turn has ended, so its session loads with the secret set.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(fake.sent).toEqual([['bot-run', '$BOT_TOKEN is now set in your shell. Continue with the task.']])
+
+    const projectPrompt = nextPrompt()
+    const project = await requestSecret({ from: 'chat-7', name: 'PROJECT_TOKEN' })
+    const projectRequest = await projectPrompt
+    expect(projectRequest.title).toBe('A secret for this project')
+    resolveUserQuestion(projectRequest.requestId, { type: 'submit', answers: [['made-up-project']] })
+    expect((await waitForSecret({ requestId: project.requestId, ms: 1_000 })).text).toContain(
+      'Saved PROJECT_TOKEN for this project.'
+    )
+    expect(fake.saved).toEqual([
+      ['bot:b1', 'BOT_TOKEN', 'made-up-bot'],
+      ['p1', 'PROJECT_TOKEN', 'made-up-project']
+    ])
   })
 
   it('does not continue a chat the user stopped', async () => {

@@ -15,7 +15,8 @@ import {
   onPermissionUpdated,
   pendingPermissionRequests,
   resolvePermission,
-  setEditGuard
+  setEditGuard,
+  setRunShownIn
 } from './permissions'
 import {
   askUserQuestions,
@@ -127,6 +128,31 @@ describe('cancelling questions', () => {
     cancelChatQuestions('chat-1')
     await expect(intakeAsk).resolves.toEqual({ type: 'SkipInterview' })
     expect(pendingQuestionRequests()).toEqual([])
+  })
+})
+
+describe('a bot asked from another chat', () => {
+  it('asks the user in the asking chat while it waits, and in its own chat once it stopped waiting', async () => {
+    bindPermissionSession('s1', 'run-1', 'ask')
+    setRunShownIn('run-1', { chatId: 'chat-1', botName: 'Master Chief' })
+    const permission = askPermission('r1', 's1', { options, toolCall: { title: 'Edit a.ts' } })
+    const secret = askUserQuestions('q1', 'secret:run-1', [], 'ext', { chatId: 'run-1' })
+    const shownIn = { chatId: 'chat-1', botName: 'Master Chief' }
+    expect(pendingPermissionRequests()).toMatchObject([{ requestId: 'r1', chatId: 'run-1', shownIn }])
+    expect(pendingQuestionRequests()).toMatchObject([{ requestId: 'q1', chatId: 'run-1', shownIn }])
+
+    // Stopping the run still finds its requests under the run chat.
+    cancelChatPermissions('run-1')
+    cancelChatQuestions('run-1')
+    await expect(permission).resolves.toEqual({ outcome: { outcome: 'cancelled' } })
+    await expect(secret).resolves.toEqual({ type: 'SkipInterview' })
+
+    setRunShownIn('run-1', null)
+    const later = askPermission('r2', 's1', { options, toolCall: { title: 'Edit b.ts' } })
+    expect(pendingPermissionRequests()[0]).not.toHaveProperty('shownIn')
+    cancelChatPermissions('run-1')
+    await later
+    forgetChatSessions('run-1')
   })
 })
 

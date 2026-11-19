@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import type { Chat } from '../shared/types'
 import { callerChat, chatRunning, expectFollowUp, send } from './chatTools'
+import { getBot } from './bots'
 import { askUserQuestions, resolveUserQuestion } from './questions'
 import { secretNameError, secretScope, setSecret } from './secrets'
 import { getChat } from './store'
@@ -79,13 +80,15 @@ export async function requestSecret(body: Record<string, unknown>): Promise<{ re
   const nameError = name ? secretNameError(name) : 'Pass name as an environment variable name, such as STRIPE_API_KEY.'
   if (nameError) throw new Error(nameError)
   const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : `Enter ${name}.`
+  // A bot's secret is its own, also on a run in a project, so the project's own agent never gets it.
+  const owner = chat.botId ? ((await getBot(chat.botId).catch(() => null))?.name ?? 'this bot') : 'this project'
   const requestId = randomUUID()
   const ask = askUserQuestions(
     requestId,
     `secret:${chat.id}`,
     [{ question: reason, header: name, multiSelect: false, options: [], secret: { name } }],
     'ext',
-    { chatId: chat.id, title: 'A secret for this project' }
+    { chatId: chat.id, title: `A secret for ${owner}` }
   )
     .then(async (outcome) => {
       const value = outcome.type === 'Accepted' ? String(outcome.partial_answers[0] ?? '') : ''
@@ -94,7 +97,7 @@ export async function requestSecret(body: Record<string, unknown>): Promise<{ re
       continueAfterTurn(chat.id, name)
       return {
         text: [
-          `Saved ${name} for this project. Its value was not shared with you.`,
+          `Saved ${name} for ${owner}. Its value was not shared with you.`,
           `$${name} is set in your shell from the next turn, not in this one.`,
           'End this turn now with one short sentence. Datapad Workbench continues this chat once the turn has ended.'
         ].join(' ')

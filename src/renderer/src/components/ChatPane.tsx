@@ -1591,7 +1591,7 @@ function PermissionBar({
     <div className={`mb-3 ${CARD}`}>
       <div className="flex items-center gap-1.5 text-[11px] text-faint">
         <Icon name="shield" size={12} className="text-accent" />
-        Permission
+        {request.shownIn ? `Permission for ${request.shownIn.botName}` : 'Permission'}
       </div>
       <div className="mt-1 text-[13px] font-semibold text-ink">{request.title}</div>
       {request.detail && (
@@ -1629,7 +1629,7 @@ function ClashBar({
     <div className={`mb-3 ${CARD}`}>
       <div className="flex items-center gap-1.5 text-[11px] text-faint">
         <Icon name="shield" size={12} className="text-accent" />
-        Shared file
+        {request.shownIn ? `Shared file · ${request.shownIn.botName}` : 'Shared file'}
       </div>
       <div className="mt-1 text-[13px] font-semibold text-ink">{request.title}</div>
       <div className="mt-1 text-[13px] text-muted">
@@ -1715,6 +1715,7 @@ function QuestionCard({
       className={`mb-3 max-h-[min(70vh,560px)] overflow-y-auto ${CARD}`}
     >
       <div className="text-[11px] text-faint">
+        {request.shownIn && `${request.shownIn.botName} · `}
         {request.title?.trim() || `Ask ${count} question${count === 1 ? '' : 's'}`}
       </div>
       <div className="mt-3 flex flex-col gap-5">

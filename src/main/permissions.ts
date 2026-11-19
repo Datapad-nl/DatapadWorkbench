@@ -1,4 +1,4 @@
-import type { EditClash, PermissionMode, PermissionRequest } from '../shared/types'
+import type { EditClash, PermissionMode, PermissionRequest, ShownIn } from '../shared/types'
 import { normalizePermissionMode } from '../shared/types'
 
 export type PermissionOption = {
@@ -103,6 +103,21 @@ export function isSessionStopped(sessionId: string): boolean {
 
 export function chatIdForSession(sessionId: string): string | null {
   return sessionChats.get(sessionId) ?? null
+}
+
+/** Run chats of a bot asked from another chat, while that chat waits for the answer. */
+const runShownIn = new Map<string, ShownIn>()
+
+/** With null, the asking chat stopped waiting and the run's requests show in the run chat again. */
+export function setRunShownIn(runChatId: string, shownIn: ShownIn | null): void {
+  if (shownIn) runShownIn.set(runChatId, shownIn)
+  else runShownIn.delete(runChatId)
+}
+
+/** Spread into a request raised in `chatId`, so a bot's run asks the user in the chat that asked the bot. */
+export function shownInFor(chatId: string): { shownIn?: ShownIn } {
+  const shownIn = runShownIn.get(chatId)
+  return shownIn ? { shownIn } : {}
 }
 
 export function fallbackSessionId(): string {
@@ -290,7 +305,8 @@ export function askPermission(
     title: requestTitle(params),
     detail: requestDetail(params),
     toolKind: params.toolCall?.kind ?? params.toolCall?.name ?? null,
-    ...(clash ? { clash } : {})
+    ...(clash ? { clash } : {}),
+    ...shownInFor(chatId)
   }
 
   return new Promise((resolve) => {

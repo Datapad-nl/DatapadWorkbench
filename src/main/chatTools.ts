@@ -38,6 +38,7 @@ import { hasOpenItems, promptForHeartbeat } from "./botPrompt";
 import { endBotRun, startBotRun } from "./botRuns";
 import { addChatWorktree, dropWorktreeIfUnchanged } from "./git";
 import { id, now } from "./ids";
+import { setRunShownIn } from "./permissions";
 import {
   createChat,
   getChat,
@@ -247,13 +248,16 @@ export async function askBot(input: {
       if (last) latest.askedAfter = last.id;
     });
     emitChat(run);
+    // The user waits in the asking chat, so what the run needs from them is asked there.
+    setRunShownIn(run.id, { chatId: caller.id, botName: bot.name });
     const { done } = await send(
       run.id,
       input.content,
       input.attachments,
       input.mentions,
     );
-    const finished = await done;
+    // A run that saved a secret goes on in a turn of its own: its answer is that turn's reply.
+    const finished = await afterFollowUps(run.id, await done);
     const reply = finished?.messages.at(-1);
     const answer = !finished
       ? "The run was deleted before it answered."
@@ -271,6 +275,8 @@ export async function askBot(input: {
       () => {},
     );
     return answer;
+  } finally {
+    if (runChatId) setRunShownIn(runChatId, null);
   }
 }
 

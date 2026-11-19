@@ -1,5 +1,5 @@
 import type { UserQuestion, UserQuestionAnswer, UserQuestionRequest } from '../shared/types'
-import { chatIdForSession, fallbackSessionId } from './permissions'
+import { chatIdForSession, fallbackSessionId, shownInFor } from './permissions'
 
 export type QuestionOutcome =
   | { type: 'Accepted'; partial_answers: Array<string | string[]> }
@@ -225,7 +225,8 @@ export function askUserQuestions(
     requestId,
     chatId,
     questions,
-    title: options?.title ?? null
+    title: options?.title ?? null,
+    ...shownInFor(chatId)
   }
 
   return new Promise((resolve) => {

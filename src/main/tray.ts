@@ -35,9 +35,16 @@ export function openedAtLogin(): boolean {
 
 async function buildMenu(actions: TrayActions): Promise<Menu> {
   const [bots, chats] = await Promise.all([listBots().catch(() => []), listChats().catch(() => [])])
+  // A bot asked from another chat asks the user there, so that is the chat to open.
   const requests = [
-    ...pendingQuestionRequests().map((request) => ({ chatId: request.chatId, kind: 'question' as const })),
-    ...pendingPermissionRequests().map((request) => ({ chatId: request.chatId, kind: 'permission' as const }))
+    ...pendingQuestionRequests().map((request) => ({
+      chatId: request.shownIn?.chatId ?? request.chatId,
+      kind: 'question' as const
+    })),
+    ...pendingPermissionRequests().map((request) => ({
+      chatId: request.shownIn?.chatId ?? request.chatId,
+      kind: 'permission' as const
+    }))
   ]
   const waiting = trayWaiting(requests, chats, bots)
   const items: MenuItemConstructorOptions[] = [

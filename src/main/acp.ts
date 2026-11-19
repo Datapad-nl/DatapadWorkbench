@@ -63,7 +63,7 @@ import {
   skipNewSession
 } from './store'
 import { readGrokPlan } from './sessions'
-import { envFingerprint, onSecretsChanged, secretEnv, secretScope } from './secrets'
+import { envFingerprint, onSecretsChanged, secretEnv, secretScopes } from './secrets'
 
 type JsonRpc = {
   jsonrpc?: string
@@ -284,8 +284,8 @@ async function botWritesSharedMemory(sessionId: string, params: PermissionParams
 }
 
 /**
- * A project's secrets, for the environment of a Grok process. `id` is the scope and a fingerprint of the
- * values, so changed secrets get a process of their own.
+ * A chat's secrets, for the environment of a Grok process. `id` is the scopes, joined by `+`, and a
+ * fingerprint of the values, so changed secrets get a process of their own.
  */
 export type ProcEnv = { id: string; vars: Record<string, string> }
 
@@ -404,25 +404,27 @@ async function spawnAgent(
   })
 }
 
-/** A chat's scope and secrets, which its agent's shell gets as environment variables. */
-async function chatSecrets(chatId?: string): Promise<{ scope: string | null; env: Record<string, string> }> {
+/** A chat's scopes and secrets, which its agent's shell gets as environment variables. */
+async function chatSecrets(chatId?: string): Promise<{ scopes: string[]; env: Record<string, string> }> {
   const chat = chatId ? await getChat(chatId).catch(() => null) : null
-  const scope = chat ? secretScope(chat) : null
-  return { scope, env: await secretEnv(scope) }
+  const scopes = chat ? secretScopes(chat) : []
+  return { scopes, env: await secretEnv(...scopes) }
 }
 
 /** The environment of the Grok process for a chat with secrets. Null on the shared process. */
 export async function grokProcEnv(agent: ChatAgent, chatId?: string): Promise<ProcEnv | null> {
   if (agent !== 'grok') return null
-  const { scope, env } = await chatSecrets(chatId)
-  return Object.keys(env).length > 0 ? { id: `${scope}:${envFingerprint(env)}`, vars: env } : null
+  const { scopes, env } = await chatSecrets(chatId)
+  return Object.keys(env).length > 0 ? { id: `${scopes.join('+')}:${envFingerprint(env)}`, vars: env } : null
 }
 
 /** Session rules that name the chat's secrets, so the agent uses them and does not ask again. */
-function secretsRule(names: string[]): string | null {
+function secretsRule(names: string[], scopes: string[]): string | null {
   if (names.length === 0) return null
+  // A bot asked from a project gets the project's secrets and its own.
+  const owner = scopes.length > 1 ? 'this project and for you' : 'this project'
   return [
-    `Secrets the user saved for this project are set as environment variables in your shell: ${names.join(', ')}.`,
+    `Secrets the user saved for ${owner} are set as environment variables in your shell: ${names.join(', ')}.`,
     'Use them by name ($NAME). Never print, echo, log or write their values into files, commits or messages, and do not run commands that print the environment, such as env or printenv.',
     'When you need another secret, such as an API key, call `request_secret` on the workbench MCP. Never ask for one in the chat.'
   ].join(' ')
@@ -1180,8 +1182,8 @@ async function sessionConfig(
   chatId?: string,
   pluginDir?: string | null
 ): Promise<Record<string, unknown>> {
-  const secrets = (await chatSecrets(chatId)).env
-  const rules = [BROWSER_SESSION_RULE, extraRules?.trim(), secretsRule(Object.keys(secrets).sort())]
+  const { scopes, env: secrets } = await chatSecrets(chatId)
+  const rules = [BROWSER_SESSION_RULE, extraRules?.trim(), secretsRule(Object.keys(secrets).sort(), scopes)]
     .filter(Boolean)
     .join('\n\n')
   // A bot's chats get only the servers chosen on its page.
@@ -1213,7 +1215,7 @@ async function sessionConfig(
     `${rules}\n\n${role ?? agentToolRule(subagentModel, maxSubagents, orchestrate)}`
   )
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
-  // Claude Code takes environment variables per session: the project's secrets, for its shell.
+  // Claude Code takes environment variables per session: the chat's secrets, for its shell.
   // Its MCP idle limit is off, last so no secret overrides it: `delegate`, `ask_bot` and `request_secret` wait as long as the work takes.
   const env = {
     ...secrets,
@@ -1440,22 +1442,24 @@ export function sessionNeedsReload(sessionId: string): boolean {
   return sessionsToReload.has(sessionId)
 }
 
-/** After a project's secrets changed: its live chats load their session again on their next turn, with the new ones. */
+/** After a scope's secrets changed: its live chats load their session again on their next turn, with the new ones. */
 export async function reloadSecretSessions(scope: string): Promise<void> {
   const sessions = [...conns.values()].flatMap((conn) => (conn.proc ? [...conn.liveSessions] : []))
   await Promise.all(
     sessions.map(async (sessionId) => {
       const chatId = sessionChatIds.get(sessionId)
       const chat = chatId ? await getChat(chatId).catch(() => null) : null
-      if (chat && secretScope(chat) === scope) sessionsToReload.add(sessionId)
+      if (chat && secretScopes(chat).includes(scope)) sessionsToReload.add(sessionId)
     })
   )
   // An idle Grok process that holds the old values stops now; a busy one once its last session left it.
-  const env = await secretEnv(scope)
-  const current = Object.keys(env).length > 0 ? `${scope}:${envFingerprint(env)}` : null
-  for (const conn of conns.values()) {
+  for (const conn of [...conns.values()]) {
     const id = conn.env?.id
-    if (id?.startsWith(`${scope}:`) && id !== current && conn.pending.size === 0) abortAgent(conn.key)
+    const scopes = id ? id.slice(0, id.lastIndexOf(':')).split('+') : []
+    if (!scopes.includes(scope)) continue
+    const env = await secretEnv(...scopes)
+    const current = Object.keys(env).length > 0 ? `${scopes.join('+')}:${envFingerprint(env)}` : null
+    if (id !== current && conn.pending.size === 0) abortAgent(conn.key)
   }
 }
 

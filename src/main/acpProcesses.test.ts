@@ -36,7 +36,7 @@ const fake = vi.hoisted(() => ({
   maxSubagents: 2,
   /** The project of each chat, by chat id. */
   projects: {} as Record<string, string>,
-  /** Saved secrets by project id. */
+  /** Saved secrets by scope: a project id or `bot:<id>`. */
   secrets: {} as Record<string, Record<string, string>>,
   secretListeners: [] as Array<(scope: string) => void>
 }))
@@ -116,6 +116,7 @@ vi.mock('./store', () => ({
   getChat: async (chatId: string) => ({
     id: chatId,
     projectId: fake.projects[chatId] ?? '',
+    botId: fake.bots[chatId]?.id,
     conductor: fake.conductors.has(chatId),
     parentChatId: fake.parents[chatId]
   }),
@@ -137,8 +138,9 @@ vi.mock('./secrets', () => ({
     fake.secretListeners.push(listener)
     return () => {}
   },
-  secretEnv: async (scope: string | null) => (scope ? (fake.secrets[scope] ?? {}) : {}),
-  secretScope: (chat: { projectId: string }) => chat.projectId || null
+  secretEnv: async (...scopes: string[]) => Object.assign({}, ...scopes.map((scope) => fake.secrets[scope] ?? {})),
+  secretScopes: (chat: { projectId: string; botId?: string }) =>
+    [chat.projectId, chat.botId ? `bot:${chat.botId}` : ''].filter(Boolean)
 }))
 
 import {
@@ -616,6 +618,43 @@ describe('project secrets', () => {
     for (const listener of fake.secretListeners) listener('p1')
     await vi.waitFor(() => expect(fake.procs[2].killed).toBe(true))
     expect(shared.killed).toBe(false)
+  })
+
+  it("gives a bot asked from a project the project's secrets and its own, its own winning", async () => {
+    fake.projects['chat-run'] = 'p1'
+    fake.bots['chat-run'] = { id: 'b1', agent: 'grok', model: '', effort: '' }
+    fake.secrets.p1 = { PROJECT_KEY: 'made-up-p', SHARED_KEY: 'made-up-project' }
+    fake.secrets['bot:b1'] = { BOT_KEY: 'made-up-b', SHARED_KEY: 'made-up-bot' }
+    const sessionId = await newSession('/project', null, 'grok', 'chat-run')
+    const [first] = fake.procs
+    expect(first.env?.PROJECT_KEY).toBe('made-up-p')
+    expect(first.env?.BOT_KEY).toBe('made-up-b')
+    expect(first.env?.SHARED_KEY).toBe('made-up-bot')
+    const rules = rulesOf(first.calls.find((call) => call.method === 'session/new'))
+    expect(rules).toContain('Secrets the user saved for this project and for you')
+    expect(rules).toContain('BOT_KEY, PROJECT_KEY, SHARED_KEY')
+
+    // A change to the bot's own secrets reloads the chat and stops the idle process with the old ones.
+    fake.secrets['bot:b1'] = { BOT_KEY: 'made-up-b2', SHARED_KEY: 'made-up-bot' }
+    for (const listener of fake.secretListeners) listener('bot:b1')
+    await vi.waitFor(() => expect(sessionNeedsReload(sessionId)).toBe(true))
+    await loadSession(sessionId, '/project', null, 'grok', 'chat-run')
+    expect(fake.procs[1].env?.BOT_KEY).toBe('made-up-b2')
+    expect(first.killed).toBe(true)
+
+    // So does a change to the project's.
+    fake.secrets.p1 = { PROJECT_KEY: 'made-up-p22' }
+    for (const listener of fake.secretListeners) listener('p1')
+    await vi.waitFor(() => expect(sessionNeedsReload(sessionId)).toBe(true))
+    await loadSession(sessionId, '/project', null, 'grok', 'chat-run')
+    expect(fake.procs[2].env?.PROJECT_KEY).toBe('made-up-p22')
+    expect(fake.procs[2].env?.SHARED_KEY).toBe('made-up-bot')
+    expect(fake.procs[1].killed).toBe(true)
+
+    // Deleted secrets of the bot: the idle process that still holds the old ones stops at once.
+    fake.secrets['bot:b1'] = {}
+    for (const listener of fake.secretListeners) listener('bot:b1')
+    await vi.waitFor(() => expect(fake.procs[2].killed).toBe(true))
   })
 
   it("stops a chat with secrets on its own process, and prompts it without starting the shared one", async () => {

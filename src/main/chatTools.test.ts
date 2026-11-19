@@ -88,6 +88,7 @@ import {
   botChat,
   delegateTask,
   ensureChief,
+  expectFollowUp,
   handoffChat,
   markBotRead,
   newBotChat,
@@ -550,6 +551,36 @@ describe('@bot', () => {
     await askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
     expect(stub.problems).toEqual([['scout', 'Could not answer: signed out']])
     stub.problems = []
+  })
+
+  it('answers with the reply of the turn the run went on in after its first turn', async () => {
+    asked()
+    registerChatTools({
+      send: async (chatId) => {
+        const chat = stub.chats.get(chatId)!
+        chat.messages.push({ id: 'a1', role: 'assistant', content: 'Saved it, ending this turn.', createdAt: '' })
+        const first = structuredClone(chat)
+        // As after a saved secret: Workbench sends the run a turn of its own once this one ends.
+        chat.messages.push({ id: 'a2', role: 'assistant', content: 'Deployed.', createdAt: '' })
+        const followed = structuredClone(chat)
+        expectFollowUp(chatId, new Promise((resolve) => setTimeout(() => resolve(followed), 10)))
+        return { chat, done: Promise.resolve(first) }
+      },
+      emit: () => {},
+      isStreaming: () => false
+    })
+    const answer = await askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'deploy it' })
+    expect(answer).toBe('Deployed.')
+    expect(stub.chats.get('project-chat')!.messages.at(-1)).toMatchObject({
+      content: 'Deployed.',
+      fromBot: { botId: 'scout', runChatId: 'scout-run' }
+    })
+  })
+
+  it('answers with the first reply when the run has no follow-up', async () => {
+    asked()
+    const answer = await askBot({ botId: 'scout', fromChatId: 'project-chat', content: 'review the login' })
+    expect(answer).toBe('Looks fine.')
   })
 })
 

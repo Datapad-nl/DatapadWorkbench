@@ -140,7 +140,11 @@ export type PermissionRequest = {
   toolKind: string | null
   /** Set when the edit would change files another chat in the same folder changed and has not committed. */
   clash?: EditClash
+  shownIn?: ShownIn
 }
+
+/** A bot asked from another chat: its run's requests are shown in the asking chat, where the user waits. */
+export type ShownIn = { chatId: string; botName: string }
 
 export type EditClash = {
   /** The chat that changed the files last. */
@@ -176,6 +180,7 @@ export type UserQuestionRequest = {
   chatId: string
   questions: UserQuestion[]
   title?: string | null
+  shownIn?: ShownIn
 }
 
 /** `declined`: the user stopped answering after something was gathered. `skipped`: nothing was. */

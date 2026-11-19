@@ -46,10 +46,18 @@ function load(): Promise<SecretsFile> {
   return readJsonFile<SecretsFile>(secretsPath(), {})
 }
 
-/** The scope of a chat's secrets: its project, or its bot when it has no project. Null when it has neither. */
+/**
+ * Where a secret a chat asks for is kept: with its bot, also on a bot's run in a project, else with its project.
+ * Null when it has neither.
+ */
 export function secretScope(chat: { projectId: string; botId?: string }): string | null {
-  if (chat.projectId) return chat.projectId
-  return chat.botId ? `bot:${chat.botId}` : null
+  if (chat.botId) return `bot:${chat.botId}`
+  return chat.projectId || null
+}
+
+/** The scopes whose secrets a chat's shell gets: its project's, then its bot's own, which win on a clash. */
+export function secretScopes(chat: { projectId: string; botId?: string }): string[] {
+  return [chat.projectId, chat.botId ? `bot:${chat.botId}` : ''].filter(Boolean)
 }
 
 /** Called with the scope after a secret was saved or deleted. */
@@ -102,15 +110,21 @@ export async function secretNames(scope: string | null): Promise<string[]> {
   return Object.keys((await load())[scope] ?? {}).sort()
 }
 
-/** A scope's secrets, decrypted, as environment variables. One that no longer decrypts is left out. */
-export async function secretEnv(scope: string | null): Promise<Record<string, string>> {
-  if (!scope) return {}
+/**
+ * The scopes' secrets, decrypted, as environment variables; a later scope's value wins on a clash.
+ * One that no longer decrypts is left out.
+ */
+export async function secretEnv(...scopes: Array<string | null>): Promise<Record<string, string>> {
+  const file = await load()
   const env: Record<string, string> = {}
-  for (const [name, sealed] of Object.entries((await load())[scope] ?? {})) {
-    try {
-      env[name] = safeStorage.decryptString(Buffer.from(sealed, 'base64'))
-    } catch {
-      // Encrypted under another keychain entry, e.g. after the app was reinstalled.
+  for (const scope of scopes) {
+    if (!scope) continue
+    for (const [name, sealed] of Object.entries(file[scope] ?? {})) {
+      try {
+        env[name] = safeStorage.decryptString(Buffer.from(sealed, 'base64'))
+      } catch {
+        // Encrypted under another keychain entry, e.g. after the app was reinstalled.
+      }
     }
   }
   return env

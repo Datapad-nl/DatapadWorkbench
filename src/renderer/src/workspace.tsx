@@ -44,25 +44,31 @@ type StreamState = {
   turnId: number | null
 }
 
-type Pending = { requestId: string; chatId: string }
+type Pending = { requestId: string; chatId: string; shownIn?: { chatId: string } }
+
+/** A bot asked from another chat asks the user there, where they wait, and not in its own run chat. */
+function shownChat(request: Pending): string {
+  return request.shownIn?.chatId ?? request.chatId
+}
 
 /** Requests waiting per chat, oldest first. */
-function groupByChat<T extends Pending>(items: T[]): Record<string, T[]> {
+export function groupByChat<T extends Pending>(items: T[]): Record<string, T[]> {
   const out: Record<string, T[]> = {}
-  for (const item of items) (out[item.chatId] ??= []).push(item)
+  for (const item of items) (out[shownChat(item)] ??= []).push(item)
   return out
 }
 
-function pushRequest<T extends Pending>(current: Record<string, T[]>, request: T): Record<string, T[]> {
-  const queue = current[request.chatId] ?? []
+export function pushRequest<T extends Pending>(current: Record<string, T[]>, request: T): Record<string, T[]> {
+  const chatId = shownChat(request)
+  const queue = current[chatId] ?? []
   // The same request again is the card changing, such as an edit that now waits for another chat.
   if (queue.some((item) => item.requestId === request.requestId)) {
-    return { ...current, [request.chatId]: queue.map((item) => (item.requestId === request.requestId ? request : item)) }
+    return { ...current, [chatId]: queue.map((item) => (item.requestId === request.requestId ? request : item)) }
   }
-  return { ...current, [request.chatId]: [...queue, request] }
+  return { ...current, [chatId]: [...queue, request] }
 }
 
-function dropRequest<T extends Pending>(
+export function dropRequest<T extends Pending>(
   current: Record<string, T[]>,
   chatId: string,
   requestId: string

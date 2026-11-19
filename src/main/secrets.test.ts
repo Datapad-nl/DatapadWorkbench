@@ -28,6 +28,7 @@ import {
   secretEnv,
   secretNameError,
   secretScope,
+  secretScopes,
   setSecret
 } from './secrets'
 
@@ -90,10 +91,37 @@ describe('secrets vault', () => {
     await expect(setSecret('p1', 'ANTHROPIC_API_KEY', 'x')).rejects.toThrow('used by the agent itself')
   })
 
-  it('scopes a chat to its project, or to its bot when it has none', () => {
-    expect(secretScope({ projectId: 'p1', botId: 'b1' })).toBe('p1')
+  it('keeps a secret a chat asks for with its bot, else with its project', () => {
+    expect(secretScope({ projectId: 'p1', botId: 'b1' })).toBe('bot:b1')
+    expect(secretScope({ projectId: 'p1' })).toBe('p1')
     expect(secretScope({ projectId: '', botId: 'b1' })).toBe('bot:b1')
     expect(secretScope({ projectId: '' })).toBeNull()
+  })
+
+  it("gives a chat its project's secrets, its bot's, or both with the bot's own winning", async () => {
+    await setSecret('p9', 'PROJECT_KEY', 'made-up-p')
+    await setSecret('p9', 'SHARED_KEY', 'made-up-project')
+    await setSecret('bot:b9', 'BOT_KEY', 'made-up-b')
+    await setSecret('bot:b9', 'SHARED_KEY', 'made-up-bot')
+    expect(secretScopes({ projectId: 'p9' })).toEqual(['p9'])
+    expect(secretScopes({ projectId: '', botId: 'b9' })).toEqual(['bot:b9'])
+    expect(secretScopes({ projectId: 'p9', botId: 'b9' })).toEqual(['p9', 'bot:b9'])
+    expect(secretScopes({ projectId: '' })).toEqual([])
+
+    expect(await secretEnv(...secretScopes({ projectId: 'p9' }))).toEqual({
+      PROJECT_KEY: 'made-up-p',
+      SHARED_KEY: 'made-up-project'
+    })
+    expect(await secretEnv(...secretScopes({ projectId: '', botId: 'b9' }))).toEqual({
+      BOT_KEY: 'made-up-b',
+      SHARED_KEY: 'made-up-bot'
+    })
+    expect(await secretEnv(...secretScopes({ projectId: 'p9', botId: 'b9' }))).toEqual({
+      PROJECT_KEY: 'made-up-p',
+      BOT_KEY: 'made-up-b',
+      SHARED_KEY: 'made-up-bot'
+    })
+    expect(await secretEnv()).toEqual({})
   })
 
   it('fingerprints an environment by its names and values, whatever their order', () => {

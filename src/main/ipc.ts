@@ -14,6 +14,7 @@ import type {
   PermissionMode,
   PlanVerdict,
   SaveBotSkillInput,
+  ShownIn,
   UpdateBotInput,
   UpdateProjectInput,
   UserQuestionAnswer,
@@ -226,6 +227,16 @@ export function openBotFromTray(botId: string): void {
   emit({ type: 'open-bot', botId })
 }
 
+/** A bot asked from another chat asks the user there, where they wait, and not in its own run chat. */
+function shownChat(request: { chatId: string; shownIn?: ShownIn }): string {
+  return request.shownIn?.chatId ?? request.chatId
+}
+
+/** Names the bot in a notice from the asking chat, so it is not taken for that chat's own agent. */
+function askedBy(request: { shownIn?: ShownIn }): string {
+  return request.shownIn ? `${request.shownIn.botName}: ` : ''
+}
+
 /** System notification for a chat that needs the user, when the app is in the background. */
 async function noticeFor(chatId: string, body: string, urgent = false): Promise<void> {
   const chat = await getChat(chatId).catch(() => null)
@@ -338,8 +349,8 @@ export function registerIpc(): void {
     if (!isBotRun(chat.id)) void noticeForReply(chat).catch(() => {})
   })
   onPermissionPrompt((request) => {
-    emit({ type: 'permission', chatId: request.chatId, request })
-    void noticeFor(request.chatId, `Needs approval: ${request.title}`, true)
+    emit({ type: 'permission', chatId: shownChat(request), request })
+    void noticeFor(shownChat(request), `${askedBy(request)}Needs approval: ${request.title}`, true)
     emitPermissionActivity({
       chatId: request.chatId,
       sessionId: null,
@@ -349,9 +360,9 @@ export function registerIpc(): void {
       requestId: request.requestId
     })
   })
-  onPermissionUpdated((request) => emit({ type: 'permission', chatId: request.chatId, request }))
+  onPermissionUpdated((request) => emit({ type: 'permission', chatId: shownChat(request), request }))
   onPermissionSettled((request) => {
-    emit({ type: 'permission-clear', chatId: request.chatId, requestId: request.requestId })
+    emit({ type: 'permission-clear', chatId: shownChat(request), requestId: request.requestId })
     emitPermissionActivity({
       chatId: request.chatId,
       sessionId: null,
@@ -372,11 +383,15 @@ export function registerIpc(): void {
     })
   })
   onUserQuestionPrompt((request) => {
-    emit({ type: 'question', chatId: request.chatId, request })
-    void noticeFor(request.chatId, request.questions[0]?.question || request.title || 'Has a question for you', true)
+    emit({ type: 'question', chatId: shownChat(request), request })
+    void noticeFor(
+      shownChat(request),
+      askedBy(request) + (request.questions[0]?.question || request.title || 'Has a question for you'),
+      true
+    )
   })
   onUserQuestionSettled((request) => {
-    emit({ type: 'question-clear', chatId: request.chatId, requestId: request.requestId })
+    emit({ type: 'question-clear', chatId: shownChat(request), requestId: request.requestId })
   })
 
   ipcMain.handle('workspace:get', async () => {
