@@ -173,6 +173,7 @@ const api = {
     orchestratorModel?: string
     subagentModel?: string
     maxSubagents?: number
+    conciseReplies?: boolean
   }) =>
     ipcRenderer.invoke('settings:set', input),
   getVoiceModelStatus: () => ipcRenderer.invoke('voice:modelStatus') as Promise<VoiceModelStatus>,

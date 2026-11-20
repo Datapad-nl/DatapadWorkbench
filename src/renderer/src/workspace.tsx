@@ -194,6 +194,7 @@ type WorkspaceContextValue = {
     orchestratorModel?: string
     subagentModel?: string
     maxSubagents?: number
+    conciseReplies?: boolean
   }) => Promise<void>
 }
 
@@ -1094,6 +1095,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       orchestratorModel?: string
       subagentModel?: string
       maxSubagents?: number
+      conciseReplies?: boolean
     }) => {
       const next = await window.workbench.setSettings(input)
       setSettings(

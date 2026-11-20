@@ -18,6 +18,8 @@ export type Bot = {
   model: string
   /** Reasoning effort for the bot's chats. Empty follows the setting. */
   effort: ReasoningEffort | ''
+  /** Whether the bot's chats are told to answer briefly. */
+  conciseReplies: boolean
   instructions: string
   /** Tools the bot may use without asking, one name each. */
   allowedTools: string[]
@@ -52,6 +54,7 @@ export type UpdateBotInput = {
   agent?: ChatAgent
   model?: string
   effort?: string | null
+  conciseReplies?: boolean
   instructions?: string
   allowedTools?: string[]
   mcpServers?: string[]
@@ -442,6 +445,8 @@ export type PublicSettings = {
   subagentModel: string
   /** How many workers of one chat run at the same time. */
   maxSubagents: number
+  /** Chats the user talks to are told to reply short and to the point. */
+  conciseReplies: boolean
   hasKey: boolean
   keyPreview: string | null
   model: string

@@ -94,6 +94,14 @@ describe('bots', () => {
     expect((await updateBot({ id: bot.id, effort: null })).effort).toBe('')
   })
 
+  it('keeps short replies off until switched on, and keeps the choice through other edits', async () => {
+    const bot = await createBot('Scout')
+    expect(bot.conciseReplies).toBe(false)
+    expect((await updateBot({ id: bot.id, conciseReplies: true })).conciseReplies).toBe(true)
+    expect((await updateBot({ id: bot.id, model: 'opus' })).conciseReplies).toBe(true)
+    expect((await updateBot({ id: bot.id, conciseReplies: false })).conciseReplies).toBe(false)
+  })
+
   it('reads a bot saved before effort was a setting as following the setting', async () => {
     mkdirSync(join(stub.dir, 'workbench'), { recursive: true })
     writeFileSync(

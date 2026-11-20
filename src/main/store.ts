@@ -50,6 +50,8 @@ type SettingsFile = {
   subagentModel?: string
   /** How many workers of one chat run at the same time. */
   maxSubagents?: number
+  /** Every chat the user talks to is told to reply short and to the point. */
+  conciseReplies?: boolean
   /** Plain text only where the system keychain is not available; otherwise empty, see `apiKeySealed`. */
   apiKey: string
   /** The API key encrypted with the system keychain (Electron safeStorage), base64. */
@@ -320,6 +322,7 @@ async function loadSettingsFile(): Promise<SettingsFile> {
     orchestratorModel: file.orchestratorModel?.trim() ?? '',
     subagentModel: file.subagentModel?.trim() ?? '',
     maxSubagents: normalizeMaxSubagents(file.maxSubagents),
+    conciseReplies: file.conciseReplies === true,
     apiKey: openApiKey(file),
     apiKeySealed: file.apiKeySealed,
     model: file.model || DEFAULT_MODEL,
@@ -417,6 +420,7 @@ export async function getPublicSettings(): Promise<PublicSettings> {
     orchestratorModel: file.orchestratorModel ?? '',
     subagentModel: file.subagentModel ?? '',
     maxSubagents: normalizeMaxSubagents(file.maxSubagents),
+    conciseReplies: file.conciseReplies === true,
     cliChecking
   }
   if (signedIn) {
@@ -533,6 +537,11 @@ export async function getMaxSubagents(): Promise<number> {
   return normalizeMaxSubagents(file.maxSubagents)
 }
 
+export async function getConciseReplies(): Promise<boolean> {
+  const file = await loadSettingsFile()
+  return file.conciseReplies === true
+}
+
 export async function getEffort(): Promise<ReasoningEffort | null> {
   const file = await loadSettingsFile()
   return file.effort || null
@@ -548,6 +557,7 @@ export async function updateSettings(input: {
   orchestratorModel?: string
   subagentModel?: string
   maxSubagents?: number
+  conciseReplies?: boolean
 }): Promise<PublicSettings> {
   await withLock(settingsPath(), async () => {
     const current = await loadSettingsFile()
@@ -560,6 +570,7 @@ export async function updateSettings(input: {
       subagentModel: input.subagentModel !== undefined ? input.subagentModel.trim() : current.subagentModel,
       maxSubagents:
         input.maxSubagents !== undefined ? normalizeMaxSubagents(input.maxSubagents) : current.maxSubagents,
+      conciseReplies: input.conciseReplies !== undefined ? input.conciseReplies === true : current.conciseReplies,
       apiKey: input.apiKey !== undefined ? input.apiKey.trim() : current.apiKey,
       // A new key replaces the sealed one, also when it is empty or cannot be sealed.
       apiKeySealed: input.apiKey !== undefined ? undefined : current.apiKeySealed,

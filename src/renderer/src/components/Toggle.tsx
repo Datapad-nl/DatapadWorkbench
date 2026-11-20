@@ -1,11 +1,13 @@
 export function Toggle({
   on,
   onClick,
-  label
+  label,
+  testId
 }: {
   on: boolean
   onClick: () => void
   label: string
+  testId?: string
 }): React.JSX.Element {
   return (
     <button
@@ -13,6 +15,7 @@ export function Toggle({
       role="switch"
       aria-checked={on}
       aria-label={label}
+      data-testid={testId}
       onClick={onClick}
       className={`relative h-5 w-9 shrink-0 rounded-full transition ${on ? 'bg-accent' : 'bg-line'}`}
     >

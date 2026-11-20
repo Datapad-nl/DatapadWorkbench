@@ -14,7 +14,18 @@ vi.mock('electron', () => ({
   }
 }))
 
-import { createChat, deleteChat, ensureStore, getApiKey, listChats, mutateChat, saveAttachment, setThemeId } from './store'
+import {
+  createChat,
+  deleteChat,
+  ensureStore,
+  getApiKey,
+  getConciseReplies,
+  listChats,
+  mutateChat,
+  saveAttachment,
+  setThemeId,
+  updateSettings
+} from './store'
 
 let chats = ''
 
@@ -127,6 +138,17 @@ describe('bot chats', () => {
     expect((await listChats()).find((item) => item.id === chat.id)).toMatchObject({ projectId: '', botId: 'b1' })
     await expect(createChat('', { botId: 'gone' })).rejects.toThrow('Bot not found')
     await expect(createChat('nowhere')).rejects.toThrow('Project not found')
+  })
+})
+
+describe('short replies setting', () => {
+  it('is off by default, and saving it on keeps it across other changes', async () => {
+    expect(await getConciseReplies()).toBe(false)
+    expect((await updateSettings({ conciseReplies: true })).conciseReplies).toBe(true)
+    expect(await getConciseReplies()).toBe(true)
+    expect((await updateSettings({ maxSubagents: 1 })).conciseReplies).toBe(true)
+    expect((await updateSettings({ conciseReplies: false })).conciseReplies).toBe(false)
+    expect(await getConciseReplies()).toBe(false)
   })
 })
 

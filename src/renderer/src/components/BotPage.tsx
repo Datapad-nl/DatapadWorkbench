@@ -21,6 +21,7 @@ import { BotSchedules } from './BotSchedules'
 import { BotSkills } from './BotSkills'
 import { useWorkspace, type BotTab } from '../workspace'
 import { IconButton } from './icons'
+import { Toggle } from './Toggle'
 
 function errorText(error: unknown, fallback: string): string {
   // IPC errors arrive as "Error invoking remote method '…': Error: <message>".
@@ -33,6 +34,7 @@ type Draft = {
   agent: ChatAgent
   model: string
   effort: string
+  conciseReplies: boolean
   instructions: string
   allowedTools: string
   mcpServers: string
@@ -44,6 +46,7 @@ function draftOf(bot: Bot): Draft {
     agent: bot.agent,
     model: bot.model,
     effort: bot.effort,
+    conciseReplies: bot.conciseReplies,
     instructions: bot.instructions,
     allowedTools: bot.allowedTools.join('\n'),
     mcpServers: bot.mcpServers.join('\n')
@@ -221,6 +224,7 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
           agent: draft.agent,
           model: draft.model,
           effort: draft.effort || null,
+          conciseReplies: draft.conciseReplies,
           instructions: draft.instructions,
           allowedTools: allowed,
           mcpServers: servers
@@ -363,6 +367,22 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
                 ))}
               </select>
             </label>
+          </div>
+
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-[12px] text-muted">Short replies</div>
+              <span className="mt-1 block text-[11px] text-faint">
+                The bot answers briefly: the result first, steps numbered, one question at the end. Holds for runs
+                started after the change.
+              </span>
+            </div>
+            <Toggle
+              label="Short replies"
+              testId="bot-conciseReplies"
+              on={draft.conciseReplies}
+              onClick={() => edit({ conciseReplies: !draft.conciseReplies })}
+            />
           </div>
 
           <label className="block text-[12px] text-muted">

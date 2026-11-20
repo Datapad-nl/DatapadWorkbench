@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import readline from 'readline'
 import { onlyMcpServers, toAcpMcpServers } from '../shared/mcp'
 import { agentToolRule, conductorRule } from '../shared/conductor'
+import { SHORT_REPLIES_RULE } from '../shared/replyStyle'
 import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
 import { type AgentProcess, startClaudeAdapter } from './claudeCli'
@@ -56,6 +57,7 @@ import {
   getClaudeModel,
   getChat,
   getEffort,
+  getConciseReplies,
   getMaxSubagents,
   getMcpServers,
   getSubagentModel,
@@ -1197,11 +1199,16 @@ async function sessionConfig(
   const maxSubagents = await getMaxSubagents()
   // With no workers allowed a conductor could do nothing, so it gets the rule that has it do the work itself.
   const role = conductor && maxSubagents > 0 ? conductorRule(subagentModel, maxSubagents) : null
-  if (agent !== 'claude') return { ...config, ...sessionRules(agent, role ? `${rules}\n\n${role}` : rules) }
+  // A user's own chat, not a bot's chat and not a worker.
+  const orchestrate = !bot && !chat?.parentChatId
+  // A bot's chat follows the bot's own switch; a user's own chat follows Settings; a worker never gets it.
+  const short = bot ? bot.conciseReplies : chatId && orchestrate && (await getConciseReplies())
+  const withStyle = short ? `${rules}\n\n${SHORT_REPLIES_RULE}` : rules
+  if (agent !== 'claude') return { ...config, ...sessionRules(agent, role ? `${withStyle}\n\n${role}` : withStyle) }
   // A bot's own skills come with the session, as a plugin in the bot's folder.
   const plugins = pluginDir ? { plugins: [{ type: 'local', path: pluginDir }] } : {}
   if (!chatId) {
-    const session = sessionRules(agent, rules)
+    const session = sessionRules(agent, withStyle)
     if (!pluginDir) return { ...config, ...session }
     const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
     return { ...config, ...session, _meta: { claudeCode: { ...meta, options: plugins } } }
@@ -1209,10 +1216,9 @@ async function sessionConfig(
   // Claude Code starts agents of its own with its Agent tool. Settings holds for those too.
   // A conductor gets its role instead: it delegates with `delegate`, and its edits are refused.
   // A worker and a bot's chat do their task themselves; a user's chat orchestrates its agents.
-  const orchestrate = !bot && !chat?.parentChatId
   const session = sessionRules(
     agent,
-    `${rules}\n\n${role ?? agentToolRule(subagentModel, maxSubagents, orchestrate)}`
+    `${withStyle}\n\n${role ?? agentToolRule(subagentModel, maxSubagents, orchestrate)}`
   )
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
   // Claude Code takes environment variables per session: the chat's secrets, for its shell.

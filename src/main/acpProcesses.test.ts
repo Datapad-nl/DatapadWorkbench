@@ -24,7 +24,7 @@ const fake = vi.hoisted(() => ({
   /** The bot of each chat, by chat id. */
   bots: {} as Record<
     string,
-    { id?: string; agent: string; model: string; effort: string; allowedTools?: string[]; mcpServers?: string[] }
+    { id?: string; agent: string; model: string; effort: string; conciseReplies?: boolean; allowedTools?: string[]; mcpServers?: string[] }
   >,
   /** The MCP servers in Settings. */
   mcp: {} as Record<string, unknown>,
@@ -34,6 +34,8 @@ const fake = vi.hoisted(() => ({
   parents: {} as Record<string, string>,
   /** Most subagents at once, from Settings. */
   maxSubagents: 2,
+  /** Short replies, from Settings. */
+  conciseReplies: false,
   /** The project of each chat, by chat id. */
   projects: {} as Record<string, string>,
   /** Saved secrets by scope: a project id or `bot:<id>`. */
@@ -128,6 +130,7 @@ vi.mock('./store', () => ({
   },
   effortFor: async (chatId?: string) => (chatId ? fake.bots[chatId]?.effort || null : null),
   getMaxSubagents: async () => fake.maxSubagents,
+  getConciseReplies: async () => fake.conciseReplies,
   getMcpServers: async () => fake.mcp,
   getSubagentModel: async () => null,
   skipNewSession: <T,>(value: T) => value
@@ -157,6 +160,7 @@ import {
   steerSession,
   stopAgents
 } from './acp'
+import { SHORT_REPLIES_RULE } from '../shared/replyStyle'
 import { bindPermissionSession, cancelAllPermissions, pendingPermissionRequests } from './permissions'
 
 afterEach(() => {
@@ -168,6 +172,7 @@ afterEach(() => {
   fake.conductors.clear()
   fake.parents = {}
   fake.maxSubagents = 2
+  fake.conciseReplies = false
   fake.projects = {}
   fake.secrets = {}
   fake.steerOutcome = 'injected'
@@ -540,6 +545,46 @@ describe('steering a running turn', () => {
   it('does not steer Grok, which does not offer it', async () => {
     const sessionId = await newSession('/project', null, 'grok', 'chat-10')
     expect(sessionSupportsSteering(sessionId)).toBe(false)
+  })
+})
+
+describe('short replies', () => {
+  const rulesOf = (call: Call | undefined): string => (call?.params._meta as { rules: string }).rules
+  const promptOf = (call: Call | undefined): string =>
+    (call?.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text
+
+  it('adds nothing by default', async () => {
+    await newSession('/project', null, 'grok', 'chat-1')
+    await newSession('/project', null, 'claude', 'chat-1')
+    const [grok, claude] = fake.procs
+    expect(rulesOf(grok.calls.find((call) => call.method === 'session/new'))).not.toContain(SHORT_REPLIES_RULE)
+    expect(promptOf(claude.calls.find((call) => call.method === 'session/new'))).not.toContain(SHORT_REPLIES_RULE)
+  })
+
+  it("tells a user's own chat, on either agent, and not a worker, a bot's chat with its switch off or a session without a chat", async () => {
+    fake.conciseReplies = true
+    fake.parents.worker = 'chat-1'
+    fake.bots['bot-chat'] = { agent: 'claude', model: '', effort: '', conciseReplies: false }
+    await newSession('/project', null, 'grok', 'chat-1')
+    await newSession('/project', null, 'grok', 'worker')
+    await newSession('/project', null, 'claude', 'chat-1')
+    await newSession('/project', null, 'claude', 'worker')
+    await newSession('/project', null, 'claude', 'bot-chat')
+    await newSession('/project', null, 'claude')
+    const [grok, claude] = fake.procs
+    const grokNew = grok.calls.filter((call) => call.method === 'session/new')
+    expect(rulesOf(grokNew[0])).toContain(SHORT_REPLIES_RULE)
+    expect(rulesOf(grokNew[1])).not.toContain(SHORT_REPLIES_RULE)
+    const claudeNew = claude.calls.filter((call) => call.method === 'session/new').map(promptOf)
+    expect(claudeNew[0]).toContain(SHORT_REPLIES_RULE)
+    for (const prompt of claudeNew.slice(1)) expect(prompt).not.toContain(SHORT_REPLIES_RULE)
+  })
+
+  it("tells a bot's chat when the bot's own switch is on, whatever Settings says", async () => {
+    fake.bots['bot-chat'] = { agent: 'claude', model: '', effort: '', conciseReplies: true }
+    await newSession('/project', null, 'claude', 'bot-chat')
+    const [claude] = fake.procs
+    expect(promptOf(claude.calls.find((call) => call.method === 'session/new'))).toContain(SHORT_REPLIES_RULE)
   })
 })
 

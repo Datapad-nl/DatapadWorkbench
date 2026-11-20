@@ -865,6 +865,7 @@ export function registerIpc(): void {
         orchestratorModel?: string
         subagentModel?: string
         maxSubagents?: number
+        conciseReplies?: boolean
       }
     ) => {
       const settings = await updateSettings(input)

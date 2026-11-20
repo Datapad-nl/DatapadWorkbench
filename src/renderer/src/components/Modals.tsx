@@ -936,6 +936,17 @@ export function SettingsModal(): React.JSX.Element | null {
                 />
               </SettingRow>
             )}
+            <SettingRow
+              label="Short replies"
+              help="Chats answer briefly: the result first, steps numbered, one question at the end. Holds for chats started or reopened after the change."
+            >
+              <Toggle
+                label="Short replies"
+                testId="settings-conciseReplies"
+                on={settings.conciseReplies}
+                onClick={() => save({ conciseReplies: !settings.conciseReplies })}
+              />
+            </SettingRow>
           </div>
         )
       case 'subagents':
