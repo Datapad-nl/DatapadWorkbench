@@ -56,12 +56,15 @@ import {
   activeBrowserScope,
   cancelBrowserAnnotate,
   clearBrowserData,
+  closeBrowserTab,
   getBrowserState,
   goBack,
   goForward,
   navigateBrowser,
+  newBrowserTab,
   reloadBrowser,
   sanitizeUrl,
+  selectBrowserTab,
   setBrowserBounds,
   setBrowserScope,
   setBrowserVisible,
@@ -976,6 +979,11 @@ export function registerIpc(): void {
   ipcMain.handle('browser:forward', () => goForward(activeBrowserScope()))
   ipcMain.handle('browser:reload', () => reloadBrowser(activeBrowserScope()))
   ipcMain.handle('browser:stop', () => stopBrowser(activeBrowserScope()))
+  ipcMain.handle('browser:newTab', (_event, url: unknown) =>
+    newBrowserTab(activeBrowserScope(), typeof url === 'string' && url ? url : undefined)
+  )
+  ipcMain.handle('browser:selectTab', (_event, tabId: string) => selectBrowserTab(activeBrowserScope(), String(tabId ?? '')))
+  ipcMain.handle('browser:closeTab', (_event, tabId: string) => closeBrowserTab(activeBrowserScope(), String(tabId ?? '')))
   ipcMain.handle('browser:devTools', () => toggleBrowserDevTools())
   ipcMain.handle('browser:clearData', () => clearBrowserData())
   ipcMain.handle('browser:annotateStart', () => startBrowserAnnotate())

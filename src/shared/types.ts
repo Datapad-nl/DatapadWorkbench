@@ -668,6 +668,14 @@ export type BrowserBounds = {
   height: number
 }
 
+export type BrowserTab = {
+  id: string
+  url: string
+  title: string
+  loading: boolean
+}
+
+/** The scope's active tab, with the scope's tabs in order. */
 export type BrowserState = {
   url: string
   title: string
@@ -676,6 +684,8 @@ export type BrowserState = {
   loading: boolean
   visible: boolean
   error: string | null
+  tabs: BrowserTab[]
+  activeTabId: string | null
 }
 
 export type BrowserAnnotationHit = {

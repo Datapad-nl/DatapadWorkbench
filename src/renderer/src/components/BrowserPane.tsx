@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
-import type { Attachment, BrowserAnnotationHit, BrowserState } from '../../../shared/types'
+import type { Attachment, BrowserAnnotationHit, BrowserState, BrowserTab } from '../../../shared/types'
 import { parseYoutubeVideoId } from '../../../shared/youtube'
 import type { YoutubeTranscriptResult } from '../../../shared/youtube'
 import { useStreamStatuses, useWorkspace } from '../workspace'
@@ -42,7 +42,18 @@ const empty: BrowserState = {
   canGoForward: false,
   loading: false,
   visible: false,
-  error: null
+  error: null,
+  tabs: [],
+  activeTabId: null
+}
+
+function tabLabel(tab: BrowserTab): string {
+  if (tab.title) return tab.title
+  try {
+    return new URL(tab.url).host || 'New tab'
+  } catch {
+    return 'New tab'
+  }
 }
 
 export function BrowserPane(): React.JSX.Element {
@@ -167,6 +178,17 @@ export function BrowserPane(): React.JSX.Element {
     setNote('')
     setPasted([])
   }, [activeProjectId, activeBotId])
+
+  // Another tab replaces this page the same way, and its video is not the one transcribed; main ends the pick.
+  useEffect(() => {
+    pickGen.current += 1
+    transcriptGen.current += 1
+    setTranscript(null)
+    setMode('off')
+    setHit(null)
+    setNote('')
+    setPasted([])
+  }, [state.activeTabId])
 
   useEffect(() => {
     if (mode === 'comment') noteRef.current?.focus()
@@ -416,6 +438,55 @@ export function BrowserPane(): React.JSX.Element {
             <Icon name="close" />
           </IconButton>
         </div>
+      </div>
+      <div
+        className="no-drag flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto overflow-y-hidden border-b border-line bg-sidebar px-2 [scrollbar-width:none]"
+        data-testid="browser-tabs"
+      >
+        {state.tabs.map((tab) => {
+          const active = tab.id === state.activeTabId
+          const label = tabLabel(tab)
+          return (
+            <div
+              key={tab.id}
+              title={tab.url ? `${label} · ${tab.url}` : label}
+              className={`group flex h-6 max-w-[180px] shrink-0 items-center gap-1 rounded-[7px] border pr-0.5 pl-2 ${
+                active
+                  ? 'border-line bg-surface text-ink'
+                  : 'border-transparent text-muted hover:bg-hover hover:text-ink'
+              }`}
+              // Middle-click closes, as in other browsers; holding it down must not start autoscroll.
+              onMouseDown={(event) => {
+                if (event.button === 1) event.preventDefault()
+              }}
+              onAuxClick={(event) => {
+                if (event.button === 1) void window.workbench.closeBrowserTab(tab.id)
+              }}
+            >
+              <button
+                type="button"
+                className={`min-w-0 truncate text-left text-[11px] ${active ? 'font-medium' : ''}`}
+                onClick={() => void window.workbench.selectBrowserTab(tab.id)}
+              >
+                {label}
+              </button>
+              <button
+                type="button"
+                aria-label="Close tab"
+                title="Close tab"
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-faint hover:bg-hover hover:text-ink focus-visible:opacity-100 ${
+                  active ? '' : 'opacity-0 group-hover:opacity-100'
+                }`}
+                onClick={() => void window.workbench.closeBrowserTab(tab.id)}
+              >
+                <Icon name="close" size={10} />
+              </button>
+            </div>
+          )
+        })}
+        <IconButton label="New tab" onClick={() => void window.workbench.newBrowserTab()}>
+          <Icon name="plus" />
+        </IconButton>
       </div>
       <div className="relative min-h-0 flex-1">
         <div ref={hostRef} className="absolute inset-0" data-testid="browser-host" />

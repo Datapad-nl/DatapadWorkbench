@@ -299,6 +299,11 @@ const api = {
   browserForward: () => ipcRenderer.invoke('browser:forward') as Promise<BrowserState>,
   reloadBrowser: () => ipcRenderer.invoke('browser:reload') as Promise<BrowserState>,
   stopBrowser: () => ipcRenderer.invoke('browser:stop') as Promise<BrowserState>,
+  newBrowserTab: (url?: string) => ipcRenderer.invoke('browser:newTab', url) as Promise<BrowserState>,
+  selectBrowserTab: (tabId: string) =>
+    ipcRenderer.invoke('browser:selectTab', tabId) as Promise<BrowserState>,
+  closeBrowserTab: (tabId: string) =>
+    ipcRenderer.invoke('browser:closeTab', tabId) as Promise<BrowserState>,
   toggleBrowserDevTools: () => ipcRenderer.invoke('browser:devTools') as Promise<void>,
   clearBrowserData: () => ipcRenderer.invoke('browser:clearData') as Promise<BrowserState>,
   startBrowserAnnotate: () =>

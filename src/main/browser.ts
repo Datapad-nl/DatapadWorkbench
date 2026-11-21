@@ -1,8 +1,10 @@
 import { app, BaseWindow, BrowserWindow, WebContentsView, session } from 'electron'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
-import type { BrowserAnnotationHit, BrowserBounds, BrowserState } from '../shared/types'
+import type { BrowserAnnotationHit, BrowserBounds, BrowserState, BrowserTab } from '../shared/types'
 import { ANNOTATE_CANCEL, ANNOTATE_CLEANUP, ANNOTATE_PICKER } from './annotatePicker'
+import { addTab, closeTab, emptyTabList, parseSavedTabs, selectTab, type SavedTab, type TabList } from './browserTabs'
+import { id as newId } from './ids'
 
 const PARTITION = 'persist:workbench-browser'
 
@@ -10,12 +12,14 @@ export type ConsoleEntry = { level: string; message: string; source: string; at:
 const CONSOLE_LIMIT = 200
 
 /**
- * One page per scope: a project id, or `bot:<botId>` for a bot's own chats. The window shows the page of
- * the active scope; agents drive the page of their chat's scope, on screen or not.
+ * Tabs per scope: a project id, or `bot:<botId>` for a bot's own chats. The window shows the active tab of
+ * the active scope; agents drive the active tab of their chat's scope, on screen or not. A tab gets its
+ * page only once it is the active one, so a restored tab costs nothing until it is opened.
  */
 type Page = { view: WebContentsView; error: string | null; console: ConsoleEntry[]; loadedPersisted: boolean }
+// Keyed by tab id.
 const pages = new Map<string, Page>()
-let savedUrls: Record<string, string> = {}
+let savedTabs: Record<string, TabList> = {}
 
 let host: BrowserWindow | null = null
 let park: BaseWindow | null = null
@@ -29,7 +33,7 @@ let lastEmitted = ''
 let emitTimer: ReturnType<typeof setTimeout> | null = null
 let persistWrite: Promise<void> = Promise.resolve()
 let picking = false
-let pickScope: string | null = null
+let pickTab: string | null = null
 let pickSession = 0
 let endPick: (() => void) | null = null
 
@@ -66,10 +70,30 @@ function guestSession(): Electron.Session {
   return ses
 }
 
-function contents(scope: string | null): Electron.WebContents | null {
-  const page = scope ? pages.get(scope) : undefined
+/** The scope's tabs, starting with one empty tab the first time the scope is used. */
+function tabList(scope: string): TabList {
+  savedTabs[scope] ??= emptyTabList(newId)
+  return savedTabs[scope]
+}
+
+function activeTab(scope: string): SavedTab {
+  const list = tabList(scope)
+  return list.tabs.find((tab) => tab.id === list.active) ?? list.tabs[0]
+}
+
+/** The scope's active tab id, without starting a tab list for it. */
+function activeTabId(scope: string | null): string | null {
+  return (scope ? savedTabs[scope]?.active : null) ?? null
+}
+
+function liveContents(tabId: string | null): Electron.WebContents | null {
+  const page = tabId ? pages.get(tabId) : undefined
   if (!page || page.view.webContents.isDestroyed()) return null
   return page.view.webContents
+}
+
+function contents(scope: string | null): Electron.WebContents | null {
+  return liveContents(activeTabId(scope))
 }
 
 /** The scope the window shows: the project or bot the user is in. */
@@ -91,14 +115,15 @@ export function browserPainted(scope: string): boolean {
 
 /** The page's console since the last navigation, oldest first. */
 export function browserConsole(scope: string): ConsoleEntry[] {
-  return [...(pages.get(scope)?.console ?? [])]
+  const tabId = activeTabId(scope)
+  return [...((tabId ? pages.get(tabId)?.console : undefined) ?? [])]
 }
 
 function stateKey(state: BrowserState): string {
-  return `${state.url}\0${state.title}\0${state.canGoBack}\0${state.canGoForward}\0${state.loading}\0${state.visible}\0${state.error ?? ''}`
+  return `${state.url}\0${state.title}\0${state.canGoBack}\0${state.canGoForward}\0${state.loading}\0${state.visible}\0${state.error ?? ''}\0${state.activeTabId ?? ''}\0${JSON.stringify(state.tabs)}`
 }
 
-/** Pushes the active scope's state; other pages changing are nothing the window shows. */
+/** Pushes the active scope's state; other scopes changing are nothing the window shows. */
 function emit(immediate = false): void {
   const send = (): void => {
     emitTimer = null
@@ -129,23 +154,15 @@ export function requestShowBrowser(scope: string): void {
 }
 
 async function loadPersisted(): Promise<void> {
-  // The old single `{ url }` belonged to no project, so it is left out.
-  savedUrls = {}
   try {
-    const raw = JSON.parse(await readFile(persistPath(), 'utf8')) as { urls?: unknown }
-    if (raw.urls && typeof raw.urls === 'object') {
-      for (const [scope, url] of Object.entries(raw.urls as Record<string, unknown>)) {
-        const clean = typeof url === 'string' ? sanitizeUrl(url) : null
-        if (clean) savedUrls[scope] = clean
-      }
-    }
+    savedTabs = parseSavedTabs(JSON.parse(await readFile(persistPath(), 'utf8')), sanitizeUrl, newId)
   } catch {
-    savedUrls = {}
+    savedTabs = {}
   }
 }
 
 function writePersisted(): Promise<void> {
-  const body = JSON.stringify({ urls: savedUrls })
+  const body = JSON.stringify({ tabs: savedTabs })
   // One write at a time, so an older list never lands after a newer one.
   const write = async (): Promise<void> => {
     await mkdir(join(app.getPath('userData'), 'workbench'), { recursive: true })
@@ -156,10 +173,17 @@ function writePersisted(): Promise<void> {
   return next
 }
 
-async function savePersisted(scope: string, url: string): Promise<void> {
+function findTab(scope: string, tabId: string): SavedTab | undefined {
+  return savedTabs[scope]?.tabs.find((tab) => tab.id === tabId)
+}
+
+async function savePersisted(scope: string, tabId: string, url: string): Promise<void> {
+  const tab = findTab(scope, tabId)
   const clean = sanitizeUrl(url)
-  if (clean) savedUrls[scope] = clean
-  else delete savedUrls[scope]
+  if (!tab || !clean) return
+  tab.url = clean
+  const wc = liveContents(tabId)
+  if (wc) tab.title = wc.getTitle()
   await writePersisted()
 }
 
@@ -215,16 +239,28 @@ function place(view: WebContentsView, window: BaseWindow, bounds: BrowserBounds)
 function applyBounds(): void {
   if (!host || host.isDestroyed()) return
   const show = onScreen()
-  for (const [scope, page] of pages) {
+  const shown = activeTabId(activeScope)
+  for (const [tabId, page] of pages) {
     if (page.view.webContents.isDestroyed()) continue
-    if (show && scope === activeScope) place(page.view, host, lastBounds)
+    if (show && tabId === shown) place(page.view, host, lastBounds)
     else place(page.view, parkWindow(), { x: 0, y: 0, ...paneSize })
   }
 }
 
+/** Takes a closed tab's page out of the windows and ends it. */
+function closePage(page: Page): void {
+  for (const window of [host, park]) {
+    if (window && !window.isDestroyed() && window.contentView.children.includes(page.view)) {
+      window.contentView.removeChildView(page.view)
+    }
+  }
+  if (!page.view.webContents.isDestroyed()) page.view.webContents.close()
+}
+
 function loadPersistedIfNeeded(scope: string): void {
-  const page = pages.get(scope)
-  const url = savedUrls[scope]
+  const tab = activeTab(scope)
+  const page = pages.get(tab.id)
+  const url = tab.url
   if (!page || page.loadedPersisted || !url) return
   page.loadedPersisted = true
   const wc = page.view.webContents
@@ -232,8 +268,9 @@ function loadPersistedIfNeeded(scope: string): void {
   void wc.loadURL(url)
 }
 
-function wireContents(scope: string, page: Page): void {
+function wireContents(scope: string, tabId: string, page: Page): void {
   const wc = page.view.webContents
+  // Any tab of the scope on screen changing shows in its tab strip.
   const changed = (): void => {
     if (scope === activeScope) emit()
   }
@@ -254,7 +291,7 @@ function wireContents(scope: string, page: Page): void {
 
   const onChange = (): void => {
     const url = wc.getURL()
-    if (sanitizeUrl(url)) void savePersisted(scope, url)
+    if (sanitizeUrl(url)) void savePersisted(scope, tabId, url)
     changed()
   }
 
@@ -273,17 +310,21 @@ function wireContents(scope: string, page: Page): void {
   })
   wc.on('did-navigate', onChange)
   wc.on('did-navigate-in-page', onChange)
-  wc.on('page-title-updated', changed)
+  wc.on('page-title-updated', () => {
+    const tab = findTab(scope, tabId)
+    if (tab) tab.title = wc.getTitle()
+    changed()
+  })
   wc.on('did-start-loading', () => {
     page.error = null
     changed()
   })
   // Only a new main document ends a pick; subframe loads and in-page navigations do not.
   wc.on('did-start-navigation', (details) => {
-    if (picking && pickScope === scope && details.isMainFrame && !details.isSameDocument) void cancelBrowserAnnotate()
+    if (picking && pickTab === tabId && details.isMainFrame && !details.isSameDocument) void cancelBrowserAnnotate()
   })
   wc.on('render-process-gone', () => {
-    if (picking && pickScope === scope) void cancelBrowserAnnotate()
+    if (picking && pickTab === tabId) void cancelBrowserAnnotate()
   })
   wc.on('did-stop-loading', onChange)
   wc.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
@@ -294,7 +335,8 @@ function wireContents(scope: string, page: Page): void {
 }
 
 function ensurePage(scope: string): Page {
-  const existing = pages.get(scope)
+  const tabId = activeTab(scope).id
+  const existing = pages.get(tabId)
   if (existing && !existing.view.webContents.isDestroyed()) return existing
 
   const view = new WebContentsView({
@@ -312,8 +354,8 @@ function ensurePage(scope: string): Page {
   })
   view.setBackgroundColor('#141414')
   const page: Page = { view, error: null, console: [], loadedPersisted: false }
-  pages.set(scope, page)
-  wireContents(scope, page)
+  pages.set(tabId, page)
+  wireContents(scope, tabId, page)
   applyBounds()
   return page
 }
@@ -378,25 +420,37 @@ export function attachBrowser(window: BrowserWindow): void {
   })
 }
 
+/** A tab with a page is described live; one not opened since the restart, from what was saved. */
+function describeTab(tab: SavedTab): BrowserTab {
+  const wc = liveContents(tab.id)
+  if (!wc) return { id: tab.id, url: tab.url, title: tab.title, loading: false }
+  return { id: tab.id, url: sanitizeUrl(wc.getURL()) ?? tab.url, title: wc.getTitle(), loading: wc.isLoading() }
+}
+
 export function getBrowserState(scope: string | null): BrowserState {
+  const list = scope ? savedTabs[scope] : undefined
+  const tab = list?.tabs.find((row) => row.id === list.active)
   const wc = contents(scope)
   const url = wc?.getURL() ?? ''
   return {
-    url: sanitizeUrl(url) ?? (scope ? (savedUrls[scope] ?? '') : ''),
-    title: wc?.getTitle() ?? '',
+    url: sanitizeUrl(url) ?? tab?.url ?? '',
+    title: wc ? wc.getTitle() : (tab?.title ?? ''),
     canGoBack: wc?.navigationHistory.canGoBack() ?? false,
     canGoForward: wc?.navigationHistory.canGoForward() ?? false,
     loading: wc?.isLoading() ?? false,
     visible: scope !== null && scope === activeScope && onScreen(),
-    error: (scope ? pages.get(scope)?.error : null) ?? null
+    error: (tab ? pages.get(tab.id)?.error : null) ?? null,
+    tabs: list ? list.tabs.map(describeTab) : [],
+    activeTabId: list?.active ?? null
   }
 }
 
-/** Switches the window to the page of `scope`; a scope with no page yet shows an empty pane. */
+/** Switches the window to the active tab of `scope`; a scope used for the first time shows one empty tab. */
 export function setBrowserScope(scope: string | null): BrowserState {
   if (scope !== activeScope) {
     if (picking) void cancelBrowserAnnotate()
     activeScope = scope
+    if (scope) tabList(scope)
     if (visible && scope) {
       ensurePage(scope)
       loadPersistedIfNeeded(scope)
@@ -405,6 +459,55 @@ export function setBrowserScope(scope: string | null): BrowserState {
     emit(true)
   }
   return getBrowserState(activeScope)
+}
+
+/** After the scope's tabs changed: saves them, and when the scope is on screen shows its active tab. */
+function tabsChanged(scope: string): void {
+  void writePersisted()
+  if (scope !== activeScope) return
+  // A pick belongs to the tab it started in.
+  if (picking && pickTab !== activeTabId(scope)) void cancelBrowserAnnotate()
+  if (visible) {
+    ensurePage(scope)
+    loadPersistedIfNeeded(scope)
+  }
+  applyBounds()
+  emit(true)
+}
+
+/** Opens a new tab at the end of the scope's tabs and selects it, loading `url` when given. */
+export async function newBrowserTab(scope: string | null, url?: string): Promise<BrowserState> {
+  if (!scope) return getBrowserState(null)
+  savedTabs[scope] = addTab(tabList(scope), { id: newId(), url: '', title: '' })
+  tabsChanged(scope)
+  if (url) return navigateBrowser(scope, url)
+  return getBrowserState(scope)
+}
+
+export function selectBrowserTab(scope: string | null, tabId: string): BrowserState {
+  if (!scope) return getBrowserState(null)
+  const list = tabList(scope)
+  const next = selectTab(list, tabId)
+  if (next.active !== list.active) {
+    savedTabs[scope] = next
+    tabsChanged(scope)
+  }
+  return getBrowserState(scope)
+}
+
+/** Closes a tab and its page; closing the active one selects its neighbour, closing the last leaves an empty tab. */
+export function closeBrowserTab(scope: string | null, tabId: string): BrowserState {
+  if (!scope) return getBrowserState(null)
+  const list = tabList(scope)
+  const next = closeTab(list, tabId, newId)
+  if (next === list) return getBrowserState(scope)
+  if (picking && pickTab === tabId) void cancelBrowserAnnotate()
+  const page = pages.get(tabId)
+  pages.delete(tabId)
+  if (page) closePage(page)
+  savedTabs[scope] = next
+  tabsChanged(scope)
+  return getBrowserState(scope)
 }
 
 export function setBrowserVisible(next: boolean): BrowserState {
@@ -456,7 +559,7 @@ export async function navigateBrowser(scope: string | null, input: string): Prom
   // This load replaces the saved page, so opening the pane must not load that one first.
   page.loadedPersisted = true
   requestShowBrowser(scope)
-  await savePersisted(scope, url)
+  await savePersisted(scope, activeTab(scope).id, url)
   try {
     await page.view.webContents.loadURL(url)
   } catch {
@@ -495,22 +598,21 @@ export function toggleBrowserDevTools(): void {
   else wc.openDevTools({ mode: 'detach' })
 }
 
-/** Storage is shared by every scope, so clearing it blanks every page and forgets every saved one. */
+/** Storage is shared by every scope, so clearing it closes every page and leaves each scope one empty tab. */
 export async function clearBrowserData(): Promise<BrowserState> {
   const ses = guestSession()
   await ses.clearStorageData()
   await ses.clearCache()
-  savedUrls = {}
-  await writePersisted()
-  for (const page of pages.values()) {
-    page.error = null
-    if (page.view.webContents.isDestroyed()) continue
-    try {
-      await page.view.webContents.loadURL('about:blank')
-    } catch {
-      // ignored
-    }
+  if (picking) void cancelBrowserAnnotate()
+  for (const page of pages.values()) closePage(page)
+  pages.clear()
+  savedTabs = {}
+  if (activeScope) {
+    tabList(activeScope)
+    if (visible) ensurePage(activeScope)
   }
+  applyBounds()
+  await writePersisted()
   emit(true)
   return getBrowserState(activeScope)
 }
@@ -544,7 +646,7 @@ export async function cancelBrowserAnnotate(): Promise<void> {
   picking = false
   endPick?.()
   endPick = null
-  const wc = contents(pickScope)
+  const wc = liveContents(pickTab)
   if (wc && !wc.isDestroyed()) {
     try {
       await wc.executeJavaScript(ANNOTATE_CANCEL)
@@ -563,7 +665,7 @@ export async function startBrowserAnnotate(): Promise<BrowserAnnotationHit | nul
 
   const session = ++pickSession
   picking = true
-  pickScope = activeScope
+  pickTab = activeTabId(activeScope)
   let raw: unknown = null
   try {
     raw = await new Promise<unknown>((resolve, reject) => {

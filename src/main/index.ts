@@ -39,7 +39,11 @@ import { loadWindowState, trackWindowState } from './windowState'
 
 // Installed builds would name this folder after the product. Keep the one `npm run dev` uses
 // so chats, projects and downloaded voice models carry over.
-app.setPath('userData', join(app.getPath('appData'), 'datapad-workbench'))
+// A test version next to the open app must not write the real data, so dev can point userData elsewhere.
+app.setPath(
+  'userData',
+  (is.dev && process.env['WORKBENCH_USER_DATA']) || join(app.getPath('appData'), 'datapad-workbench')
+)
 // Named before ready: the keychain key that encrypts secrets, the API key and cookies is named after
 // the app, so dev and installed builds must share the name to read each other's data.
 app.setName('Datapad Workbench')
