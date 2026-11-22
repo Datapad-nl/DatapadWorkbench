@@ -10,8 +10,8 @@ import { augmentPath, killOrphanCodegraphInits, stopCodegraphJobs } from './code
 import { appIndexPath, devServerUrl, isAppUrl } from './appUrl'
 import { attachContextMenu } from './contextMenu'
 import { loadDotEnv } from './env'
-import { stopGitWatchers } from './git'
-import { stopKnowledgeJobs, stopKnowledgeWatchers } from './knowledge'
+import { setGitActiveProject, stopGitWatchers } from './git'
+import { setKnowledgeActiveProject, stopKnowledgeJobs, stopKnowledgeWatchers } from './knowledge'
 import {
   startWorktreeReaper,
   stopWorktreeReaper,
@@ -19,7 +19,7 @@ import {
   sweepWorktreeProcessesSync
 } from './worktreeProcs'
 import { openBotFromTray, openFromNotice, registerIpc } from './ipc'
-import { hasRunningTurns, stopAllTurnsAndWait } from './grok'
+import { hasRunningTurns, onChatLive, stopAllTurnsAndWait, stopIdleAgents } from './grok'
 import { ensureChief, startScheduler } from './chatTools'
 import { openedAtLogin, startTray } from './tray'
 import { startPrWatcher } from './pullRequests'
@@ -61,33 +61,23 @@ if (is.dev && process.env['WORKBENCH_REMOTE_DEBUGGING_PORT']) {
 const secondInstance = app.isPackaged && process.platform !== 'darwin' && !app.requestSingleInstanceLock()
 if (secondInstance) app.quit()
 
-/** Set once the app quits for real; until then closing the window only hides it. */
+/** Set once the app quits for real; until then closing the window leaves the app in the menu bar. */
 let quitting = false
 let appWindow: BrowserWindow | null = null
 
-/** Brings the window back, or makes a new one if it is gone. */
-function showWindow(): void {
+/** Brings the window back, or makes a new one if it is gone. True when it is new and still loading. */
+function showWindow(): boolean {
   if (!appWindow) {
     createWindow()
-    return
+    return true
   }
   if (appWindow.isMinimized()) appWindow.restore()
   appWindow.show()
   appWindow.focus()
+  return false
 }
 
-/** Bots keep running with the window closed: hide it, and on macOS leave the Dock for the menu bar. */
-function hideWindow(window: BrowserWindow): void {
-  if (window.isFullScreen()) {
-    window.once('leave-full-screen', () => hideWindow(window))
-    window.setFullScreen(false)
-    return
-  }
-  window.hide()
-  app.dock?.hide()
-}
-
-function createWindow(hidden = false): void {
+function createWindow(): void {
   const state = loadWindowState()
   const mainWindow = new BrowserWindow({
     width: state.width,
@@ -130,23 +120,35 @@ function createWindow(hidden = false): void {
 
   trackWindowState(mainWindow)
   attachContextMenu(mainWindow)
+  // A window made again after a close takes the theme's background too.
+  void getThemeState().then(({ active }) => applyWindowChrome(active))
 
   appWindow = mainWindow
   mainWindow.on('closed', () => {
-    if (appWindow === mainWindow) appWindow = null
+    if (appWindow !== mainWindow) return
+    appWindow = null
+    if (quitting) return
+    // Only what bots need runs on: idle agents and the watchers of the open panes stop, and start again when used.
+    stopIdleAgents()
+    void setGitActiveProject(null)
+    void setKnowledgeActiveProject(null)
   })
+  // Bots keep running with the window closed, from the menu bar. The window and its pages go, which frees
+  // their memory, and on macOS the Dock icon goes too.
   mainWindow.on('close', (event) => {
     if (quitting) return
-    event.preventDefault()
-    hideWindow(mainWindow)
+    // A full-screen window closed as it is leaves a black space behind.
+    if (mainWindow.isFullScreen()) {
+      event.preventDefault()
+      mainWindow.once('leave-full-screen', () => mainWindow.close())
+      mainWindow.setFullScreen(false)
+      return
+    }
+    app.dock?.hide()
   })
   mainWindow.on('show', () => void app.dock?.show())
 
   mainWindow.on('ready-to-show', () => {
-    if (hidden) {
-      if (state.isMaximized) mainWindow.once('show', () => mainWindow.maximize())
-      return
-    }
     if (state.isMaximized) mainWindow.maximize()
     mainWindow.show()
   })
@@ -209,7 +211,7 @@ app.whenReady().then(async () => {
   await prepareBrowser()
   // The app still opens if the browser tools' server can't start. The next chat to start tries again.
   await startBrowserAgentServer().catch((error) => console.error('Browser agent server did not start', error))
-  registerIpc()
+  registerIpc(showWindow)
   // The app still opens if the chief of staff cannot be made. The next start tries again.
   await ensureChief().catch((error) => console.error('Chief of staff not ready', error))
   startScheduler()
@@ -217,27 +219,20 @@ app.whenReady().then(async () => {
   killOrphanCodegraphInits()
   void sweepWorktreeProcesses()
   startWorktreeReaper()
-  const hidden = openedAtLogin()
-  if (hidden) app.dock?.hide()
-  createWindow(hidden)
-  startTray({
-    show: showWindow,
-    openChat: (chatId) => {
-      showWindow()
-      openFromNotice(chatId)
-    },
-    openBot: (botId) => {
-      showWindow()
-      openBotFromTray(botId)
-    }
+  // Opened at login, the app makes no window until the user asks for one.
+  if (openedAtLogin()) app.dock?.hide()
+  else createWindow()
+  startTray({ show: showWindow, openChat: openFromNotice, openBot: openBotFromTray })
+  // A turn that ends with no window open, such as a bot's scheduled run, leaves no agent idling.
+  // After a tick, so a turn that follows at once, such as a queued steer, has claimed its agent.
+  onChatLive((event) => {
+    if (!appWindow && (event.type === 'done' || event.type === 'error')) setImmediate(stopIdleAgents)
   })
   const movedTo = unreadableProjectsMovedTo()
   if (movedTo) void warnUnreadableProjects(movedTo)
   // It can also break while the app runs; the sidebar would empty with no word why.
   onUnreadableProjects((aside) => void warnUnreadableProjects(aside))
   startUpdater()
-  const { active } = await getThemeState()
-  applyWindowChrome(active)
 
   app.on('activate', showWindow)
   app.on('second-instance', showWindow)
@@ -288,8 +283,5 @@ app.on('before-quit', (event) => {
   sweepWorktreeProcessesSync()
 })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
-})
+// Closing the window leaves the app in the tray, so it does not quit with the last window, here or on macOS.
+app.on('window-all-closed', () => {})

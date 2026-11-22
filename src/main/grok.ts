@@ -52,6 +52,7 @@ import {
   sessionSupportsSteering,
   setAcpSessionMode,
   steerSession,
+  stopIdleAgentProcesses,
   type AgentKey,
   type SessionUpdate
 } from './acp'
@@ -70,6 +71,7 @@ import {
   readBotMemoryFile,
   readSharedMemory
 } from './bots'
+import { getBackgroundTasks } from './backgroundTasks'
 import { endForegroundAgents } from './builtinAgents'
 import { getClaudeCliInfo } from './claudeCli'
 import { finishCheckpoint, snapshotTouched, startCheckpoint, rewindTo } from './checkpoints'
@@ -733,6 +735,21 @@ export function hasRunningTurns(): boolean {
 /** Stop every running turn and wait until each has saved what it streamed, for quitting. */
 export async function stopAllTurnsAndWait(timeoutMs: number): Promise<void> {
   await Promise.all([...turns.keys()].map((chatId) => stopAndWait(chatId, timeoutMs)))
+}
+
+/**
+ * Kill the agent processes no chat is using, for when the window is closed. A turn that is still
+ * starting may not have named its process yet, so then all are kept. So are those running work the
+ * agent started itself, a background task or a turn of its own.
+ */
+export function stopIdleAgents(): void {
+  if ([...turns.values()].some((turn) => turn.phase === 'preparing')) return
+  const busy = new Set([...turns.values()].map((turn) => turn.agent))
+  for (const sessionId of runningSessions) busy.add(sessionAgentKey(sessionId))
+  for (const [sessionId, chatId] of sessionChats) {
+    if (getBackgroundTasks(chatId).some((task) => task.status === 'running')) busy.add(sessionAgentKey(sessionId))
+  }
+  stopIdleAgentProcesses(busy)
 }
 
 /** Forget a deleted chat. */

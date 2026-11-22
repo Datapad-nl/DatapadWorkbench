@@ -222,12 +222,22 @@ function emit(event: ChatEvent): void {
   }
 }
 
+let showWindow: () => boolean = () => false
+/** What to open in a window that is still loading. It asks for the live state once it listens. */
+let queuedOpen: ChatEvent | null = null
+
+/** Show the window, made again if it was closed, and open the chat or bot in it. */
+function showAndOpen(event: ChatEvent): void {
+  if (showWindow()) queuedOpen = event
+  else emit(event)
+}
+
 export function openFromNotice(chatId: string): void {
-  emit({ type: 'open', chatId })
+  showAndOpen({ type: 'open', chatId })
 }
 
 export function openBotFromTray(botId: string): void {
-  emit({ type: 'open-bot', botId })
+  showAndOpen({ type: 'open-bot', botId })
 }
 
 /** A bot asked from another chat asks the user there, where they wait, and not in its own run chat. */
@@ -318,7 +328,8 @@ function guardIpc(): void {
     })
 }
 
-export function registerIpc(): void {
+export function registerIpc(show: () => boolean): void {
+  showWindow = show
   // Before any channel is registered, here or in contextMenu.ts.
   guardIpc()
   // A merge mid-turn would take files the agent is still writing.
@@ -802,7 +813,13 @@ export function registerIpc(): void {
     if (typeof conversation === 'string') await endConversation(conversation)
   })
 
-  ipcMain.handle('chat:liveState', async () => liveState())
+  ipcMain.handle('chat:liveState', async () => {
+    const open = queuedOpen
+    queuedOpen = null
+    // After the reply, so the chats it restores are there to open into.
+    if (open) setImmediate(() => emit(open))
+    return liveState()
+  })
 
   ipcMain.handle('chat:setMode', async (_event, input: { chatId: string; mode: PermissionMode }) => {
     return setChatMode(input.chatId, normalizePermissionMode(input.mode))

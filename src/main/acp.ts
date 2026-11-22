@@ -1714,6 +1714,16 @@ export function stopAgents(): void {
   for (const key of conns.keys()) abortAgent(key)
 }
 
+/**
+ * Kill the agent processes that answer nothing, for when the window closes. Their sessions load again
+ * with the next prompt, as after a restart. `busy` names processes to keep though they wait on nothing.
+ */
+export function stopIdleAgentProcesses(busy: ReadonlySet<AgentKey>): void {
+  for (const conn of conns.values()) {
+    if (conn.proc && conn.pending.size === 0 && !busy.has(conn.key)) abortAgent(conn.key)
+  }
+}
+
 /** Kill one agent process. Chats on the others keep running. */
 export function abortAgent(key: AgentKey = 'grok', generation?: number): void {
   const conn = conns.get(key)

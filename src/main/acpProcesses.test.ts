@@ -21,6 +21,8 @@ const fake = vi.hoisted(() => ({
   sessions: 0,
   /** What Claude Code answers a steer: `injected` while a turn runs, `promptRequired` when idle. */
   steerOutcome: 'injected',
+  /** Methods the agent takes but does not answer yet, like a prompt still running. */
+  hold: new Set<string>(),
   /** The bot of each chat, by chat id. */
   bots: {} as Record<
     string,
@@ -71,6 +73,7 @@ function fakeAgent(command: string, args: string[], env?: Record<string, string 
         continue
       }
       proc.calls.push({ method: message.method, params: message.params })
+      if (fake.hold.has(message.method)) continue
       // Like the real adapters, only Claude Code offers steering into a running turn.
       const result =
         message.method === 'initialize'
@@ -150,6 +153,7 @@ import {
   abortAgent,
   agentGeneration,
   agentKey,
+  hasLiveSession,
   loadSession,
   newSession,
   promptSession,
@@ -158,7 +162,8 @@ import {
   sessionNeedsReload,
   sessionSupportsSteering,
   steerSession,
-  stopAgents
+  stopAgents,
+  stopIdleAgentProcesses
 } from './acp'
 import { SHORT_REPLIES_RULE } from '../shared/replyStyle'
 import { bindPermissionSession, cancelAllPermissions, pendingPermissionRequests } from './permissions'
@@ -176,6 +181,7 @@ afterEach(() => {
   fake.projects = {}
   fake.secrets = {}
   fake.steerOutcome = 'injected'
+  fake.hold.clear()
 })
 
 function configCalls(proc: FakeProc): Array<[unknown, unknown]> {
@@ -718,5 +724,43 @@ describe('project secrets', () => {
     abortAgent(key)
     expect(own.killed).toBe(true)
     expect(shared.killed).toBe(false)
+  })
+})
+
+describe('stopping idle agents when the window closes', () => {
+  it('kills the processes that answer nothing and keeps the busy ones', async () => {
+    await newSession('/project', null, 'grok', 'chat-1')
+    await newSession('/project', null, 'claude', 'chat-2')
+    await newSession('/project', 'Be the chief.', 'grok', 'chat-3', BOT)
+    const [grok, claude, bot] = fake.procs
+
+    stopIdleAgentProcesses(new Set([agentKey('grok', BOT)]))
+
+    expect([grok.killed, claude.killed, bot.killed]).toEqual([true, true, false])
+  })
+
+  it('keeps a process that is still answering a prompt', async () => {
+    const sessionId = await newSession('/project', null, 'grok', 'chat-1')
+    fake.hold.add('session/prompt')
+    const running = promptSession(sessionId, 'hi').catch(() => {})
+    await vi.waitFor(() => expect(fake.procs[0].calls.some((call) => call.method === 'session/prompt')).toBe(true))
+
+    stopIdleAgentProcesses(new Set())
+
+    expect(fake.procs[0].killed).toBe(false)
+    stopAgents()
+    await running
+  })
+
+  it('loads the session on a new process with the next prompt, as after a restart', async () => {
+    const sessionId = await newSession('/project', null, 'grok', 'chat-1')
+    stopIdleAgentProcesses(new Set())
+    expect(hasLiveSession(sessionId)).toBe(false)
+
+    await loadSession(sessionId, '/project', null, 'grok', 'chat-1')
+
+    expect(fake.procs).toHaveLength(2)
+    expect(fake.procs[1].calls.some((call) => call.method === 'session/load' && call.params.sessionId === sessionId)).toBe(true)
+    expect(hasLiveSession(sessionId)).toBe(true)
   })
 })
