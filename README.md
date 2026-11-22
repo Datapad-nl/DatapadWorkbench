@@ -23,6 +23,8 @@ To run from source, `npm run dev` opens a development window:
 
 Optional: copy `.env.example` to `.env` and set `XAI_API_KEY` if you want an API key instead of `grok login`.
 
+In development, `WORKBENCH_USER_DATA` points the app at another data folder, so a test copy can run next to the installed app.
+
 Electron 44 does not download its binary during `npm install`. `npm install` and `npm run dev` run `node_modules/electron/install.js` first, which writes `path.txt` and downloads the binary for this platform. That step exits immediately when the binary is already present. On macOS the same script then registers a signed Electron shell at `~/Applications/Datapad Workbench.app` (and tries `/Applications`) so the microphone permission prompt uses this app’s name. That is not a standalone Workbench build — start the app with `npm run dev`. If an installed release is already in `/Applications`, the script leaves it alone.
 
 If `npm run dev` still fails with `Electron uninstall`, the binary is missing. Download it, then start again.
@@ -92,7 +94,7 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Native window; size and pane layout persist
 - Projects in a sidebar, each with an optional local folder, color, and rename
 - Blur a project's name and icon in the sidebar for a screen recording
-- The app keeps running when the window closes, with a menu bar icon that lists the bots with their next run and the chats waiting for an answer, plus Open at Login
+- Closing the window closes it. Only a small part keeps running in the menu bar: the scheduler, the pull request watcher and agents in the middle of a turn. The window comes back when you open it again. The menu bar icon lists the bots with their next run and the chats waiting for an answer, plus Open at Login
 
 **Voice**
 
@@ -113,7 +115,7 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 - Isolated git worktrees so concurrent chats on the same repo do not clobber each other: a chat gets one when another chat is already working in the folder, or when you ask for an experiment
 - Chats that share a folder ask before editing a file another chat changed and has not committed: wait for that chat, edit anyway, or skip
 - Checkpoints and rewind of files plus later messages
-- Replies show the time they were posted; hover for the full date
+- Replies show the time they were posted, and the date too (with the year when it is not this year) for a message from an earlier day; hover for the full date
 - Click an image in a chat to see it larger in an overlay
 - Questions the agent asks during a turn show in the chat, and your answer goes back to it
 - A Claude chat shows its subagents and background commands above the composer, and the reply the agent writes when that work ends
@@ -123,13 +125,13 @@ You do not need `codegraph install` — that wires other agents. Attach a folder
 **Panes**
 
 - Thought process: live tool and activity stream
-- Browser: in-app webview the agent can drive; pick and annotate a page element; screenshots; YouTube captions; clear cookies
+- Browser: in-app webview with tabs; each project and bot keeps its own set, saved across restarts. The agent can drive the selected tab of its own project; pick and annotate a page element; screenshots; YouTube captions; a Developer Tools button; Forget cookies and logins
 - Git: branch, ahead/behind, commit graph, diffs, stage / unstage / discard, commit, checkout, new branch, merge a chat’s worktree branch back into the project
 - Knowledge: Obsidian-compatible `knowledge/` vault with a graph pane and generated maps
 
 **Composer**
 
-- Markdown replies, `@file` / folder mentions, pasted screenshots and attachments
+- Markdown replies, `@file` / folder mentions, pasted screenshots, and attachments of any file type (up to 25 MB; the agent gets a non-image file as a path to read)
 - Slash-command palette: `/new`, `/rewind`, `/plan`, `/ask`, `/always-approve`, `/commit`, `/review`, `/model`, `/settings`, `/usage`, `/transcribe`, `/btw`, `/export` (save the chat as Markdown), and more
 - The agent’s own commands and skills show in the same palette, such as `/compact` and `/context`. Grok chats also get `/imagine`
 - MCP servers for every chat: Settings → MCP (or `/mcps`) takes the usual `mcpServers` JSON, local commands or `http`/`sse` URLs. Search the MCP Registry from there. They load next to the Workbench’s own `browser` and `workbench` servers and each agent’s own MCP config
@@ -145,13 +147,13 @@ Every chat gets the Workbench's `workbench` MCP server next to `browser`:
 - `list_chats`, `read_chat` and `start_chat`: look up and open other chats in the same project
 - `schedule_task` and `cancel_schedule`: run a prompt in the project once or on a cron. Each schedule has its own chat in the sidebar with the time to its next run
 - `link_pr`, `pr_status` and `unlink_pr`: link a GitHub pull request to the chat, show its checks and review state, and wake the chat when checks finish, a review comes in or it closes. Uses the GitHub CLI (`gh`)
-- `request_secret`: the agent asks for an API key or token; you type it in a password field, it is kept encrypted with the system keychain per project and set as an environment variable in the agent's shell. The model never sees the value
+- `request_secret`: the agent asks for an API key or token; you type it in a password field, it is kept encrypted with the system keychain per project, or per bot for a bot's own secrets, and set as an environment variable in the agent's shell. The model never sees the value
 
 **Bots**
 
 - A Bots section in the sidebar. A bot is an agent of its own with a name, an avatar, instructions, a model, the tools it may use without asking, skills and schedules, and it works in its own folder
 - Each bot has its own chat, and its schedules are listed under it in the sidebar. A finished scheduled run posts its answer in the bot's chat
-- Type `@` in a chat to ask a bot. A message that starts with `@Name` goes to that bot; a bot named later in a message is asked by the chat's agent with `ask_bot`. The answer is posted in the chat
+- Type `@` in a chat to ask a bot. A message that starts with `@Name` goes to that bot; a bot named later in a message is asked by the chat's agent with `ask_bot`. A bot asked from a chat answers at once with "On it." and a Working sign, and its answer then takes that message's place. Its permission prompts, questions and secret requests show in the asking chat
 - Each bot keeps a memory folder with a `MEMORY.md` index, and all bots share a memory for what every bot should know
 - Documents: add PDF, EPUB, text and Markdown files, converted into one Markdown file per chapter with an outline
 - Skills from [skills.sh](https://skills.sh), and a pick of MCP servers per bot
@@ -162,10 +164,11 @@ Every chat gets the Workbench's `workbench` MCP server next to `browser`:
 
 - One dialog with sections: Agent, Subagents, Voice, Memory, Secrets, MCP servers, Appearance and About
 - Default agent for new chats: Grok or Claude
+- Short replies: chats you talk to (Grok and Claude) answer briefly. Each bot has its own switch on its page
 - Grok signs in with `grok login` (SuperGrok), with an optional API-key fallback. Claude uses your `claude auth login`
 - Model and effort picker: Grok 4.6 by default; Claude chats list the models and effort levels Claude Code offers
 - Subagents: the model for a conductor, the model for every worker, and how many run at once (or None)
-- Secrets: the names kept per project, with delete
+- Secrets: the names kept per project or per bot, with delete
 - Appearance: built-in themes plus import and export of custom themes, and a chat width (Standard, Wide, Wider or Full)
 - Usage snapshot in the status bar
 
