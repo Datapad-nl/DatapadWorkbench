@@ -1,3 +1,4 @@
+import { net } from 'electron'
 import type { SkillListing, SkillPreview } from '../shared/types'
 import { readSkill, safeSkillPath, type SkillFile } from './botSkills'
 
@@ -11,7 +12,7 @@ const MAX_BYTES = 20 * 1024 * 1024
 const WELL_KNOWN = ['.well-known/agent-skills', '.well-known/skills']
 
 async function get(url: string): Promise<Response> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT) })
+  const response = await net.fetch(url, { credentials: 'omit', signal: AbortSignal.timeout(TIMEOUT) })
   if (!response.ok) throw new Error(`${new URL(url).host} answered ${response.status}`)
   return response
 }

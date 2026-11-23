@@ -18,6 +18,7 @@ const stub = vi.hoisted(() => ({
   /** What every turn answers, or throws. */
   answer: async (_chatId: string, _content: string): Promise<string> => 'Done.',
   turns: [] as Array<{ chatId: string; content: string }>,
+  netFetch: vi.fn<(...args: unknown[]) => Promise<Response>>(),
   chatCount: 0,
   /** What the fake voice helper page answers to a job. */
   helperPage: (job: { id: number; kind: string }): Record<string, unknown> => ({ id: job.id, error: 'no page' })
@@ -25,6 +26,7 @@ const stub = vi.hoisted(() => ({
 
 vi.mock('electron', () => ({
   app: { getPath: () => stub.dir },
+  net: { fetch: (...args: unknown[]) => stub.netFetch(...args) },
   safeStorage: {
     isEncryptionAvailable: () => true,
     encryptString: (value: string) => Buffer.from(`sealed:${Buffer.from(value).toString('hex')}`),
@@ -920,11 +922,11 @@ describe('approvals and questions', () => {
 describe('token', () => {
   it('keeps the token out of errors from Telegram', async () => {
     const { telegramClient } = await import('./telegram')
-    const fetchMock = vi.fn(async (): Promise<Response> => {
+    const fetchMock = stub.netFetch
+    fetchMock.mockImplementation(async (): Promise<Response> => {
       throw new TypeError(`fetch failed for https://api.telegram.org/bot${TOKEN}/getMe`)
     })
-    vi.stubGlobal('fetch', fetchMock)
-    try {
+    {
       const error = (await telegramClient(TOKEN).getMe().catch((caught: Error) => caught)) as Error
       expect(error.message).toMatch(/^Could not reach Telegram/)
       expect(error.message).not.toContain(TOKEN)
@@ -934,8 +936,6 @@ describe('token', () => {
       )
       const refused = (await telegramClient(TOKEN).getMe().catch((caught: Error) => caught)) as Error
       expect(refused.message).toBe('Unauthorized <token>')
-    } finally {
-      vi.unstubAllGlobals()
     }
   })
 

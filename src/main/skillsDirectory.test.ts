@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('electron', () => ({ app: { getPath: () => '' }, shell: {} }))
+const fake = vi.hoisted(() => ({ fetch: vi.fn() }))
+vi.mock('electron', () => ({
+  app: { getPath: () => '' },
+  shell: {},
+  net: { fetch: (...args: unknown[]) => fake.fetch(...args) }
+}))
 
 import { downloadSkill, previewSkill, searchSkills } from './skillsDirectory'
 
@@ -8,18 +13,15 @@ const json = (body: unknown): Response => new Response(JSON.stringify(body), { s
 
 function serve(routes: Record<string, () => Response>): string[] {
   const asked: string[] = []
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      asked.push(url)
-      return routes[url]?.() ?? new Response('<html>not found</html>', { status: 404 })
-    })
-  )
+  fake.fetch.mockImplementation(async (url: string) => {
+    asked.push(url)
+    return routes[url]?.() ?? new Response('<html>not found</html>', { status: 404 })
+  })
   return asked
 }
 
 afterEach(() => {
-  vi.unstubAllGlobals()
+  fake.fetch.mockReset()
 })
 
 describe('skills.sh', () => {

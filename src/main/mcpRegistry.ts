@@ -1,3 +1,4 @@
+import { net } from 'electron'
 import {
   installOptions,
   rankSearchResults,
@@ -22,7 +23,8 @@ async function registryPage(search: string, limit: number, cursor?: string): Pro
   const params = new URLSearchParams({ version: 'latest', limit: String(limit) })
   if (search) params.set('search', search)
   if (cursor) params.set('cursor', cursor)
-  const response = await fetch(`${REGISTRY_URL}?${params}`, {
+  const response = await net.fetch(`${REGISTRY_URL}?${params}`, {
+    credentials: 'omit',
     headers: { Accept: 'application/json' },
     signal: AbortSignal.timeout(15_000)
   })

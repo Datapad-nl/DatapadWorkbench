@@ -1,7 +1,9 @@
 /**
  * A thin client for the Telegram Bot API. The routing in channels.ts talks to it through `TelegramClient`,
- * so tests can put a fake in its place. The token is part of every URL, so no error from here may carry one.
+ * so tests can put a fake in its place. Requests go through Electron's `net.fetch`, because Node's global `fetch` cannot reach the internet from the signed app. The token is part of every URL, so no error from here may carry one.
  */
+
+import { net } from 'electron'
 
 export type TelegramUser = { id: number; is_bot?: boolean; first_name?: string; username?: string }
 
@@ -86,7 +88,7 @@ export function telegramClient(token: string): TelegramClient {
 
   async function request(url: string, init: RequestInit): Promise<Response> {
     try {
-      return await fetch(url, init)
+      return await net.fetch(url, init)
     } catch (error) {
       if (init.signal?.aborted && (init.signal.reason as Error | undefined)?.name !== 'TimeoutError') throw error
       const reason = error instanceof Error ? (error.cause instanceof Error ? error.cause.message : error.message) : String(error)

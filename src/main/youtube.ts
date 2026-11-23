@@ -1,3 +1,4 @@
+import { net } from 'electron'
 import {
   parseYoutubeVideoId,
   youtubeWatchUrl,
@@ -141,7 +142,8 @@ function extractVisitor(html: string, cfg: Record<string, unknown> | null): stri
 }
 
 async function fetchWatchPage(videoId: string): Promise<{ html: string; cfg: Record<string, unknown> | null }> {
-  const res = await fetch(youtubeWatchUrl(videoId), {
+  const res = await net.fetch(youtubeWatchUrl(videoId), {
+    credentials: 'omit',
     headers: {
       'User-Agent': WATCH_UA,
       'Accept-Language': 'en-US,en;q=0.9'
@@ -166,8 +168,9 @@ async function fetchPlayer(
   const url =
     'https://www.youtube.com/youtubei/v1/player?prettyPrint=false' +
     (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '')
-  const res = await fetch(url, {
+  const res = await net.fetch(url, {
     method: 'POST',
+    credentials: 'omit',
     headers: {
       'User-Agent': VR_UA,
       'Content-Type': 'application/json',
@@ -235,7 +238,11 @@ async function fetchPlayer(
 
 async function fetchCaptionBody(baseUrl: string): Promise<string> {
   for (const url of [`${baseUrl}&fmt=json3`, `${baseUrl}&fmt=srv3`, baseUrl]) {
-    const res = await fetch(url, { headers: { 'User-Agent': VR_UA }, signal: AbortSignal.timeout(FETCH_MS) })
+    const res = await net.fetch(url, {
+      credentials: 'omit',
+      headers: { 'User-Agent': VR_UA },
+      signal: AbortSignal.timeout(FETCH_MS)
+    })
     const body = await res.text()
     if (res.ok && body.trim()) return body
   }

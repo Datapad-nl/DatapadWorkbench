@@ -1,3 +1,4 @@
+import { net } from 'electron'
 import type { ChatAgent, Project } from '../shared/types'
 import { promptIsolated } from './acp'
 import { getClaudeCliInfo } from './claudeCli'
@@ -15,8 +16,9 @@ async function askViaApi(prompt: string, timeoutMs: number): Promise<string | nu
   const abort = new AbortController()
   const timer = setTimeout(() => abort.abort(), timeoutMs)
   try {
-    const response = await fetch('https://api.x.ai/v1/chat/completions', {
+    const response = await net.fetch('https://api.x.ai/v1/chat/completions', {
       method: 'POST',
+      credentials: 'omit',
       headers: {
         Authorization: `Bearer ${key}`,
         'Content-Type': 'application/json'
