@@ -1,6 +1,7 @@
-import { ASR_OPTIONS, getAsr } from './whisper'
+import { ASR_OPTIONS, getAsr, transcribeAnyLanguage } from './whisper'
 
-type InMessage = { id: number; audio: Float32Array }
+/** `multilingual` is for Telegram voice notes; the voice mode hears English. */
+type InMessage = { id: number; audio: Float32Array; multilingual?: boolean }
 type OutMessage = { id: number; text: string } | { id: number; error: string }
 
 const scope = globalThis as unknown as {
@@ -11,9 +12,13 @@ const scope = globalThis as unknown as {
 let chain: Promise<unknown> = Promise.resolve()
 
 scope.onmessage = (event) => {
-  const { id, audio } = event.data
+  const { id, audio, multilingual } = event.data
   chain = chain.then(async () => {
     try {
+      if (multilingual) {
+        scope.postMessage({ id, text: await transcribeAnyLanguage(audio) })
+        return
+      }
       const pipe = await getAsr()
       const result = await pipe(audio, ASR_OPTIONS)
       scope.postMessage({ id, text: result.text ?? '' })

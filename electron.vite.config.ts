@@ -15,8 +15,20 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {},
-  preload: {},
+  // The voice helper, a page with no window for Telegram's voice notes, has its own preload and page.
+  preload: {
+    build: {
+      rollupOptions: {
+        input: { index: resolve('src/preload/index.ts'), voiceHelper: resolve('src/preload/voiceHelper.ts') }
+      }
+    }
+  },
   renderer: {
+    build: {
+      rollupOptions: {
+        input: { index: resolve('src/renderer/index.html'), voiceHelper: resolve('src/renderer/voiceHelper.html') }
+      }
+    },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
     },

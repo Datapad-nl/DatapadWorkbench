@@ -23,6 +23,7 @@ import { hasRunningTurns, onChatLive, stopAllTurnsAndWait, stopIdleAgents } from
 import { ensureChief, startScheduler } from './chatTools'
 import { openedAtLogin, startTray } from './tray'
 import { startPrWatcher } from './pullRequests'
+import { startChannels, stopChannels } from './channels'
 import {
   ensureStore,
   onUnreadableProjects,
@@ -215,6 +216,7 @@ app.whenReady().then(async () => {
   // The app still opens if the chief of staff cannot be made. The next start tries again.
   await ensureChief().catch((error) => console.error('Chief of staff not ready', error))
   startScheduler()
+  void startChannels().catch(() => {})
   startPrWatcher()
   killOrphanCodegraphInits()
   void sweepWorktreeProcesses()
@@ -273,6 +275,7 @@ app.on('before-quit', (event) => {
   turnsSaved = true
   // Agent processes would otherwise outlive the app and keep running their turns.
   stopAgents()
+  stopChannels()
   stopWorktreeReaper()
   stopCodegraphJobs()
   killOrphanCodegraphInits()

@@ -36,6 +36,7 @@ import {
 import { useWorkspace } from '../workspace'
 import { SharedMemory } from './BotMemory'
 import { Icon } from './icons'
+import { ChannelSettings } from './ChannelSettings'
 import { McpSettings } from './McpSettings'
 import { ThemeEditor } from './ThemeEditor'
 import { Toggle } from './Toggle'
@@ -704,6 +705,13 @@ const SETTINGS_SECTIONS = [
     testId: 'settings-mcp'
   },
   {
+    id: 'channels',
+    label: 'Channels',
+    group: 'Context',
+    description: 'Talk to your bots and projects from Telegram.',
+    testId: 'settings-channels'
+  },
+  {
     id: 'appearance',
     label: 'Appearance',
     group: 'Workbench',
@@ -717,7 +725,7 @@ const SETTINGS_SECTIONS = [
 type SettingsSectionId = (typeof SETTINGS_SECTIONS)[number]['id']
 
 /** One setting: label and help on the left, the control on the right, or under them when `stacked`. */
-function SettingRow({
+export function SettingRow({
   label,
   help,
   stacked,
@@ -1155,6 +1163,8 @@ export function SettingsModal(): React.JSX.Element | null {
         return <SecretsSection />
       case 'mcp':
         return <McpSettings />
+      case 'channels':
+        return <ChannelSettings />
       case 'appearance':
         return (
           <>

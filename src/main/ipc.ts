@@ -181,14 +181,26 @@ import {
 import { NO_WORKERS_TO_CONDUCT } from '../shared/conductor'
 import {
   ensureMicAccess,
+  ensureModelPack,
   ensureVoiceModel,
   getMicAccess,
   onVoiceModelStatus,
   openMicPrivacySettings,
-  readVoiceModelStatus
+  readVoiceModelStatus,
+  VOICE_NOTE_PACK
 } from './voice'
+import { speakVoiceMemo, transcribeVoiceNote } from './voiceHelper'
 import { checkForUpdates, getUpdateState, installUpdate, onUpdateState } from './updater'
 import { deleteSecret, listSecrets } from './secrets'
+import {
+  getTelegramStatus,
+  registerChannels,
+  setTelegramReachable,
+  setTelegramToken,
+  startPairing,
+  telegramBotMessage,
+  unpairTelegram
+} from './channels'
 import { replySteps } from '../shared/steps'
 import {
   checkoutGit,
@@ -346,7 +358,11 @@ export function registerIpc(show: () => boolean): void {
     emit,
     isStreaming,
     builtinAgents: getBuiltinAgents,
-    notifyBot: noticeForBot,
+    // Every message of a bot in its own chat passes here with its full text, once.
+    notifyBot: (bot, chatId, text) => {
+      noticeForBot(bot, chatId, text)
+      void telegramBotMessage(bot, text).catch(() => {})
+    },
     closeSession
   })
   startActivityBridge()
@@ -933,6 +949,24 @@ export function registerIpc(show: () => boolean): void {
       window.webContents.send('update:state', payload)
     }
   })
+
+  registerChannels({
+    onStatus: (status) => {
+      for (const window of BrowserWindow.getAllWindows()) window.webContents.send('channels:event', status)
+    },
+    prepareTranscribe: (fetching) => ensureModelPack(VOICE_NOTE_PACK, fetching),
+    transcribe: transcribeVoiceNote,
+    speak: async (text) => speakVoiceMemo(text, (await getPublicSettings()).voice)
+  })
+  ipcMain.handle('channels:get', async () => getTelegramStatus())
+  ipcMain.handle('channels:set-token', async (_event, token: unknown) =>
+    setTelegramToken(typeof token === 'string' ? token : null)
+  )
+  ipcMain.handle('channels:start-pairing', async () => startPairing())
+  ipcMain.handle('channels:unpair', async () => unpairTelegram())
+  ipcMain.handle('channels:set-reachable', async (_event, input: { bots?: unknown; projects?: unknown }) =>
+    setTelegramReachable(input ?? {})
+  )
 
   // Only the names reach the window; values stay in the main process.
   ipcMain.handle('secrets:list', async () => listSecrets())

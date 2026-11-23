@@ -38,7 +38,7 @@ let ttsContext: AudioContext | null = null
 let ttsGain: GainNode | null = null
 const liveSources = new Set<AudioBufferSourceNode>()
 
-function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
+export function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
   if (fromRate === toRate) return input
   const ratio = fromRate / toRate
   const length = Math.max(1, Math.round(input.length / ratio))
@@ -84,7 +84,7 @@ async function getTts(): Promise<void> {
 
 type Pcm = { samples: Float32Array; sampleRate: number }
 
-function speechSpeed(settings: VoiceSettings): number {
+export function speechSpeed(settings: VoiceSettings): number {
   return Math.min(2, Math.max(0.7, settings.rate))
 }
 
@@ -288,7 +288,7 @@ export function echoesUserRequest(spoken: string, user: string): boolean {
   return head.length >= 6 && head.length < ask.length && containsWordSequence(said, head)
 }
 
-function voiceId(settings: VoiceSettings): string {
+export function voiceId(settings: VoiceSettings): string {
   return TTS_VOICES.some((item) => item.voiceURI === settings.voiceURI) ? settings.voiceURI : 'M1'
 }
 
@@ -312,7 +312,7 @@ function splitLongSentence(part: string): string[] {
   return pieces
 }
 
-function splitSpeakChunks(text: string): string[] {
+export function splitSpeakChunks(text: string): string[] {
   const parts = (text.match(/[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g) ?? [text]).flatMap(splitLongSentence)
   const chunks: string[] = []
   let buf = ''

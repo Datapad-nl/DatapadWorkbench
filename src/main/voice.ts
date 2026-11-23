@@ -54,6 +54,26 @@ const PACKS: ModelPack[] = [
   }
 ]
 
+/**
+ * Telegram voice notes may be in Dutch or English, so they get a multilingual Whisper. It is not in PACKS:
+ * the voice mode in the app keeps its English model, and this one is fetched with the first voice note.
+ */
+export const VOICE_NOTE_PACK: ModelPack = {
+  id: 'onnx-community/whisper-small',
+  files: {
+    'added_tokens.json': 34604,
+    'config.json': 2227,
+    'generation_config.json': 3893,
+    'normalizer.json': 52666,
+    'preprocessor_config.json': 339,
+    'special_tokens_map.json': 2194,
+    'tokenizer.json': 2480466,
+    'tokenizer_config.json': 282683,
+    'onnx/encoder_model_fp16.onnx': 176607756,
+    'onnx/decoder_model_merged_q4.onnx': 233149327
+  }
+}
+
 const ALL_FILES = PACKS.flatMap((pack) =>
   Object.entries(pack.files).map(([file, size]) => ({ id: pack.id, file, size }))
 )
@@ -233,6 +253,32 @@ async function downloadFile(id: string, rel: string, dest: string): Promise<numb
   } finally {
     clearTimeout(idle)
   }
+}
+
+const packDownloads = new Map<string, Promise<void>>()
+
+/**
+ * Makes sure every file of a pack is on disk at its full size. `fetching` hears the bytes still to fetch,
+ * once, before a download starts. A failed download throws, and the next call tries again.
+ */
+export function ensureModelPack(pack: ModelPack, fetching?: (bytes: number) => void | Promise<void>): Promise<void> {
+  const running = packDownloads.get(pack.id)
+  if (running) return running
+  const download = (async () => {
+    const missing: [string, number][] = []
+    for (const [file, size] of Object.entries(pack.files)) {
+      if (!(await fileReady(join(packDir(pack.id), file), size, false))) missing.push([file, size])
+    }
+    if (missing.length === 0) return
+    await fetching?.(missing.reduce((sum, [, size]) => sum + size, 0))
+    for (const [file] of missing) await downloadFile(pack.id, file, join(packDir(pack.id), file))
+  })()
+  packDownloads.set(pack.id, download)
+  const clear = (): void => {
+    if (packDownloads.get(pack.id) === download) packDownloads.delete(pack.id)
+  }
+  download.then(clear, clear)
+  return download
 }
 
 export async function ensureVoiceModel(): Promise<VoiceModelStatus> {

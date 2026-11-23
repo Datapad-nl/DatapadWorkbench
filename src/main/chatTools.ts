@@ -1001,7 +1001,7 @@ async function tellFromBot(
  * The chats where a bot runs unattended and speaks with `notify`: its own, outside any project. A run
  * another chat asked is not one of them: its answer is posted where it was asked.
  */
-function isBotsOwn(chat: Pick<Chat, "botId" | "projectId" | "replyTo">): chat is Pick<Chat, "projectId"> & { botId: string } {
+export function isBotsOwn(chat: Pick<Chat, "botId" | "projectId" | "replyTo">): chat is Pick<Chat, "projectId"> & { botId: string } {
   return Boolean(chat.botId) && !chat.projectId && !chat.replyTo;
 }
 

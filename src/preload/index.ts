@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { BackgroundTask, BackgroundTasksFeed } from '../shared/backgroundTasks'
 import type { BuiltinAgent, BuiltinAgentsFeed } from '../shared/builtinAgents'
+import type { TelegramStatus } from '../shared/channels'
 import type { McpServers } from '../shared/mcp'
 import type { RegistrySearchResult } from '../shared/mcpRegistry'
 import type { ThemeFile, ThemeSummary } from '../shared/theme'
@@ -213,6 +214,22 @@ const api = {
   listSecrets: (): Promise<SecretScope[]> => ipcRenderer.invoke('secrets:list'),
   deleteSecret: (scope: string, name: string): Promise<SecretScope[]> =>
     ipcRenderer.invoke('secrets:delete', { scope, name }),
+  channels: {
+    get: (): Promise<TelegramStatus> => ipcRenderer.invoke('channels:get'),
+    /** Checked with Telegram first; rejects with the reason. Null removes the token and unpairs. */
+    setToken: (token: string | null): Promise<TelegramStatus> => ipcRenderer.invoke('channels:set-token', token),
+    startPairing: (): Promise<TelegramStatus> => ipcRenderer.invoke('channels:start-pairing'),
+    unpair: (): Promise<TelegramStatus> => ipcRenderer.invoke('channels:unpair'),
+    setReachable: (input: { bots: string[]; projects: string[] }): Promise<TelegramStatus> =>
+      ipcRenderer.invoke('channels:set-reachable', input),
+    onEvent: (listener: (status: TelegramStatus) => void) => {
+      const wrapped = (_event: unknown, payload: TelegramStatus): void => listener(payload)
+      ipcRenderer.on('channels:event', wrapped)
+      return () => {
+        ipcRenderer.removeListener('channels:event', wrapped)
+      }
+    }
+  },
   getThemeState: (): Promise<{ active: ThemeFile; themes: ThemeSummary[]; activeId: string }> =>
     ipcRenderer.invoke('theme:state'),
   activateTheme: (id: string): Promise<{ active: ThemeFile; themes: ThemeSummary[]; activeId: string }> =>

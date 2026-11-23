@@ -54,3 +54,55 @@ describe('voice model download', () => {
     expect(partFiles(join(fake.userData, 'workbench', 'models'))).toEqual([])
   })
 })
+
+describe('model packs', () => {
+  const pack = { id: 'test/tiny', files: { 'a.json': 4, 'onnx/b.onnx': 6 } }
+
+  beforeEach(() => {
+    fake.userData = mkdtempSync(join(tmpdir(), 'voice-test-'))
+    fake.fetch.mockReset()
+    vi.resetModules()
+  })
+  afterEach(() => rmSync(fake.userData, { recursive: true, force: true }))
+
+  function serve(): void {
+    fake.fetch.mockImplementation(async (url: string) => new Response(new Uint8Array(url.endsWith('a.json') ? 4 : 6)))
+  }
+
+  it('says the size once, before it downloads, and not when the files are there', async () => {
+    serve()
+    const { ensureModelPack } = await import('./voice')
+    const fetching = vi.fn()
+    await Promise.all([ensureModelPack(pack, fetching), ensureModelPack(pack, fetching)])
+    expect(fetching).toHaveBeenCalledTimes(1)
+    expect(fetching).toHaveBeenCalledWith(10)
+    expect(fake.fetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://huggingface.co/test/tiny/resolve/main/a.json',
+      'https://huggingface.co/test/tiny/resolve/main/onnx/b.onnx'
+    ])
+    await ensureModelPack(pack, fetching)
+    expect(fetching).toHaveBeenCalledTimes(1)
+    expect(fake.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails a download and fetches what is missing on the next try', async () => {
+    fake.fetch.mockImplementation(async (url: string) =>
+      url.endsWith('a.json') ? new Response(new Uint8Array(4)) : new Response(null, { status: 503 })
+    )
+    const { ensureModelPack } = await import('./voice')
+    const fetching = vi.fn()
+    await expect(ensureModelPack(pack, fetching)).rejects.toThrow('Could not download onnx/b.onnx (503)')
+    serve()
+    await ensureModelPack(pack, fetching)
+    expect(fetching.mock.calls).toEqual([[10], [6]])
+  })
+
+  it('does not count the voice note model as part of the in-app voice', async () => {
+    const { VOICE_NOTE_PACK } = await import('./voice')
+    expect(VOICE_NOTE_PACK.id).toBe('onnx-community/whisper-small')
+    fake.fetch.mockResolvedValue(new Response(null, { status: 503 }))
+    const { ensureVoiceModel } = await import('./voice')
+    await ensureVoiceModel()
+    expect(fake.fetch.mock.calls.some(([url]) => String(url).includes('whisper-small'))).toBe(false)
+  })
+})
