@@ -3,6 +3,7 @@ import { randomInt, timingSafeEqual } from 'crypto'
 import { join } from 'path'
 import type { TelegramStatus } from '../shared/channels'
 import type { Bot, PermissionRequest, Project, ShownIn, UserQuestion, UserQuestionRequest } from '../shared/types'
+import { normalizeHexColor } from '../shared/projectColor'
 import { splitBotMentions } from '../shared/botMentions'
 import { replySteps } from '../shared/steps'
 import { getBot, listBots } from './bots'
@@ -19,7 +20,8 @@ import {
   type TelegramCallbackQuery,
   type TelegramClient,
   type TelegramMessage,
-  type TelegramUpdate
+  type TelegramUpdate,
+  type TopicIcon
 } from './telegram'
 
 /**
@@ -71,6 +73,7 @@ const SEND_RETRIES_MS = [2_000, 10_000, 30_000]
 const TOPICS_NEEDED =
   'To give each bot and project its own topic here, turn on Topics in the group settings and make this bot an admin that may manage topics.'
 const ONLY_TEXT = 'Only text and voice notes work here.'
+const NOT_LINKED = 'This topic is not linked to a bot or project.'
 
 let makeClient: (token: string) => TelegramClient = telegramClient
 let transcribe: Transcribe | null = null
@@ -83,6 +86,8 @@ let loaded: Promise<TelegramState> | null = null
 /** The token, unsealed. */
 let token: string | null = null
 let client: TelegramClient | null = null
+/** The id of the 🤖 topic icon, asked once per client and only when a bot topic is made. */
+let botIcon: Promise<string | undefined> | null = null
 let loop: AbortController | null = null
 let pollState: TelegramStatus['state'] = 'off'
 let pollError: string | null = null
@@ -90,6 +95,8 @@ let sendError: string | null = null
 let lastStatus = ''
 /** Telegram refused to make topics: the group is told once, not with every bot message. */
 let topicsRefused = false
+/** Why Telegram refused the last topic, shown in Settings until topics are made. */
+let topicsError: string | null = null
 let pairing: { code: string; expiresAt: number; tries: number; timer: NodeJS.Timeout } | null = null
 
 /** A question or approval shown on Telegram, by the short id its buttons carry. */
@@ -201,7 +208,7 @@ export async function getTelegramStatus(): Promise<TelegramStatus> {
     hasToken: Boolean(token),
     username: state.username,
     state: token ? pollState : 'off',
-    error: pollError ?? sendError,
+    error: pollError ?? sendError ?? topicsError,
     paired: state.userId !== null,
     group: state.group?.title ?? null,
     pairing: open ? { code: open.code, expiresAt: new Date(open.expiresAt).toISOString() } : null,
@@ -239,6 +246,7 @@ export async function setTelegramToken(input: string | null): Promise<TelegramSt
     token = null
     pollError = null
     sendError = null
+    topicsError = null
     await save((state) => {
       state.token = null
       state.username = null
@@ -264,6 +272,7 @@ export async function setTelegramToken(input: string | null): Promise<TelegramSt
   token = value
   pollError = null
   sendError = null
+  if (!sameBot) topicsError = null
   await save((state) => {
     state.token = safeStorage.encryptString(value).toString('base64')
     state.username = username
@@ -304,6 +313,7 @@ function unpairState(state: TelegramState): void {
 /** Forgets the user, the group and its topics. The token stays. */
 export async function unpairTelegram(): Promise<TelegramStatus> {
   asks.clear()
+  topicsError = null
   await save(unpairState)
   return report()
 }
@@ -323,10 +333,12 @@ export async function setTelegramReachable(input: { bots?: unknown; projects?: u
 
 // ---- Polling
 
-/** At app start: polls when a token is saved. */
+/** At app start: polls when a token is saved, and makes the topics still missing, as after the group became a supergroup. */
 export async function startChannels(): Promise<void> {
-  await current()
-  if (token) startPolling()
+  const state = await current()
+  if (!token) return
+  startPolling()
+  if (state.group) void ensureTopics(false).catch(() => {})
 }
 
 export function stopChannels(): void {
@@ -340,6 +352,7 @@ function startPolling(): void {
   const controller = new AbortController()
   loop = controller
   client = makeClient(token)
+  botIcon = null
   pollState = 'connecting'
   pollError = null
   changed()
@@ -350,6 +363,7 @@ function stopPolling(): void {
   loop?.abort()
   loop = null
   client = null
+  botIcon = null
   pollState = 'off'
 }
 
@@ -447,10 +461,17 @@ async function deliver(place: Place, text: string, buttons?: InlineButton[][]): 
   if (!telegram) return null
   const parts = splitMessage(text)
   let last: number | null = null
+  let chat = place.chat
   try {
     for (const [index, part] of parts.entries()) {
       const options = { threadId: place.thread, ...(buttons && index === parts.length - 1 ? { buttons } : {}) }
-      last = (await withRetry(() => telegram.sendMessage(place.chat, part, options))).message_id
+      const sent = await withRetry(() => telegram.sendMessage(chat, part, options)).catch(async (error: unknown) => {
+        const moved = await migrated(chat, error, true)
+        if (moved === null) throw error
+        chat = moved
+        return withRetry(() => telegram.sendMessage(chat, part, options))
+      })
+      last = sent.message_id
     }
     if (sendError) {
       sendError = null
@@ -482,7 +503,11 @@ async function sendSpoken(place: Place, text: string, voice: Speak): Promise<voi
   const telegram = client
   if (!telegram) return
   try {
-    await withRetry(() => telegram.sendVoice(place.chat, ogg, { threadId: place.thread }))
+    await withRetry(() => telegram.sendVoice(place.chat, ogg, { threadId: place.thread })).catch(async (error: unknown) => {
+      const moved = await migrated(place.chat, error, true)
+      if (moved === null) throw error
+      return withRetry(() => telegram.sendVoice(moved, ogg, { threadId: place.thread }))
+    })
   } catch (error) {
     sendError = `Could not send a voice memo to Telegram: ${messageOf(error)}`
     changed()
@@ -494,6 +519,52 @@ function topicOf(state: TelegramState, match: (target: Target) => boolean): numb
   return found ? Number(found[0]) : undefined
 }
 
+/** Saves the paired group's new id, once it became a supergroup. Its topics stay. False when `from` is not the paired group. */
+async function moveGroup(from: number, to: number): Promise<boolean> {
+  let moved = false
+  await save((state) => {
+    if (state.group?.id !== from) return
+    state.group = { ...state.group, id: to }
+    moved = true
+  })
+  if (moved) {
+    topicsRefused = false
+    changed()
+  }
+  return moved
+}
+
+/**
+ * The paired group's new id when Telegram refused a call to `chat` because the group became a supergroup, else null.
+ * The id is saved; with `makeTopics` the topics are made there afterwards, which ensureTopics itself must not ask for.
+ */
+async function migrated(chat: number, error: unknown, makeTopics: boolean): Promise<number | null> {
+  if (!(error instanceof TelegramError) || !error.migrateTo) return null
+  const to = error.migrateTo
+  // Followed already, by an earlier call.
+  if ((await current()).group?.id === to) return to
+  if (!(await moveGroup(chat, to))) return null
+  if (makeTopics) void ensureTopics(true).catch(() => {})
+  return to
+}
+
+/** The colours Telegram allows for a topic icon. */
+const TOPIC_COLORS = [0x6fb9f0, 0xffd67e, 0xcb86db, 0x8eee98, 0xff93b2, 0xfb6f5f]
+
+/** The Telegram topic colour nearest to a project's `#RRGGBB` colour, or undefined when it has none that can be read. */
+function topicColor(color: string | undefined): number | undefined {
+  const hex = normalizeHexColor(color)
+  if (!hex) return undefined
+  const channels = (value: number): number[] => [value >> 16, (value >> 8) & 255, value & 255]
+  const want = channels(parseInt(hex.slice(1), 16))
+  const distance = (value: number): number => channels(value).reduce((sum, part, i) => sum + (part - want[i]) ** 2, 0)
+  return TOPIC_COLORS.reduce((best, value) => (distance(value) < distance(best) ? value : best))
+}
+
+function sameTarget(a: Target, b: Target): boolean {
+  return a.kind === 'bot' ? b.kind === 'bot' && a.botId === b.botId : b.kind === 'project' && a.projectId === b.projectId
+}
+
 /** Makes a topic for each reachable bot and project that has none. Topics are never deleted. */
 async function ensureTopics(tell: boolean): Promise<void> {
   await withLock('telegram-topics', async () => {
@@ -501,26 +572,51 @@ async function ensureTopics(tell: boolean): Promise<void> {
     const telegram = client
     const group = state.group
     if (!group || !telegram || (!tell && topicsRefused)) return
-    const wanted: Array<{ name: string; target: Target }> = [
+    let groupId = group.id
+    const wanted: Array<{ name: string; target: Target; color?: string }> = [
       ...(await reachableBots(state)).map((bot) => ({ name: bot.name, target: { kind: 'bot', botId: bot.id } as Target })),
       ...(await reachableProjects(state)).map((project) => ({
         name: project.name,
-        target: { kind: 'project', projectId: project.id } as Target
+        target: { kind: 'project', projectId: project.id } as Target,
+        color: project.color
       }))
     ]
-    for (const { name, target } of wanted) {
-      const id = target.kind === 'bot' ? target.botId : target.projectId
-      if (topicOf(state, (item) => item.kind === target.kind && (item.kind === 'bot' ? item.botId : item.projectId) === id) !== undefined) {
-        continue
-      }
+    for (const { name, target, color } of wanted) {
+      if (topicOf(state, (item) => sameTarget(item, target)) !== undefined) continue
       let thread: number
       try {
-        thread = await telegram.createForumTopic(group.id, name)
+        let icon: TopicIcon = {}
+        if (target.kind === 'project') {
+          const value = topicColor(color)
+          if (value !== undefined) icon = { color: value }
+        } else {
+          botIcon ??= telegram.getForumTopicIconStickers().then(
+            (stickers) => stickers.find((sticker) => sticker.emoji === '🤖')?.custom_emoji_id,
+            () => undefined
+          )
+          const emojiId = await botIcon
+          if (emojiId) icon = { emojiId }
+        }
+        const hasIcon = icon.color !== undefined || icon.emojiId !== undefined
+        const make = (chat: number): Promise<number> =>
+          telegram.createForumTopic(chat, name, icon).catch((error: unknown) => {
+            // An icon never stops a topic: a plain 400 is tried again without it.
+            if (!hasIcon || !(error instanceof TelegramError) || error.code !== 400 || error.migrateTo) throw error
+            return telegram.createForumTopic(chat, name)
+          })
+        thread = await make(groupId).catch(async (error: unknown) => {
+          const moved = await migrated(groupId, error, false)
+          if (moved === null) throw error
+          groupId = moved
+          return make(groupId)
+        })
       } catch (error) {
         // A 400 or 403: the group has no topics, or the bot may not manage them.
         if (error instanceof TelegramError && (error.code === 400 || error.code === 403)) {
           topicsRefused = true
-          if (tell) await deliver({ chat: group.id }, TOPICS_NEEDED)
+          topicsError = `Could not make a topic for ${name}: ${messageOf(error)}. Turn on Topics in the group settings and make this bot an admin that may manage topics.`
+          changed()
+          if (tell) await deliver({ chat: groupId }, TOPICS_NEEDED)
         } else {
           sendError = `Could not make a topic: ${messageOf(error)}`
           changed()
@@ -532,6 +628,31 @@ async function ensureTopics(tell: boolean): Promise<void> {
       })
     }
     topicsRefused = false
+    if (topicsError) {
+      topicsError = null
+      changed()
+    }
+  })
+}
+
+/** Links a topic the user made by hand to the reachable bot or project of its name that has no topic yet. */
+async function linkTopic(thread: number, name: string): Promise<boolean> {
+  return withLock('telegram-topics', async () => {
+    const state = await current()
+    const wanted = name.trim().toLowerCase()
+    const free = (target: Target): boolean => topicOf(state, (item) => sameTarget(item, target)) === undefined
+    const target = [
+      ...(await reachableBots(state)).map((bot) => ({ name: bot.name, target: { kind: 'bot', botId: bot.id } as Target })),
+      ...(await reachableProjects(state)).map((project) => ({
+        name: project.name,
+        target: { kind: 'project', projectId: project.id } as Target
+      }))
+    ].find((item) => item.name.trim().toLowerCase() === wanted && free(item.target))?.target
+    if (!target) return false
+    await save((latest) => {
+      latest.topics[String(thread)] = target
+    })
+    return true
   })
 }
 
@@ -580,14 +701,40 @@ function parseCommand(text: string, username: string | null): { name: string; re
 
 async function handleMessage(message: TelegramMessage): Promise<void> {
   const state = await current()
+  // The paired group became a supergroup. The supergroup's message comes from a chat not known yet.
+  if (message.migrate_to_chat_id || message.migrate_from_chat_id) {
+    const group = state.group
+    const to =
+      message.migrate_to_chat_id && message.chat.id === group?.id
+        ? message.migrate_to_chat_id
+        : message.migrate_from_chat_id && message.migrate_from_chat_id === group?.id
+          ? message.chat.id
+          : undefined
+    if (group && to !== undefined && (await moveGroup(group.id, to))) await ensureTopics(true)
+    return
+  }
   if (!message.from || message.from.is_bot) return
   const text = (message.text ?? '').trim()
   const command = parseCommand(text, state.username)
   if (command?.name === 'pair') return tryPair(message, command.rest)
   if (!fromPaired(state, message.from.id, message.chat)) return
+  if (message.forum_topic_created) {
+    if (message.message_thread_id && message.chat.id === state.group?.id) {
+      await linkTopic(message.message_thread_id, message.forum_topic_created.name)
+    }
+    return
+  }
   const place: Place = {
     chat: message.chat.id,
     ...(message.is_topic_message && message.message_thread_id ? { thread: message.message_thread_id } : {})
+  }
+  // A topic made by hand is linked by its name; one that cannot be is not passed on.
+  if (place.thread !== undefined && place.chat === state.group?.id && !state.topics[String(place.thread)]) {
+    const name = message.reply_to_message?.forum_topic_created?.name
+    if (!name || !(await linkTopic(place.thread, name))) {
+      await deliver(place, NOT_LINKED)
+      return
+    }
   }
   try {
     if (command?.name === 'help') {

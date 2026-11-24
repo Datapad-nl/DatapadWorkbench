@@ -26,6 +26,13 @@ export type TelegramMessage = {
   video_note?: unknown
   sticker?: unknown
   animation?: unknown
+  /** In a basic group that became a supergroup: the supergroup's id. */
+  migrate_to_chat_id?: number
+  /** In that supergroup: the basic group's id. */
+  migrate_from_chat_id?: number
+  forum_topic_created?: { name: string }
+  /** In a topic, unless it replies to another message: the message that made the topic. */
+  reply_to_message?: TelegramMessage
 }
 
 export type TelegramCallbackQuery = {
@@ -49,6 +56,10 @@ export type SendOptions = {
   buttons?: InlineButton[][]
 }
 
+export type TopicIcon = { color?: number; emojiId?: string }
+
+export type TopicIconSticker = { emoji?: string; custom_emoji_id?: string }
+
 export interface TelegramClient {
   getMe(): Promise<TelegramUser>
   /** Long polls for up to 50 s. Updates before `offset` are confirmed and not sent again. */
@@ -57,8 +68,10 @@ export interface TelegramClient {
   /** Takes the buttons off a message. */
   removeButtons(chatId: number, messageId: number): Promise<void>
   answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void>
-  /** The new topic's thread id. */
-  createForumTopic(chatId: number, name: string): Promise<number>
+  /** The new topic's thread id. The icon is the topic's colour (one of Telegram's six) or a custom emoji from `getForumTopicIconStickers`; neither can be changed afterwards. */
+  createForumTopic(chatId: number, name: string, icon?: TopicIcon): Promise<number>
+  /** The emoji Telegram allows as a topic icon. */
+  getForumTopicIconStickers(): Promise<TopicIconSticker[]>
   /** A file's bytes by its file_id, such as a voice note's. */
   downloadFile(fileId: string): Promise<Buffer>
   /** An Ogg Opus file, which Telegram shows as a voice memo. */
@@ -68,11 +81,14 @@ export interface TelegramClient {
 export class TelegramError extends Error {
   /** Telegram's error_code, or 0 when Telegram could not be reached. */
   readonly code: number
+  /** The group became a supergroup with this id: the call is to be made there. */
+  readonly migrateTo?: number
 
-  constructor(code: number, description: string) {
+  constructor(code: number, description: string, migrateTo?: number) {
     super(description)
     this.name = 'TelegramError'
     this.code = code
+    if (migrateTo) this.migrateTo = migrateTo
   }
 }
 
@@ -106,11 +122,11 @@ export function telegramClient(token: string): TelegramClient {
       signal: signal ?? AbortSignal.timeout(30_000)
     })
     const data = (await response.json().catch(() => null)) as
-      | { ok: boolean; result?: T; description?: string; error_code?: number }
+      | { ok: boolean; result?: T; description?: string; error_code?: number; parameters?: { migrate_to_chat_id?: number } }
       | null
     if (!data?.ok) {
       const code = data?.error_code ?? response.status
-      throw new TelegramError(code, hide(data?.description ?? `Telegram answered ${response.status}`))
+      throw new TelegramError(code, hide(data?.description ?? `Telegram answered ${response.status}`), data?.parameters?.migrate_to_chat_id)
     }
     return data.result as T
   }
@@ -137,9 +153,16 @@ export function telegramClient(token: string): TelegramClient {
     answerCallbackQuery: async (callbackQueryId, text) => {
       await call('answerCallbackQuery', { callback_query_id: callbackQueryId, ...(text ? { text } : {}) })
     },
-    createForumTopic: async (chatId, name) =>
-      (await call<{ message_thread_id: number }>('createForumTopic', { chat_id: chatId, name: name.slice(0, 128) }))
-        .message_thread_id,
+    createForumTopic: async (chatId, name, icon = {}) =>
+      (
+        await call<{ message_thread_id: number }>('createForumTopic', {
+          chat_id: chatId,
+          name: name.slice(0, 128),
+          ...(icon.color !== undefined ? { icon_color: icon.color } : {}),
+          ...(icon.emojiId ? { icon_custom_emoji_id: icon.emojiId } : {})
+        })
+      ).message_thread_id,
+    getForumTopicIconStickers: () => call<TopicIconSticker[]>('getForumTopicIconStickers', {}),
     downloadFile: async (fileId) => {
       const file = await call<{ file_path?: string }>('getFile', { file_id: fileId })
       if (!file.file_path) throw new TelegramError(0, 'Telegram has no file for this message.')

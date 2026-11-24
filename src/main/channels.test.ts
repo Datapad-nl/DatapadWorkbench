@@ -20,6 +20,7 @@ const stub = vi.hoisted(() => ({
   turns: [] as Array<{ chatId: string; content: string }>,
   netFetch: vi.fn<(...args: unknown[]) => Promise<Response>>(),
   chatCount: 0,
+  projects: [] as Array<{ id: string; name: string; path: string; color?: string }>,
   /** What the fake voice helper page answers to a job. */
   helperPage: (job: { id: number; kind: string }): Record<string, unknown> => ({ id: job.id, error: 'no page' })
 }))
@@ -98,7 +99,7 @@ vi.mock('./store', () => ({
   },
   getMaxSubagents: async () => 4,
   getSubagentModel: async () => '',
-  listProjects: async () => [{ id: 'site', name: 'Site', path: '/site' }],
+  listProjects: async () => stub.projects,
   listChats: async () => [...stub.chats.values()],
   mutateChat: async (chatId: string, change: (chat: Chat) => void) => {
     const chat = stub.chats.get(chatId)!
@@ -119,6 +120,8 @@ function fakeTelegram() {
   const removed: Array<[number, number]> = []
   const answered: Array<[string, string | undefined]> = []
   const topics: Array<[number, string]> = []
+  /** The icon each topic was asked for with, by name. */
+  const icons = new Map<string, { color?: number; emojiId?: string }>()
   const voices: Array<{ chat: number; ogg: Buffer; thread?: number }> = []
   let nextMessage = 1
   let nextThread = 100
@@ -128,9 +131,16 @@ function fakeTelegram() {
     removed,
     answered,
     topics,
+    icons,
+    stickers: vi.fn(async (): Promise<Array<{ emoji?: string; custom_emoji_id?: string }>> => [
+      { emoji: '📰', custom_emoji_id: 'news-1' },
+      { emoji: '🤖', custom_emoji_id: 'robot-1' }
+    ]),
     voices,
     offsets,
     topicsRefused: false,
+    /** Telegram refuses a topic that comes with an icon. */
+    iconRefused: false,
     client: {
       getMe: async () => ({ id: 1, is_bot: true, username: 'wb_bot' }),
       getUpdates: async (offset: number, signal: AbortSignal) => {
@@ -154,14 +164,21 @@ function fakeTelegram() {
       answerCallbackQuery: async (id: string, text?: string) => {
         answered.push([id, text])
       },
-      createForumTopic: async (chat: number, name: string) => {
+      createForumTopic: async (chat: number, name: string, icon?: { color?: number; emojiId?: string }) => {
         if (fake.topicsRefused) {
           const { TelegramError } = await import('./telegram')
           throw new TelegramError(400, 'Bad Request: the chat is not a forum')
         }
+        const hasIcon = icon !== undefined && Object.keys(icon).length > 0
+        if (hasIcon && fake.iconRefused) {
+          const { TelegramError } = await import('./telegram')
+          throw new TelegramError(400, 'Bad Request: DOCUMENT_INVALID')
+        }
         topics.push([chat, name])
+        if (hasIcon) icons.set(name, icon)
         return nextThread++
       },
+      getForumTopicIconStickers: async () => fake.stickers(),
       downloadFile: async () => Buffer.from('voice bytes'),
       sendVoice: async (chat: number, ogg: Buffer, options: { threadId?: number } = {}) => {
         voices.push({ chat, ogg, ...(options.threadId ? { thread: options.threadId } : {}) })
@@ -283,6 +300,7 @@ beforeEach(async () => {
   stub.bots.set('lint', bot('lint', 'Lint'))
   stub.running.clear()
   stub.turns.length = 0
+  stub.projects = [{ id: 'site', name: 'Site', path: '/site' }]
   stub.answer = async () => 'Done.'
   fake = fakeTelegram()
 })
@@ -345,6 +363,63 @@ describe('pairing', () => {
       ])
     )
     expect(await channels.getTelegramStatus()).toMatchObject({ paired: true, group: 'Team' })
+  })
+
+  describe('topic icons', () => {
+    async function pair(): Promise<void> {
+      const { pairing } = await channels.startPairing()
+      await fake.handled(fake.push(inGroup(`/pair ${pairing!.code}`)))
+    }
+
+    it.each([
+      ['#7C9CFF', 0x6fb9f0],
+      ['#F472B6', 0xff93b2],
+      ['#34D399', 0x8eee98]
+    ])('gives a project of colour %s the nearest Telegram colour', async (color, expected) => {
+      stub.projects = [{ id: 'site', name: 'Site', path: '/site', color }]
+      await start()
+      await channels.setTelegramReachable({ bots: [], projects: ['site'] })
+      await pair()
+      await vi.waitFor(() => expect(fake.icons.get('Site')).toEqual({ color: expected }))
+    })
+
+    it('gives a project with no readable colour no icon', async () => {
+      stub.projects = [
+        { id: 'site', name: 'Site', path: '/site' },
+        { id: 'odd', name: 'Odd', path: '/odd', color: 'teal' }
+      ]
+      await start()
+      await channels.setTelegramReachable({ bots: [], projects: ['site', 'odd'] })
+      await pair()
+      await vi.waitFor(() => expect(fake.topics.map(([, name]) => name)).toEqual(['Site', 'Odd']))
+      expect(fake.icons.size).toBe(0)
+    })
+
+    it('gives bot topics the robot emoji and asks for the list once', async () => {
+      await start()
+      await pair()
+      await vi.waitFor(() => expect(fake.topics).toHaveLength(2))
+      expect(fake.icons.get('Scout')).toEqual({ emojiId: 'robot-1' })
+      expect(fake.icons.get('Lint')).toEqual({ emojiId: 'robot-1' })
+      expect(fake.stickers).toHaveBeenCalledTimes(1)
+    })
+
+    it('makes the bot topics without an icon when the list is not to be had', async () => {
+      fake.stickers.mockRejectedValue(new Error('offline'))
+      await start()
+      await pair()
+      await vi.waitFor(() => expect(fake.topics).toHaveLength(2))
+      expect(fake.icons.size).toBe(0)
+    })
+
+    it('makes a topic without its icon when Telegram refuses the icon', async () => {
+      fake.iconRefused = true
+      await start()
+      await pair()
+      await vi.waitFor(() => expect(fake.topics).toHaveLength(2))
+      expect(fake.icons.size).toBe(0)
+      expect((await channels.getTelegramStatus()).paired).toBe(true)
+    })
   })
 
   it('says what to switch on when the group has no topics', async () => {
@@ -916,6 +991,177 @@ describe('approvals and questions', () => {
     await fake.handled(fake.push(dm('/help')))
     expect(fake.sent).toHaveLength(1)
     expect(fake.sent[0].buttons).toBeUndefined()
+  })
+})
+
+describe('a group that became a supergroup', () => {
+  const OLD = -5299852170
+  const NEW = -1009876543210
+  const UPGRADED = 'Bad Request: group chat was upgraded to a supergroup chat'
+
+  function groupMessage(chat: number, extra: Partial<TelegramMessage>): Omit<TelegramUpdate, 'update_id'> {
+    return {
+      message: {
+        message_id: messageId++,
+        from: { id: ME },
+        chat: { id: chat, type: chat === OLD ? 'group' : 'supergroup', title: 'Team' },
+        date: 0,
+        ...extra
+      }
+    }
+  }
+
+  async function savedGroup(): Promise<number> {
+    return JSON.parse(await readFile(join(stub.dir, 'workbench', 'channels.json'), 'utf8')).telegram.group.id
+  }
+
+  /** Pairs the basic group, which has no topics yet. */
+  async function pairInBasicGroup(): Promise<void> {
+    fake.topicsRefused = true
+    const { pairing } = await channels.startPairing()
+    await fake.handled(fake.push(groupMessage(OLD, { text: `/pair ${pairing!.code}` })))
+    await vi.waitFor(() => expect(fake.texts().some((text) => text.startsWith('To give each bot'))).toBe(true))
+    fake.topicsRefused = false
+    fake.clear()
+  }
+
+  /** Telegram refuses every call to the old id, as it does once the group was upgraded. */
+  async function upgrade(): Promise<void> {
+    const { TelegramError } = await import('./telegram')
+    const { sendMessage, createForumTopic } = fake.client
+    fake.client.sendMessage = async (chat, text, options) => {
+      if (chat === OLD) throw new TelegramError(400, UPGRADED, NEW)
+      return sendMessage(chat, text, options)
+    }
+    fake.client.createForumTopic = async (chat, name, icon) => {
+      if (chat === OLD) throw new TelegramError(400, UPGRADED, NEW)
+      return createForumTopic(chat, name, icon)
+    }
+  }
+
+  it('makes the topics in the supergroup when Telegram refuses the old id', async () => {
+    await start()
+    await upgrade()
+    const { pairing } = await channels.startPairing()
+    await fake.handled(fake.push(groupMessage(OLD, { text: `/pair ${pairing!.code}` })))
+    await vi.waitFor(() =>
+      expect(fake.topics).toEqual([
+        [NEW, 'Scout'],
+        [NEW, 'Lint']
+      ])
+    )
+    expect(await savedGroup()).toBe(NEW)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(fake.topics).toHaveLength(2)
+  })
+
+  it('delivers to the supergroup when Telegram refuses a message to the old id', async () => {
+    await start()
+    await pairInBasicGroup()
+    await upgrade()
+    await channels.telegramBotMessage(stub.bots.get('scout')!, 'The build passed.')
+    expect(fake.sent[0]).toEqual({ chat: NEW, text: 'Scout: The build passed.' })
+    expect(await savedGroup()).toBe(NEW)
+    await vi.waitFor(() => expect(fake.topics.map(([chat]) => chat)).toEqual([NEW, NEW]))
+  })
+
+  it.each([
+    ['the old group', () => groupMessage(OLD, { migrate_to_chat_id: NEW })],
+    ['the supergroup', () => groupMessage(NEW, { migrate_from_chat_id: OLD })]
+  ])('follows the upgrade told in %s', async (_where, upgraded) => {
+    await start()
+    await pairInBasicGroup()
+    await fake.handled(fake.push(upgraded()))
+    expect(await savedGroup()).toBe(NEW)
+    await vi.waitFor(() => expect(fake.topics).toHaveLength(2))
+    const lintThread = 100 + fake.topics.findIndex(([, name]) => name === 'Lint')
+    expect(fake.texts()).not.toContain('Only text and voice notes work here.')
+    await fake.handled(fake.push(groupMessage(NEW, { text: 'run it', message_thread_id: lintThread, is_topic_message: true })))
+    expect(stub.turns).toEqual([{ chatId: stub.bots.get('lint')!.chatId, content: 'run it' }])
+  })
+
+  it('repairs a pairing with the old id at app start without writing to the group', async () => {
+    const sealed = Buffer.from(`sealed:${Buffer.from(TOKEN).toString('hex')}`).toString('base64')
+    const { mkdir, writeFile } = await import('fs/promises')
+    await mkdir(join(stub.dir, 'workbench'), { recursive: true })
+    await writeFile(
+      join(stub.dir, 'workbench', 'channels.json'),
+      JSON.stringify({ telegram: { token: sealed, userId: ME, group: { id: OLD, title: 'Team' }, topics: {} } })
+    )
+    vi.resetModules()
+    channels = await import('./channels')
+    channels.registerChannels({ client: () => fake.client })
+    await upgrade()
+    await channels.startChannels()
+    await vi.waitFor(() =>
+      expect(fake.topics).toEqual([
+        [NEW, 'Scout'],
+        [NEW, 'Lint']
+      ])
+    )
+    expect(await savedGroup()).toBe(NEW)
+    expect(fake.sent).toEqual([])
+  })
+})
+
+describe('topics', () => {
+  function inTopic(thread: number, extra: Partial<TelegramMessage>): Omit<TelegramUpdate, 'update_id'> {
+    const update = inGroup('', thread)
+    Object.assign(update.message!, extra)
+    return update
+  }
+
+  async function savedTopics(): Promise<Record<string, unknown>> {
+    return JSON.parse(await readFile(join(stub.dir, 'workbench', 'channels.json'), 'utf8')).telegram.topics
+  }
+
+  it('shows in the status why Telegram refused a topic, until topics are made', async () => {
+    await start()
+    fake.topicsRefused = true
+    const { pairing } = await channels.startPairing()
+    await fake.handled(fake.push(inGroup(`/pair ${pairing!.code}`)))
+    await vi.waitFor(async () =>
+      expect((await channels.getTelegramStatus()).error).toBe(
+        'Could not make a topic for Scout: Bad Request: the chat is not a forum. Turn on Topics in the group settings and make this bot an admin that may manage topics.'
+      )
+    )
+    expect((await channels.getTelegramStatus()).state).toBe('connected')
+    fake.topicsRefused = false
+    await channels.setTelegramReachable({ bots: ['scout', 'lint'], projects: [] })
+    expect(fake.topics).toHaveLength(2)
+    expect((await channels.getTelegramStatus()).error).toBeNull()
+  })
+
+  it('links a topic made by hand to the bot of its name, and makes no second one', async () => {
+    await start()
+    await pairInGroup()
+    stub.bots.set('chief', bot('chief', 'Master Chief'))
+    stub.bots.set('ops', bot('ops', 'Ops'))
+    await fake.handled(fake.push(inTopic(555, { text: 'hello', reply_to_message: { message_id: 1, chat: { id: GROUP, type: 'supergroup' }, date: 0, forum_topic_created: { name: ' master chief ' } } })))
+    expect(stub.turns).toEqual([{ chatId: stub.bots.get('chief')!.chatId, content: 'hello' }])
+    // A topic made while the app listens is linked as it is made, without a word.
+    await fake.handled(fake.push(inTopic(556, { text: undefined, forum_topic_created: { name: 'Ops' } })))
+    expect(await savedTopics()).toMatchObject({ '555': { kind: 'bot', botId: 'chief' }, '556': { kind: 'bot', botId: 'ops' } })
+    await channels.setTelegramReachable({ bots: ['scout', 'lint', 'chief', 'ops'], projects: [] })
+    expect(fake.topics.map(([, name]) => name)).toEqual(['Scout', 'Lint'])
+    await vi.waitFor(() => expect(fake.sent).toEqual([{ chat: GROUP, thread: 555, text: 'Done.' }]))
+  })
+
+  it('does not pass on a message in a topic it cannot link', async () => {
+    await start()
+    await pairInGroup()
+    await fake.handled(fake.push(inTopic(777, { text: 'hello' })))
+    await fake.handled(
+      fake.push(inTopic(778, { text: 'hi', reply_to_message: { message_id: 1, chat: { id: GROUP, type: 'supergroup' }, date: 0, forum_topic_created: { name: 'Nobody' } } }))
+    )
+    expect(stub.turns).toEqual([])
+    expect(fake.sent).toEqual([
+      { chat: GROUP, thread: 777, text: 'This topic is not linked to a bot or project.' },
+      { chat: GROUP, thread: 778, text: 'This topic is not linked to a bot or project.' }
+    ])
+    // General still goes to the chief.
+    await fake.handled(fake.push(inGroup('status?')))
+    expect(stub.turns.map((turn) => turn.chatId)).toEqual([stub.bots.get('scout')!.chatId])
   })
 })
 

@@ -124,6 +124,14 @@ function TokenRow({ status, onStatus }: Part): React.JSX.Element {
           <span data-testid="channels-state" className={status.state === 'error' ? 'text-red-400' : undefined}>
             {state}
           </span>
+          {status.state !== 'error' && status.error && (
+            <>
+              {' · '}
+              <span data-testid="channels-error" className="text-red-400">
+                {status.error}
+              </span>
+            </>
+          )}
         </>
       }
     >

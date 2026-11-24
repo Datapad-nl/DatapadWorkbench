@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { telegramClient } from './telegram'
+import { TelegramError, telegramClient } from './telegram'
 
 const TOKEN = '123456:AAHabcdefghijklmnopqrstuvwxyz'
 
@@ -49,5 +49,51 @@ describe('sendVoice', () => {
       .sendVoice(42, Buffer.from('x'))
       .catch((caught: Error) => caught)) as Error
     expect(refused.message).toBe('bad <token>')
+  })
+})
+
+describe('createForumTopic', () => {
+  beforeEach(() => fake.fetch.mockReset())
+
+  async function bodyOf(icon?: { color?: number; emojiId?: string }): Promise<Record<string, unknown>> {
+    fake.fetch.mockImplementation(async () => Response.json({ ok: true, result: { message_thread_id: 5 } }))
+    expect(await telegramClient(TOKEN).createForumTopic(-100, 'Site', icon)).toBe(5)
+    return JSON.parse(((fake.fetch.mock.calls[0] as [string, RequestInit])[1].body as string))
+  }
+
+  it('sends the colour and the emoji when given', async () => {
+    expect(await bodyOf({ color: 0x6fb9f0 })).toEqual({ chat_id: -100, name: 'Site', icon_color: 0x6fb9f0 })
+    fake.fetch.mockReset()
+    expect(await bodyOf({ emojiId: '99' })).toEqual({ chat_id: -100, name: 'Site', icon_custom_emoji_id: '99' })
+  })
+
+  it('sends neither when there is no icon', async () => {
+    expect(await bodyOf()).toEqual({ chat_id: -100, name: 'Site' })
+  })
+
+  it('lists the topic icon stickers', async () => {
+    fake.fetch.mockImplementation(async () => Response.json({ ok: true, result: [{ emoji: '🤖', custom_emoji_id: '1' }] }))
+    expect(await telegramClient(TOKEN).getForumTopicIconStickers()).toEqual([{ emoji: '🤖', custom_emoji_id: '1' }])
+    expect((fake.fetch.mock.calls[0] as [string])[0]).toBe(`https://api.telegram.org/bot${TOKEN}/getForumTopicIconStickers`)
+  })
+})
+
+describe('errors', () => {
+  beforeEach(() => fake.fetch.mockReset())
+
+  it('carries the supergroup id of a group that was upgraded', async () => {
+    fake.fetch.mockImplementation(async () =>
+      Response.json({
+        ok: false,
+        error_code: 400,
+        description: 'Bad Request: group chat was upgraded to a supergroup chat',
+        parameters: { migrate_to_chat_id: -1001234 }
+      })
+    )
+    const error = await telegramClient(TOKEN)
+      .sendMessage(-5299852170, 'hi')
+      .catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(TelegramError)
+    expect(error).toMatchObject({ code: 400, migrateTo: -1001234 })
   })
 })
