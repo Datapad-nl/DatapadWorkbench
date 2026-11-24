@@ -13,7 +13,8 @@ const stub = vi.hoisted(() => ({
   /** Files of the bots' memory folders, by `<botId>/<name>`. */
   memory: {} as Record<string, string>,
   /** What addBotProblem was called with, as `[botId, text]`. */
-  problems: [] as Array<[string, string]>
+  problems: [] as Array<[string, string]>,
+  projects: [] as Array<{ id: string; name: string; path: string | null }>
 }))
 vi.mock('./git', () => ({ addChatWorktree: vi.fn(), dropWorktreeIfUnchanged: vi.fn() }))
 vi.mock('./bots', () => {
@@ -68,7 +69,7 @@ vi.mock('./store', () => ({
   },
   getMaxSubagents: async () => stub.maxSubagents,
   getSubagentModel: async () => stub.subagentModel,
-  listProjects: async () => [],
+  listProjects: async () => stub.projects,
   listChats: async () => [...stub.chats.values()].map((chat) => ({ ...chat, messageCount: chat.messages.length })),
   mutateChat: async (chatId: string, change: (chat: Chat) => void) => {
     const chat = stub.chats.get(chatId)!
@@ -90,15 +91,19 @@ import {
   ensureChief,
   expectFollowUp,
   handoffChat,
+  listProjectChats,
+  listUserProjects,
   markBotRead,
   newBotChat,
   notifyFromBot,
   nudgeWorker,
+  readProjectChat,
   registerChatTools,
   scheduleBotTask,
   setFollowUp,
   setHeartbeat,
   setHeartbeatCron,
+  startProjectChat,
   startScheduler,
   waitForDelegate
 } from './chatTools'
@@ -393,6 +398,98 @@ describe('handoff', () => {
     })
     await expect(handoffChat({ from: 'long', summary: 'state' })).rejects.toThrow('Subagents of this chat are still running')
     stub.chats.delete('child')
+  })
+})
+
+describe("a bot's jobs in a project", () => {
+  function setUp(): Array<[string, string]> {
+    const sent: Array<[string, string]> = []
+    stub.projects = [
+      { id: 'proj-site', name: 'Website', path: '/code/site' },
+      { id: 'proj-app', name: 'App', path: '/code/app' }
+    ]
+    stub.chats.set('scout-own', { id: 'scout-own', projectId: '', botId: 'scout', title: 'Scout', messages: [] } as unknown as Chat)
+    stub.chats.set('site-chat', {
+      id: 'site-chat',
+      projectId: 'proj-site',
+      title: 'Fix the footer',
+      messages: [{ id: 'a1', role: 'assistant', content: 'Footer fixed.', createdAt: '' }]
+    } as unknown as Chat)
+    stub.chats.set('site-bot-run', { id: 'site-bot-run', projectId: 'proj-site', botId: 'scout', title: 'Scout run', messages: [] } as unknown as Chat)
+    vi.mocked(createChat).mockReset()
+    vi.mocked(createChat).mockImplementationOnce(async (projectId, input) => {
+      const chat = { id: 'site-job', projectId, messages: [], ...input } as unknown as Chat
+      stub.chats.set(chat.id, chat)
+      return structuredClone(chat)
+    })
+    registerChatTools({
+      send: async (chatId, content) => {
+        sent.push([chatId, content])
+        return { chat: stub.chats.get(chatId)!, done: Promise.resolve(null) }
+      },
+      emit: () => {},
+      isStreaming: () => false
+    })
+    return sent
+  }
+
+  afterEach(() => {
+    stub.projects = []
+    for (const chatId of ['scout-own', 'site-chat', 'site-bot-run', 'site-job']) stub.chats.delete(chatId)
+  })
+
+  it("starts an ordinary project chat from a bot's own chat and sends it the job", async () => {
+    const sent = setUp()
+    const result = await startProjectChat({ from: 'scout-own', project: 'website', prompt: 'Fix the header', title: 'Header' })
+
+    expect(vi.mocked(createChat).mock.lastCall).toEqual(['proj-site', { title: 'Header', agent: undefined }])
+    expect(stub.chats.get('site-job')!.botId).toBeUndefined()
+    expect(stub.chats.get('site-job')!.parentChatId).toBeUndefined()
+    expect(sent).toEqual([['site-job', 'Fix the header']])
+    expect(result).toMatchObject({ chatId: 'site-job', project: 'Website', sent: true })
+  })
+
+  it('names the projects when none matches', async () => {
+    setUp()
+    await expect(startProjectChat({ from: 'scout-own', project: 'Shop', prompt: 'x' })).rejects.toThrow(
+      'No project is named Shop. The projects are: Website, App.'
+    )
+    expect(createChat).not.toHaveBeenCalled()
+  })
+
+  it("refuses project from any chat but a bot's own", async () => {
+    setUp()
+    stub.chats.set('scout-asked', {
+      id: 'scout-asked', projectId: '', botId: 'scout', replyTo: 'site-chat', title: 'Asked', messages: []
+    } as unknown as Chat)
+    for (const from of ['site-chat', 'site-bot-run', 'scout-asked']) {
+      await expect(startProjectChat({ from, project: 'Website' })).rejects.toThrow("Only a bot's own chat can pass project.")
+      await expect(listProjectChats(from, 'Website')).rejects.toThrow("Only a bot's own chat can pass project.")
+      await expect(readProjectChat({ from, chat: 'footer', project: 'Website' })).rejects.toThrow(
+        "Only a bot's own chat can pass project."
+      )
+      await expect(listUserProjects(from)).rejects.toThrow("a bot's own chats")
+    }
+    stub.chats.delete('scout-asked')
+    expect(createChat).not.toHaveBeenCalled()
+  })
+
+  it("lists and reads the project's ordinary chats, and lists the projects", async () => {
+    setUp()
+    expect(await listUserProjects('scout-own')).toEqual({
+      projects: [
+        { id: 'proj-site', name: 'Website', path: '/code/site' },
+        { id: 'proj-app', name: 'App', path: '/code/app' }
+      ]
+    })
+    const listed = (await listProjectChats('scout-own', 'proj-site')) as { chats: Array<{ id: string }> }
+    expect(listed.chats.map((chat) => chat.id)).toEqual(['site-chat'])
+    const read = await readProjectChat({ from: 'scout-own', chat: 'footer', project: 'Website' })
+    expect(read.text).toContain('Fix the footer (site-chat)')
+    expect(read.text).toContain('Footer fixed.')
+    // Without project, the bot still sees only its own chats.
+    const own = (await listProjectChats('scout-own')) as { chats: Array<{ id: string }> }
+    expect(own.chats.map((chat) => chat.id)).not.toContain('site-chat')
   })
 })
 

@@ -231,7 +231,16 @@ export const WORKBENCH_TOOLS: McpTool[] = [
   {
     name: 'list_chats',
     description: 'List the chats in this project: id, title, agent, message count, whether it is running, and its worktree branch.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: {
+          type: 'string',
+          description: "From a bot's own chat only: name or id of the project whose chats to list (list_projects shows them)"
+        }
+      },
+      additionalProperties: false
+    }
   },
   {
     name: 'read_chat',
@@ -240,7 +249,11 @@ export const WORKBENCH_TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         chat: { type: 'string', description: 'Chat id or title' },
-        last: { type: 'number', description: 'How many of the latest messages to return. Default 20.' }
+        last: { type: 'number', description: 'How many of the latest messages to return. Default 20.' },
+        project: {
+          type: 'string',
+          description: "From a bot's own chat only: name or id of the project the chat is in (list_projects shows them)"
+        }
       },
       required: ['chat'],
       additionalProperties: false
@@ -249,13 +262,17 @@ export const WORKBENCH_TOOLS: McpTool[] = [
   {
     name: 'start_chat',
     description:
-      'Open a new chat in this project in the sidebar, optionally sending it a first message. Only when the user asks for a new chat; to get work done and hear back, use delegate.',
+      "Open a new chat in this project in the sidebar, optionally sending it a first message. Only when the user asks for a new chat; to get work done and hear back, use delegate. A bot's own chat can give one of the user's projects a job: pass project and the job as prompt. The chat opens in that project's sidebar and works in its folder, as if the user opened it. Follow it with list_chats and read_chat, passing the same project.",
     inputSchema: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'First message to send, if any' },
         agent: AGENT,
-        title: { type: 'string', description: 'Sidebar title' }
+        title: { type: 'string', description: 'Sidebar title' },
+        project: {
+          type: 'string',
+          description: "From a bot's own chat only: name or id of the project to open the chat in (list_projects shows them)"
+        }
       },
       additionalProperties: false
     }
@@ -299,8 +316,14 @@ export const PROJECT_CHAT_TOOLS: McpTool[] = [
   }
 ]
 
-/** Only a bot's own chats, outside any project, have these: they are how its unattended runs work. */
+/** Only a bot's own chats, outside any project, have these: its unattended runs and its view of the user's projects. */
 export const BOT_RUN_TOOLS: McpTool[] = [
+  {
+    name: 'list_projects',
+    description:
+      "List the user's projects: id, name and folder. Pass a name or id as project to start_chat, list_chats or read_chat to work in one.",
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }
+  },
   {
     name: 'notify',
     description:

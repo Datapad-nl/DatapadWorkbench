@@ -144,7 +144,7 @@ Every chat gets the Workbench's `workbench` MCP server next to `browser`:
 - `show_visual`: a chart, diagram or mock-up drawn as HTML, shown sandboxed in the chat
 - `delegate` and `nudge`: hand a task to a child chat on Grok or Claude, optionally in its own worktree, wait for its answer, and send it back with a follow-up. Settings caps how many run at once
 - `/conduct <job>`: the chat plans, hands each task to a subagent with acceptance criteria, and checks what comes back. A Claude chat with subagents allowed orchestrates them the same way
-- `list_chats`, `read_chat` and `start_chat`: look up and open other chats in the same project
+- `list_chats`, `read_chat` and `start_chat`: look up and open other chats in the same project. A bot, from its own chat, can name a project (`list_projects` shows them) to give that project a job in a new chat and read its answer later
 - `schedule_task` and `cancel_schedule`: run a prompt in the project once or on a cron. Each schedule has its own chat in the sidebar with the time to its next run
 - `link_pr`, `pr_status` and `unlink_pr`: link a GitHub pull request to the chat, show its checks and review state, and wake the chat when checks finish, a review comes in or it closes. Uses the GitHub CLI (`gh`)
 - `request_secret`: the agent asks for an API key or token; you type it in a password field, it is kept encrypted with the system keychain per project, or per bot for a bot's own secrets, and set as an environment variable in the agent's shell. The model never sees the value

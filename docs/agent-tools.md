@@ -44,6 +44,10 @@ calling chat.
 
 - [x] `list_chats` and `read_chat`: let an agent look up another chat in the same project.
 - [x] `start_chat`: open a new chat in the sidebar when the user asks for one.
+- [x] A bot gives a project a job: from its own chat, `list_projects` lists the user's projects,
+      and `start_chat` with `project` opens an ordinary chat in that project with the job as its
+      first message. `list_chats` and `read_chat` take the same `project`, so the bot can see
+      whether the job is done and read the answer. Only a bot's own chat may pass `project`.
 - [x] `handoff`: continue the work in a new chat with a fresh context. The agent writes a
       handoff, saved under `userData/workbench/handoffs`, and the new chat starts from it in
       the same folder, on the same agent, model and mode, with the PR link moved over.

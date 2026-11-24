@@ -22,6 +22,7 @@ import {
   delegateTask,
   handoffChat,
   listProjectChats,
+  listUserProjects,
   notifyFromBot,
   nudgeWorker,
   readProjectChat,
@@ -105,7 +106,8 @@ async function workbenchTool(name: string, args: Args, from: string, signal: Abo
   }
   if (name === 'delegate') return delegate(delegateTask({ ...args, from }), signal)
   if (name === 'nudge') return delegate(nudgeWorker({ ...args, from }), signal)
-  if (name === 'list_chats') return listProjectChats(from)
+  if (name === 'list_projects') return listUserProjects(from)
+  if (name === 'list_chats') return listProjectChats(from, args.project)
   if (name === 'read_chat') return readProjectChat({ ...args, from })
   if (name === 'start_chat') return startProjectChat({ ...args, from })
   if (name === 'handoff') return handoffChat({ ...args, from })

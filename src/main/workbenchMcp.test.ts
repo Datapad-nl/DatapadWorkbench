@@ -24,9 +24,13 @@ vi.mock('./youtube', () => ({}))
 vi.mock('./pullRequests', () => ({}))
 vi.mock('./secretTools', () => ({}))
 vi.mock('./chatTools', () => ({
-  listProjectChats: async (from: unknown) => {
-    fake.calls.push(['list', from])
+  listProjectChats: async (from: unknown, project?: unknown) => {
+    fake.calls.push(['list', project === undefined ? from : [from, project]])
     return { chats: [] }
+  },
+  listUserProjects: async (from: unknown) => {
+    fake.calls.push(['projects', from])
+    return { projects: [] }
   },
   readProjectChat: async (input: unknown) => {
     fake.calls.push(['read', input])
@@ -115,6 +119,36 @@ describe('Workbench MCP over HTTP', () => {
     expect(await names()).not.toContain('notify')
     fake.chat = { botId: 'scout', projectId: '', replyTo: undefined }
     expect(await names()).toEqual(expect.arrayContaining(['notify', 'follow_up', 'request_secret']))
+  })
+
+  it("lists list_projects only in a bot's own chats, and passes project on to list_chats", async () => {
+    const names = async (): Promise<string[]> => {
+      const list = (await (await post('workbench', { jsonrpc: '2.0', id: 17, method: 'tools/list' })).json()) as {
+        result: { tools: Array<{ name: string }> }
+      }
+      return list.result.tools.map((tool) => tool.name)
+    }
+    expect(await names()).not.toContain('list_projects')
+    fake.chat = { botId: 'scout', projectId: 'p', replyTo: undefined }
+    expect(await names()).not.toContain('list_projects')
+    fake.chat = { botId: 'scout', projectId: '', replyTo: 'accountant-chat' }
+    expect(await names()).not.toContain('list_projects')
+    fake.chat = { botId: 'scout', projectId: '', replyTo: undefined }
+    expect(await names()).toContain('list_projects')
+
+    const projects = await post('workbench', { jsonrpc: '2.0', id: 18, method: 'tools/call', params: { name: 'list_projects' } })
+    await events(projects)
+    const list = await post('workbench', {
+      jsonrpc: '2.0',
+      id: 19,
+      method: 'tools/call',
+      params: { name: 'list_chats', arguments: { project: 'Website' } }
+    })
+    await events(list)
+    expect(fake.calls).toEqual([
+      ['projects', 'chat-1'],
+      ['list', ['chat-1', 'Website']]
+    ])
   })
 
   it("lists ask_bot in project chats and a bot's own chats, not in a bot's run another chat asked", async () => {

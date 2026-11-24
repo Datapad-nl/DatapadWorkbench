@@ -8,6 +8,7 @@ import type {
   ChatSummary,
   ChatWake,
   FileMention,
+  Project,
 } from "../shared/types";
 import { join } from "path";
 import { runningAdmitted, type BuiltinAgent } from "../shared/builtinAgents";
@@ -421,9 +422,44 @@ export async function markBotRead(botId: string): Promise<Bot> {
   return bot;
 }
 
-export async function listProjectChats(from: unknown): Promise<unknown> {
+/** `list_projects`, for a bot's own chat: the user's projects. */
+export async function listUserProjects(from: unknown): Promise<unknown> {
   const caller = await callerChat(from);
-  const chats = (await listChats()).filter((chat) => sameOwner(chat, caller));
+  if (!isBotsOwn(caller)) throw new Error("list_projects is for a bot's own chats.");
+  const projects = await listProjects();
+  return { projects: projects.map((project) => ({ id: project.id, name: project.name, path: project.path })) };
+}
+
+/**
+ * The project a bot's own chat names with `project`, by name or id, or null without one. Only a bot's
+ * own chat may name a project.
+ */
+async function projectFor(caller: Chat, value: unknown): Promise<Project | null> {
+  if (value === undefined || value === null) return null;
+  if (!isBotsOwn(caller)) throw new Error("Only a bot's own chat can pass project.");
+  const wanted = typeof value === "string" ? value.trim() : "";
+  if (!wanted) throw new Error("Pass the name or id of a project.");
+  const projects = await listProjects();
+  const project =
+    projects.find((item) => item.name.trim().toLowerCase() === wanted.toLowerCase()) ??
+    projects.find((item) => item.id === wanted);
+  if (!project) {
+    const names = projects.map((item) => item.name).join(", ");
+    throw new Error(`No project is named ${wanted}. ${names ? `The projects are: ${names}.` : "There are no projects."}`);
+  }
+  return project;
+}
+
+/** Whose chats a tool sees: the caller's, or with `project` that project's ordinary chats. */
+async function ownerFor(caller: Chat, project: unknown): Promise<Pick<Chat, "projectId" | "botId">> {
+  const named = await projectFor(caller, project);
+  return named ? { projectId: named.id, botId: undefined } : caller;
+}
+
+export async function listProjectChats(from: unknown, project?: unknown): Promise<unknown> {
+  const caller = await callerChat(from);
+  const owner = await ownerFor(caller, project);
+  const chats = (await listChats()).filter((chat) => sameOwner(chat, owner));
   return {
     chats: chats.map((chat) => ({
       id: chat.id,
@@ -447,11 +483,11 @@ export async function listProjectChats(from: unknown): Promise<unknown> {
   };
 }
 
-/** A chat in the caller's project, by id or (part of) its title. */
-async function findProjectChat(caller: Chat, value: unknown): Promise<Chat> {
+/** A chat of `owner`, the caller's project or a project a bot names, by id or (part of) its title. */
+async function findProjectChat(owner: Pick<Chat, "projectId" | "botId">, value: unknown): Promise<Chat> {
   const wanted = typeof value === "string" ? value.trim() : "";
   if (!wanted) throw new Error("Pass a chat id or title.");
-  const chats = (await listChats()).filter((chat) => sameOwner(chat, caller));
+  const chats = (await listChats()).filter((chat) => sameOwner(chat, owner));
   const lower = wanted.toLowerCase();
   const match =
     chats.find((chat) => chat.id === wanted) ??
@@ -468,8 +504,10 @@ export async function readProjectChat(input: {
   from?: unknown;
   chat?: unknown;
   last?: unknown;
+  project?: unknown;
 }): Promise<{ text: string }> {
-  const chat = await findProjectChat(await callerChat(input.from), input.chat);
+  const caller = await callerChat(input.from);
+  const chat = await findProjectChat(await ownerFor(caller, input.project), input.chat);
   const last =
     typeof input.last === "number" && input.last > 0
       ? Math.min(Math.floor(input.last), 200)
@@ -490,15 +528,25 @@ export async function startProjectChat(input: {
   prompt?: unknown;
   agent?: unknown;
   title?: unknown;
+  project?: unknown;
 }): Promise<unknown> {
   const caller = await callerChat(input.from);
   const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
-  const chat = await openChat(caller, input, "New chat");
+  const project = await projectFor(caller, input.project);
+  // A bot gives a project a job: an ordinary chat of that project, as if the user opened it.
+  const chat = project
+    ? await createChat(project.id, {
+        title: typeof input.title === "string" && input.title.trim() ? clip(input.title.trim(), 80) : "New chat",
+        agent: agentOf(input.agent),
+      })
+    : await openChat(caller, input, "New chat");
+  if (project) emitChat(chat);
   if (prompt) (await send(chat.id, prompt)).done.catch(() => {});
   return {
     chatId: chat.id,
     title: chat.title,
     agent: chatAgentLabel(normalizeChatAgent(chat.agent)),
+    ...(project ? { project: project.name } : {}),
     sent: Boolean(prompt),
   };
 }
