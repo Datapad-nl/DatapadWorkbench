@@ -1,10 +1,11 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { isMediaSrc, isRemoteSrc, isVideoSrc, mediaUrl } from '../../../shared/media'
 import { NOTE_HREF } from '../noteLinks'
 import { Icon } from './icons'
 import { ZoomImage } from './ImageLightbox'
+import { mermaidSource, useMermaidSvg } from './mermaid'
 
 const PLUGINS = [remarkGfm]
 
@@ -81,8 +82,7 @@ function VisualFrame({ id, title }: Visual): React.JSX.Element {
   )
 }
 
-function CodeBlock({ children }: { children: ReactNode }): React.JSX.Element {
-  const pre = useRef<HTMLPreElement>(null)
+function CopyButton({ text }: { text: () => string }): React.JSX.Element {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
@@ -90,29 +90,58 @@ function CodeBlock({ children }: { children: ReactNode }): React.JSX.Element {
     return () => clearTimeout(timer)
   }, [copied])
   const copy = (): void => {
-    const text = (pre.current?.textContent ?? '').replace(/\n$/, '')
-    void navigator.clipboard.writeText(text).then(
+    void navigator.clipboard.writeText(text()).then(
       () => setCopied(true),
       () => undefined
     )
   }
   return (
+    <button
+      type="button"
+      title={copied ? 'Copied' : 'Copy'}
+      aria-label={copied ? 'Copied' : 'Copy code'}
+      onClick={copy}
+      className={`absolute top-2 right-2 flex h-[26px] items-center justify-center gap-1 rounded-[7px] border bg-code-block text-[11.5px] transition-colors ${
+        copied
+          ? 'border-ok px-2 text-ok'
+          : 'w-[26px] border-line text-muted hover:bg-hover hover:text-ink'
+      }`}
+    >
+      <Icon name={copied ? 'check' : 'copy'} size={13} />
+      {copied ? 'Copied' : null}
+    </button>
+  )
+}
+
+function CodeBlock({ children }: { children: ReactNode }): React.JSX.Element {
+  const pre = useRef<HTMLPreElement>(null)
+  return (
     <div className="code-block relative">
       <pre ref={pre}>{children}</pre>
-      <button
-        type="button"
-        title={copied ? 'Copied' : 'Copy'}
-        aria-label={copied ? 'Copied' : 'Copy code'}
-        onClick={copy}
-        className={`absolute top-2 right-2 flex h-[26px] items-center justify-center gap-1 rounded-[7px] border bg-code-block text-[11.5px] transition-colors ${
-          copied
-            ? 'border-ok px-2 text-ok'
-            : 'w-[26px] border-line text-muted hover:bg-hover hover:text-ink'
-        }`}
-      >
-        <Icon name={copied ? 'check' : 'copy'} size={13} />
-        {copied ? 'Copied' : null}
-      </button>
+      <CopyButton text={() => (pre.current?.textContent ?? '').replace(/\n$/, '')} />
+    </div>
+  )
+}
+
+/** A `mermaid` block as its diagram, and as plain code until the source renders. */
+function MermaidBlock({ source, children }: { source: string; children: ReactNode }): React.JSX.Element {
+  const svg = useMermaidSvg(source)
+  const box = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (!box.current || !svg) return
+    box.current.innerHTML = svg
+    // Mermaid shrinks a diagram to the column. At its own width a wide one scrolls instead.
+    const el = box.current.querySelector('svg')
+    if (el?.style.maxWidth) {
+      el.style.width = el.style.maxWidth
+      el.style.maxWidth = 'none'
+    }
+  }, [svg])
+  if (!svg) return <CodeBlock>{children}</CodeBlock>
+  return (
+    <div className="code-block relative">
+      <div ref={box} className="mb-[0.9em] overflow-x-auto rounded-lg border border-line bg-code-block px-[14px] py-3 pr-[46px]" />
+      <CopyButton text={() => source} />
     </div>
   )
 }
@@ -120,7 +149,10 @@ function CodeBlock({ children }: { children: ReactNode }): React.JSX.Element {
 const visualComponents: Components = {
   pre: ({ node, children }) => {
     const visual = visualBlock(node)
-    return visual ? <VisualFrame {...visual} /> : <CodeBlock>{children}</CodeBlock>
+    if (visual) return <VisualFrame {...visual} />
+    const mermaid = mermaidSource(node)
+    if (mermaid !== null) return <MermaidBlock source={mermaid}>{children}</MermaidBlock>
+    return <CodeBlock>{children}</CodeBlock>
   }
 }
 
