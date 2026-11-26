@@ -3,7 +3,9 @@ import {
   CLAUDE_MODELS,
   type ClaudeUsage,
   DEFAULT_MODEL,
-  GROK_REASONING_EFFORTS,
+  type GrokModelChoice,
+  grokModelChoices,
+  grokModelEfforts,
   REASONING_EFFORTS,
   type ClaudeOptions,
   reasoningEffortLabel,
@@ -38,6 +40,7 @@ import { SharedMemory } from './BotMemory'
 import { Icon } from './icons'
 import { ChannelSettings } from './ChannelSettings'
 import { McpSettings } from './McpSettings'
+import { ProviderSettings } from './ProviderSettings'
 import { ThemeEditor } from './ThemeEditor'
 import { Toggle } from './Toggle'
 
@@ -377,16 +380,34 @@ function MicPicker({
   )
 }
 
-function modelOptions(ids: string[], current: string): string[] {
-  const seen = new Set<string>()
-  const list: string[] = []
-  for (const id of [...ids, current, DEFAULT_MODEL]) {
+function modelOptions(choices: GrokModelChoice[], current: string): GrokModelChoice[] {
+  const list: GrokModelChoice[] = []
+  for (const choice of choices) if (!list.some((item) => item.value === choice.value)) list.push(choice)
+  for (const id of [current, DEFAULT_MODEL]) {
     const value = id.trim()
-    if (!value || seen.has(value)) continue
-    seen.add(value)
-    list.push(value)
+    if (!value || list.some((item) => item.value === value)) continue
+    list.push({ value, name: value, group: 'Grok', efforts: grokModelEfforts(list, value) })
   }
   return list
+}
+
+/** Grok model choices as `<option>`s, one `<optgroup>` per group: Grok, then each provider. */
+export function GrokModelOptions({ choices }: { choices: GrokModelChoice[] }): React.JSX.Element {
+  return (
+    <>
+      {[...new Set(choices.map((choice) => choice.group))].map((group) => (
+        <optgroup key={group} label={group}>
+          {choices
+            .filter((choice) => choice.group === group)
+            .map((choice) => (
+              <option key={choice.value} value={choice.value}>
+                {choice.name}
+              </option>
+            ))}
+        </optgroup>
+      ))}
+    </>
+  )
 }
 
 const languageNames = new Intl.DisplayNames(['en'], { type: 'language' })
@@ -684,6 +705,13 @@ function AgentStatus({ settings }: { settings: PublicSettings }): React.JSX.Elem
 const SETTINGS_SECTIONS = [
   { id: 'agent', label: 'Agent', group: 'Chats', description: 'The agent, model, and effort new chats start with.' },
   {
+    id: 'providers',
+    label: 'Providers',
+    group: 'Chats',
+    description: 'Inference providers whose models Grok chats can run on.',
+    testId: 'settings-providers'
+  },
+  {
     id: 'subagents',
     label: 'Subagents',
     group: 'Chats',
@@ -812,7 +840,11 @@ export function SettingsModal(): React.JSX.Element | null {
   const onClaude = settings.defaultAgent === 'claude'
   const claudeModels: ClaudeOptions['models'] =
     claudeOptions?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label }))
-  const efforts: readonly ReasoningEffort[] = onClaude ? (claudeOptions?.efforts ?? REASONING_EFFORTS) : GROK_REASONING_EFFORTS
+  const grokChoices = modelOptions(grokModelChoices(settings.grokCli.models, settings.providers), model)
+  const efforts: readonly ReasoningEffort[] = onClaude
+    ? (claudeOptions?.efforts ?? REASONING_EFFORTS)
+    : grokModelEfforts(grokChoices, model)
+  const noEffort = !onClaude && efforts.length === 0
   const current = SETTINGS_SECTIONS.find((item) => item.id === section) ?? SETTINGS_SECTIONS[0]
 
   // A toggle saves at once. A failed save shows below, like the Save button's own error.
@@ -901,23 +933,20 @@ export function SettingsModal(): React.JSX.Element | null {
                   }}
                   className={`${SETTINGS_SELECT} font-mono`}
                 >
-                  {modelOptions(settings.grokCli.models, model).map((id) => (
-                    <option key={id} value={id}>
-                      {id}
-                    </option>
-                  ))}
+                  <GrokModelOptions choices={grokChoices} />
                 </select>
               )}
             </SettingRow>
-            <SettingRow label="Effort">
+            <SettingRow label="Effort" help={noEffort ? 'This model takes no effort setting.' : undefined}>
               <select
                 data-testid="settings-effort"
                 value={effort}
+                disabled={noEffort}
                 onChange={(event) => {
                   setEffort(event.target.value as ReasoningEffort | '')
                   setSaved(false)
                 }}
-                className={SETTINGS_SELECT}
+                className={`${SETTINGS_SELECT} disabled:opacity-50`}
               >
                 <option value="">Default</option>
                 {effort && !efforts.includes(effort) ? (
@@ -1161,6 +1190,8 @@ export function SettingsModal(): React.JSX.Element | null {
         return <SharedMemory />
       case 'secrets':
         return <SecretsSection />
+      case 'providers':
+        return <ProviderSettings />
       case 'mcp':
         return <McpSettings />
       case 'channels':

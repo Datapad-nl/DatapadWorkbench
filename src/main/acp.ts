@@ -66,6 +66,7 @@ import {
 } from './store'
 import { readGrokPlan } from './sessions'
 import { envFingerprint, onSecretsChanged, secretEnv, secretScopes } from './secrets'
+import { clampEffort, onProvidersChanged, providerEnv, providerModelEfforts } from './providers'
 
 type JsonRpc = {
   jsonrpc?: string
@@ -286,8 +287,9 @@ async function botWritesSharedMemory(sessionId: string, params: PermissionParams
 }
 
 /**
- * A chat's secrets, for the environment of a Grok process. `id` is the scopes, joined by `+`, and a
- * fingerprint of the values, so changed secrets get a process of their own.
+ * A chat's secrets and the providers' keys, for the environment of a Grok process. `id` is the scopes,
+ * joined by `+`, and a fingerprint of the values and of the providers' config, so a change to either gets
+ * a process of its own.
  */
 export type ProcEnv = { id: string; vars: Record<string, string> }
 
@@ -400,9 +402,11 @@ async function spawnAgent(
 ): Promise<AgentProcess> {
   if (agent === 'claude') return startClaudeAdapter()
   const plugin = pluginDir ? ['--plugin-dir', pluginDir] : []
+  // A process without a chat's environment, such as the shared one, still gets the providers' keys.
+  const providers = secrets ? {} : (await providerEnv().catch(() => null))?.vars
   return spawn(grokBinary(), ['agent', '--no-leader', ...plugin, 'stdio'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: secrets ? { ...process.env, ...secrets.vars } : process.env
+    env: { ...process.env, ...providers, ...secrets?.vars }
   })
 }
 
@@ -413,11 +417,22 @@ async function chatSecrets(chatId?: string): Promise<{ scopes: string[]; env: Re
   return { scopes, env: await secretEnv(...scopes) }
 }
 
-/** The environment of the Grok process for a chat with secrets. Null on the shared process. */
+/** The environment of the Grok process for a chat with secrets or when there are providers. Null on the shared process. */
 export async function grokProcEnv(agent: ChatAgent, chatId?: string): Promise<ProcEnv | null> {
   if (agent !== 'grok') return null
-  const { scopes, env } = await chatSecrets(chatId)
-  return Object.keys(env).length > 0 ? { id: `${scopes.join('+')}:${envFingerprint(env)}`, vars: env } : null
+  const chat = chatId ? await getChat(chatId).catch(() => null) : null
+  return procEnvFor(chat ? secretScopes(chat) : [])
+}
+
+async function procEnvFor(scopes: string[]): Promise<ProcEnv | null> {
+  const [secrets, providers] = await Promise.all([secretEnv(...scopes), providerEnv()])
+  const vars = { ...providers.vars, ...secrets }
+  if (Object.keys(vars).length === 0 && !providers.stamp) return null
+  // Chats without secrets share one process, whatever their scopes.
+  const named = Object.keys(secrets).length > 0 ? scopes : []
+  // The stamp is no variable: only the fingerprint takes it. Secret names cannot start with #.
+  const id = `${named.join('+')}:${envFingerprint({ ...vars, '#providers': providers.stamp })}`
+  return { id, vars }
 }
 
 /** Session rules that name the chat's secrets, so the agent uses them and does not ask again. */
@@ -1250,19 +1265,31 @@ async function sessionConfig(
 async function applySessionEffort(sessionId: string, effort: ReasoningEffort | null): Promise<void> {
   const conn = connForSession(sessionId)
   if (!effort || !conn.proc || !conn.liveSessions.has(sessionId)) return
-  try {
-    await request(
-      conn,
-      'session/set_config_option',
-      conn.agent === 'claude'
-        ? { sessionId, configId: 'effort', value: effort }
-        : // Grok Build tops out at Extra high, so Claude's Max maps to it.
-          { sessionId, configId: 'reasoning_effort', value: { value: effort === 'max' ? 'xhigh' : effort } },
-      8_000
-    )
-  } catch {
-    // The active model may not advertise reasoning effort. The session still runs.
+  if (conn.agent === 'claude') {
+    try {
+      await request(conn, 'session/set_config_option', { sessionId, configId: 'effort', value: effort }, 8_000)
+    } catch {
+      // The active model may not advertise reasoning effort. The session still runs.
+    }
+    return
   }
+  const value = await grokEffort(effort, await grokModelFor(sessionChatIds.get(sessionId)).catch(() => ''))
+  if (!value) return
+  const set = (option: unknown): Promise<unknown> =>
+    request(conn, 'session/set_config_option', { sessionId, configId: 'reasoning_effort', value: option }, 8_000)
+  try {
+    await set(value)
+  } catch {
+    // Older Grok Build CLIs take the value wrapped. A model without effort control refuses both.
+    await set({ value }).catch(() => undefined)
+  }
+}
+
+/** Grok Build tops out at Extra high, so Claude's Max maps to it. A provider's model gets its nearest level, or none. */
+async function grokEffort(effort: ReasoningEffort, model: string): Promise<ReasoningEffort | null> {
+  const offered = await providerModelEfforts(model).catch(() => null)
+  if (offered) return clampEffort(effort, offered)
+  return effort === 'max' ? 'xhigh' : effort
 }
 
 export async function applyEffortToLiveSessions(effort: ReasoningEffort | null): Promise<void> {
@@ -1406,7 +1433,6 @@ export async function applyChatToLiveSession(chatId: string): Promise<void> {
   const sessionId = (await getChat(chatId).catch(() => null))?.grokSessionId
   if (!sessionId || !hasLiveSession(sessionId)) return
   const agent = connForSession(sessionId).agent
-  await applySessionEffort(sessionId, await effortFor(chatId).catch(() => null))
   // Back to the default when the chat follows Settings again: Claude Code's "default", Grok's first
   // listed model, which `grok models` marks as its default.
   const model =
@@ -1414,6 +1440,8 @@ export async function applyChatToLiveSession(chatId: string): Promise<void> {
       ? (await claudeModelFor(chatId).catch(() => '')) || 'default'
       : (await grokModelFor(chatId).catch(() => '')) || ((await getGrokCliInfo().catch(() => null))?.models[0] ?? '')
   await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, model)
+  // After the model: the effort levels a model offers differ.
+  await applySessionEffort(sessionId, await effortFor(chatId).catch(() => null))
 }
 
 /** Put the live chats of a bot on its model and effort again, after its page was saved. */
@@ -1458,18 +1486,35 @@ export async function reloadSecretSessions(scope: string): Promise<void> {
       if (chat && secretScopes(chat).includes(scope)) sessionsToReload.add(sessionId)
     })
   )
-  // An idle Grok process that holds the old values stops now; a busy one once its last session left it.
+  await stopStaleGrokProcesses((scopes) => scopes.includes(scope))
+}
+
+/** An idle Grok process that holds old values stops now; a busy one once its last session left it. */
+async function stopStaleGrokProcesses(affected: (scopes: string[]) => boolean): Promise<void> {
   for (const conn of [...conns.values()]) {
-    const id = conn.env?.id
-    const scopes = id ? id.slice(0, id.lastIndexOf(':')).split('+') : []
-    if (!scopes.includes(scope)) continue
-    const env = await secretEnv(...scopes)
-    const current = Object.keys(env).length > 0 ? `${scopes.join('+')}:${envFingerprint(env)}` : null
+    if (conn.agent !== 'grok') continue
+    const id = conn.env?.id ?? null
+    const scopes = id ? id.slice(0, id.lastIndexOf(':')).split('+').filter(Boolean) : []
+    if (!affected(scopes)) continue
+    const current = (await procEnvFor(scopes))?.id ?? null
     if (id !== current && conn.pending.size === 0) abortAgent(conn.key)
   }
 }
 
 onSecretsChanged((scope) => void reloadSecretSessions(scope))
+
+/**
+ * After a provider was saved or removed: a Grok process reads its config and keys only at start, so
+ * every live Grok chat loads its session again on its next turn, on a process with the new ones.
+ */
+async function reloadProviderSessions(): Promise<void> {
+  for (const conn of conns.values()) {
+    if (conn.agent === 'grok' && conn.proc) for (const sessionId of conn.liveSessions) sessionsToReload.add(sessionId)
+  }
+  await stopStaleGrokProcesses(() => true)
+}
+
+onProvidersChanged(() => void reloadProviderSessions())
 
 /**
  * A session that moved to another process leaves its old one. A Grok process kept for old secrets is stopped

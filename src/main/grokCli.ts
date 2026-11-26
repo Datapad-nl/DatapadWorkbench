@@ -9,6 +9,8 @@ const TTL_MS = 60_000
 let inflight: Promise<GrokCliInfo> | null = null
 let cached: GrokCliInfo | null = null
 let cachedAt = 0
+/** Counts resets, so a probe that started before one does not land as fresh. */
+let generation = 0
 
 export function grokBinary(): string {
   const homeBin = join(homedir(), '.grok', 'bin', 'grok')
@@ -25,16 +27,27 @@ export function peekGrokCliInfo(): GrokCliInfo | null {
 export async function getGrokCliInfo(): Promise<GrokCliInfo> {
   if (cached && Date.now() - cachedAt < TTL_MS) return cached
   if (inflight) return inflight
-  inflight = probe()
+  const started = generation
+  const next = probe()
     .then((info) => {
-      cached = info
-      cachedAt = Date.now()
+      if (started === generation) {
+        cached = info
+        cachedAt = Date.now()
+      }
       return info
     })
     .finally(() => {
-      inflight = null
+      if (inflight === next) inflight = null
     })
-  return inflight
+  inflight = next
+  return next
+}
+
+/** The next call probes again, as after the models in Grok's config changed. What was found stays shown till then. */
+export function resetGrokCliInfo(): void {
+  generation++
+  cachedAt = 0
+  inflight = null
 }
 
 function emptyInfo(path: string): GrokCliInfo {

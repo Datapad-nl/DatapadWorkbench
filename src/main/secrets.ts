@@ -15,7 +15,7 @@ type SecretsFile = Record<string, Record<string, string>>
 export const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/
 
 /** Variables the agent itself runs on: its login, its runtime, the shell. A secret must not replace them. */
-const RESERVED_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'XAI_', 'GROK_', 'NODE_', 'NPM_CONFIG_', 'ELECTRON_', 'DYLD_', 'LD_', 'GIT_']
+const RESERVED_PREFIXES = ['ANTHROPIC_', 'CLAUDE_', 'XAI_', 'GROK_', 'WB_PROVIDER_', 'NODE_', 'NPM_CONFIG_', 'ELECTRON_', 'DYLD_', 'LD_', 'GIT_']
 const RESERVED_NAMES = new Set([
   'PATH', 'HOME', 'SHELL', 'USER', 'LOGNAME', 'TMPDIR', 'PWD', 'LANG', 'TERM',
   // These change what a shell, interpreter or tool runs, or whom it trusts.

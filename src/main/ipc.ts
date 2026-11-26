@@ -8,11 +8,14 @@ import type {
   ChatAgent,
   ChatEvent,
   CreateProjectInput,
+  ProviderBackend,
+  SaveProviderInput,
   FileMention,
   IndexEvent,
   BotMention,
   PermissionMode,
   PlanVerdict,
+  PublicSettings,
   SaveBotSkillInput,
   ShownIn,
   UpdateBotInput,
@@ -193,6 +196,7 @@ import {
 import { speakVoiceMemo, transcribeVoiceNote } from './voiceHelper'
 import { checkForUpdates, getUpdateState, installUpdate, onUpdateState } from './updater'
 import { deleteSecret, listSecrets } from './secrets'
+import { listProviderModels, removeProvider, saveProvider } from './providers'
 import {
   getTelegramStatus,
   registerChannels,
@@ -339,6 +343,11 @@ function guardIpc(): void {
     on(channel, (event, ...args) => {
       if (isAppSender(event)) listener(event, ...args)
     })
+}
+
+function broadcastSettings(settings: PublicSettings): PublicSettings {
+  for (const window of BrowserWindow.getAllWindows()) window.webContents.send('settings:changed', settings)
+  return settings
 }
 
 export function registerIpc(show: () => boolean): void {
@@ -916,11 +925,29 @@ export function registerIpc(show: () => boolean): void {
   // Settings answer before the CLI probes finish; what they find arrives here.
   onCliInfoChange(() => {
     void getPublicSettings()
-      .then((settings) => {
-        for (const window of BrowserWindow.getAllWindows()) window.webContents.send('settings:changed', settings)
-      })
+      .then(broadcastSettings)
       .catch(() => undefined)
   })
+  // Answered as `{ value }` or `{ error }`: the preload throws the error in its own words.
+  const answer = async <T>(work: () => Promise<T>): Promise<{ value: T } | { error: string }> => {
+    try {
+      return { value: await work() }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+  // Every window's model pickers follow; `grok models` is probed again behind it.
+  ipcMain.handle('provider:save', (_event, input: SaveProviderInput) =>
+    answer(async () => broadcastSettings(await saveProvider(input)))
+  )
+  ipcMain.handle('provider:remove', (_event, id: string) =>
+    answer(async () => broadcastSettings(await removeProvider(String(id))))
+  )
+  ipcMain.handle(
+    'provider:listModels',
+    (_event, input: { id?: string; baseUrl: string; backend: ProviderBackend; apiKey?: string }) =>
+      answer(() => listProviderModels(input))
+  )
 
   ipcMain.handle('claude:options', (_event, model: string) => getClaudeOptions(model ?? ''))
   ipcMain.handle('voice:modelStatus', () => readVoiceModelStatus())

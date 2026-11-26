@@ -414,6 +414,92 @@ export function normalizeReasoningEffort(value: unknown): ReasoningEffort | null
   return null
 }
 
+/** The wire protocol of an inference provider, as Grok Build's `api_backend` names it. */
+export type ProviderBackend = 'chat_completions' | 'responses' | 'messages'
+
+export type ProviderModel = {
+  /** Model id sent to the provider, such as anthropic/claude-sonnet-4.5. */
+  id: string
+  name: string
+  contextWindow?: number
+  /** Effort levels the model takes. Empty: no effort control. */
+  efforts: ReasoningEffort[]
+}
+
+/** An inference provider whose models Grok chats can run on. Its key never leaves the main process. */
+export type Provider = {
+  /** Slug, unique, [a-z0-9-], such as openrouter. */
+  id: string
+  name: string
+  baseUrl: string
+  backend: ProviderBackend
+  hasKey: boolean
+  keyPreview: string | null
+  models: ProviderModel[]
+}
+
+export type SaveProviderInput = {
+  /** Missing for a new provider: the id is made from the name. */
+  id?: string
+  name: string
+  baseUrl: string
+  backend: ProviderBackend
+  /** undefined keeps the stored key; '' clears it. */
+  apiKey?: string
+  models: ProviderModel[]
+}
+
+export const PROVIDER_PRESETS: Array<{ name: string; baseUrl: string; backend: ProviderBackend; needsKey: boolean }> = [
+  { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', backend: 'chat_completions', needsKey: true },
+  { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', backend: 'responses', needsKey: true },
+  { name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', backend: 'messages', needsKey: true },
+  { name: 'Ollama', baseUrl: 'http://localhost:11434/v1', backend: 'chat_completions', needsKey: false }
+]
+
+/** Lower case, with every run of other characters one dash. */
+export function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+}
+
+/** The key a provider's model has in Grok's catalog and in Chat.model / Bot.model: wb-<providerId>-<slug of model id>. */
+export function providerModelKey(providerId: string, modelId: string): string {
+  return `wb-${providerId}-${slugify(modelId)}`
+}
+
+export type GrokModelChoice = {
+  value: string
+  name: string
+  /** 'Grok' or the provider's name. */
+  group: string
+  efforts: ReasoningEffort[]
+}
+
+/** Grok's own models (ids from `grok models` that do not start with wb-) with GROK_REASONING_EFFORTS, then every provider's models. */
+export function grokModelChoices(grokModels: string[], providers: Provider[]): GrokModelChoice[] {
+  const own = grokModels
+    .filter((value) => !value.startsWith('wb-'))
+    .map((value) => ({ value, name: value, group: 'Grok', efforts: GROK_REASONING_EFFORTS }))
+  const added = providers.flatMap((provider) =>
+    provider.models.map((model) => ({
+      value: providerModelKey(provider.id, model.id),
+      name: model.name,
+      group: provider.name,
+      efforts: model.efforts
+    }))
+  )
+  return [...own, ...added]
+}
+
+/** The effort levels a Grok model value takes: its choice's; none for a provider model no longer listed; else Grok's own. */
+export function grokModelEfforts(choices: GrokModelChoice[], value: string): ReasoningEffort[] {
+  const choice = choices.find((item) => item.value === value)
+  if (choice) return choice.efforts
+  return value.startsWith('wb-') ? [] : GROK_REASONING_EFFORTS
+}
+
 export function reasoningEffortLabel(effort: ReasoningEffort): string {
   if (effort === 'xhigh') return 'Extra high'
   if (effort === 'max') return 'Max'
@@ -457,6 +543,8 @@ export type PublicSettings = {
   grokCli: GrokCliInfo
   /** The first CLI probe is still running, so `grokCli` and `claude` are placeholders. */
   cliChecking: boolean
+  /** Inference providers whose models Grok chats can run on. */
+  providers: Provider[]
 }
 
 export function formatGrokCli(cli: GrokCliInfo): string {

@@ -12,12 +12,14 @@ import {
   normalizeChatAgent,
   normalizeReasoningEffort,
   normalizeVoiceSettings,
+  providerModelKey,
   type Attachment,
   type Bot,
   type Chat,
   type ChatAgent,
   type ChatSummary,
   type Project,
+  type Provider,
   type PublicSettings,
   type ReasoningEffort,
   type UpdateProjectInput,
@@ -62,7 +64,12 @@ type SettingsFile = {
   voice: VoiceSettings
   /** MCP servers every chat gets, next to the built-in browser. */
   mcpServers?: McpServers
+  /** Inference providers, each key sealed as `apiKey` is. */
+  providers?: StoredProvider[]
 }
+
+/** A provider as the settings file keeps it. Loaded, `apiKey` is the opened key. */
+export type StoredProvider = Omit<Provider, 'hasKey' | 'keyPreview'> & { apiKey: string; apiKeySealed?: string }
 
 type StoreData = {
   projects: Project[]
@@ -181,17 +188,19 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFileAtomic(path, JSON.stringify(value, null, 2))
 }
 
-/** Writes settings with the API key encrypted when the keychain allows, so it is not plain text on disk. */
+/** Writes settings with the API keys encrypted when the keychain allows, so they are not plain text on disk. */
 async function writeSettings(file: SettingsFile): Promise<void> {
-  const key = file.apiKey.trim()
-  if (key && safeStorage.isEncryptionAvailable()) {
-    file = { ...file, apiKey: '', apiKeySealed: safeStorage.encryptString(key).toString('base64') }
-  }
-  await writeJson(settingsPath(), file)
+  await writeJson(settingsPath(), { ...sealKey(file), providers: file.providers?.map(sealKey) })
+}
+
+function sealKey<T extends { apiKey: string; apiKeySealed?: string }>(item: T): T {
+  const key = item.apiKey.trim()
+  if (!key || !safeStorage.isEncryptionAvailable()) return item
+  return { ...item, apiKey: '', apiKeySealed: safeStorage.encryptString(key).toString('base64') }
 }
 
 /** A sealed key that no longer decrypts reads as no key, and stays on disk in case the keychain comes back. */
-function openApiKey(file: Partial<SettingsFile>): string {
+function openApiKey(file: { apiKey?: string; apiKeySealed?: string }): string {
   if (!file.apiKeySealed) return file.apiKey ?? ''
   try {
     return safeStorage.decryptString(Buffer.from(file.apiKeySealed, 'base64'))
@@ -215,8 +224,11 @@ export async function ensureStore(): Promise<void> {
       themeId: DEFAULT_THEME_ID,
       voice: DEFAULT_VOICE
     } satisfies SettingsFile)
-  } else if (settings.apiKey?.trim() && safeStorage.isEncryptionAvailable()) {
-    // A key saved before keys were encrypted is sealed now.
+  } else if (
+    (settings.apiKey?.trim() || settings.providers?.some((provider) => provider.apiKey?.trim())) &&
+    safeStorage.isEncryptionAvailable()
+  ) {
+    // A key saved before keys were encrypted, or while the keychain was not available, is sealed now.
     await withLock(settingsPath(), async () => writeSettings(await loadSettingsFile()))
   }
   await mkdir(join(dataDir(), 'themes'), { recursive: true })
@@ -329,8 +341,53 @@ async function loadSettingsFile(): Promise<SettingsFile> {
     effort: normalizeReasoningEffort(file.effort) ?? '',
     themeId: file.themeId || DEFAULT_THEME_ID,
     voice: normalizeVoiceSettings(file.voice),
-    mcpServers: readMcpServers(file.mcpServers)
+    mcpServers: readMcpServers(file.mcpServers),
+    providers: readProviders(file.providers)
   }
+}
+
+/** A hand-edited provider without an id or address is left out. */
+function readProviders(value: unknown): StoredProvider[] {
+  if (!Array.isArray(value)) return []
+  return (value as Array<Partial<StoredProvider>>).flatMap((item) =>
+    item && typeof item.id === 'string' && typeof item.baseUrl === 'string'
+      ? [
+          {
+            id: item.id,
+            name: typeof item.name === 'string' ? item.name : item.id,
+            baseUrl: item.baseUrl,
+            backend: item.backend === 'responses' || item.backend === 'messages' ? item.backend : 'chat_completions',
+            apiKey: openApiKey(item),
+            apiKeySealed: item.apiKeySealed,
+            models: Array.isArray(item.models) ? item.models : []
+          }
+        ]
+      : []
+  )
+}
+
+export async function getProviders(): Promise<StoredProvider[]> {
+  return (await loadSettingsFile()).providers ?? []
+}
+
+/** Changes the provider list under the settings lock, and returns what was saved. */
+export async function updateProviders(
+  change: (providers: StoredProvider[]) => StoredProvider[]
+): Promise<StoredProvider[]> {
+  return withLock(settingsPath(), async () => {
+    const current = await loadSettingsFile()
+    const providers = change(current.providers ?? [])
+    await writeSettings({ ...current, providers })
+    return providers
+  })
+}
+
+function publicProviders(providers: StoredProvider[]): Provider[] {
+  return providers.map(({ apiKey, apiKeySealed: _sealed, ...provider }) => ({
+    ...provider,
+    hasKey: Boolean(apiKey.trim()),
+    keyPreview: apiKey.trim() ? maskKey(apiKey.trim()) : null
+  }))
 }
 
 /** A hand-edited settings file with a broken server list loads with none, instead of failing. */
@@ -421,7 +478,8 @@ export async function getPublicSettings(): Promise<PublicSettings> {
     subagentModel: file.subagentModel ?? '',
     maxSubagents: normalizeMaxSubagents(file.maxSubagents),
     conciseReplies: file.conciseReplies === true,
-    cliChecking
+    cliChecking,
+    providers: publicProviders(file.providers ?? [])
   }
   if (signedIn) {
     return {
@@ -512,11 +570,24 @@ export async function claudeModelFor(chatId: string | undefined): Promise<string
   return bot?.model || chat?.model || (chat?.conductor && file.orchestratorModel) || file.claudeModel || ''
 }
 
-/** The model a Grok chat runs on: its bot's, its own, or '' for the CLI's default. */
+/**
+ * The model a Grok chat runs on: its bot's, its own, else the one picked in Settings, or '' for the CLI's
+ * default. Settings holds DEFAULT_MODEL until the user picks one, so that one, or a model that is gone, is
+ * the CLI's default too.
+ */
 export async function grokModelFor(chatId: string | undefined): Promise<string> {
   const chat = chatId ? await readChat(chatId) : null
   const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
-  return (bot?.agent === 'grok' && bot.model) || chat?.model || ''
+  const own = (bot?.agent === 'grok' && bot.model) || chat?.model
+  if (own) return own
+  const file = await loadSettingsFile()
+  if (!file.model || file.model === DEFAULT_MODEL) return ''
+  const added = (file.providers ?? []).flatMap((provider) =>
+    provider.models.map((model) => providerModelKey(provider.id, model.id))
+  )
+  if (added.includes(file.model)) return file.model
+  const grokModels = (peekGrokCliInfo() ?? (await getGrokCliInfo().catch(() => null)))?.models ?? []
+  return !file.model.startsWith('wb-') && grokModels.includes(file.model) ? file.model : ''
 }
 
 /** The effort a chat runs at: its bot's, its own, else the setting. */
@@ -579,7 +650,8 @@ export async function updateSettings(input: {
         input.effort !== undefined ? (normalizeReasoningEffort(input.effort) ?? '') : current.effort,
       themeId: current.themeId || DEFAULT_THEME_ID,
       voice: normalizeVoiceSettings({ ...current.voice, ...input.voice }),
-      mcpServers: current.mcpServers
+      mcpServers: current.mcpServers,
+      providers: current.providers
     })
   })
   return getPublicSettings()

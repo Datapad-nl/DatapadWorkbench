@@ -22,6 +22,7 @@ import type {
   UserQuestionRequest,
   AgentCommand,
   ClaudeOptions,
+  Provider,
   PublicSettings,
   ReasoningEffort
 } from '../../../shared/types'
@@ -41,10 +42,11 @@ import { botMentionParts, mentionedBots, splitBotMentions } from '../../../share
 import { plainReply } from '../../../shared/steps'
 import {
   CLAUDE_MODELS,
-  GROK_REASONING_EFFORTS,
   REASONING_EFFORTS,
   chatAgentLabel,
   formatGrokCli,
+  grokModelChoices,
+  grokModelEfforts,
   nextPermissionMode,
   normalizeChatAgent,
   normalizePermissionMode,
@@ -551,6 +553,8 @@ export function ChatPane({
                 defaultModel={chatDefaultModel(activeChat, settings)}
                 defaultEffort={settings?.effort ?? null}
                 grokModels={settings?.grokCli.models ?? []}
+                providers={settings?.providers ?? []}
+                grokDefaultModel={settings?.model ?? ''}
                 conductor={Boolean(activeChat.conductor)}
                 locked={activeChat.botId ? "Set on the bot's Settings tab" : null}
                 onModel={(model) => void setChatModel(activeChat.id, { model })}
@@ -1898,7 +1902,7 @@ function ModeToggle({
   )
 }
 
-type ModelChoice = { value: string; name: string; description?: string }
+type ModelChoice = { value: string; name: string; description?: string; group?: string }
 
 /**
  * The chat's agent, model and effort. A model or effort change goes to the live session, which keeps
@@ -1915,6 +1919,8 @@ function ModelPicker({
   defaultModel,
   defaultEffort,
   grokModels,
+  providers,
+  grokDefaultModel,
   conductor,
   locked,
   onModel,
@@ -1932,6 +1938,9 @@ function ModelPicker({
   defaultModel: string
   defaultEffort: ReasoningEffort | null
   grokModels: string[]
+  providers: Provider[]
+  /** The Grok model Settings sets, which an empty Grok model follows. */
+  grokDefaultModel: string
   conductor: boolean
   /** A bot's chat: its page sets all three. */
   locked: string | null
@@ -1971,18 +1980,24 @@ function ModelPicker({
     }
   }, [open])
 
+  const grokChoices = grokModelChoices(grokModels, providers)
   const models: ModelChoice[] =
     agent === 'claude'
       ? (claude?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label })))
-      : [{ value: '', name: 'Default' }, ...grokModels.map((id) => ({ value: id, name: id }))]
+      : [{ value: '', name: 'Default' }, ...grokChoices]
   const efforts: readonly ReasoningEffort[] =
-    agent === 'claude' ? (claude?.efforts.length ? claude.efforts : REASONING_EFFORTS) : GROK_REASONING_EFFORTS
+    agent === 'claude'
+      ? claude?.efforts.length
+        ? claude.efforts
+        : REASONING_EFFORTS
+      : grokModelEfforts(grokChoices, model || grokDefaultModel)
   const modelName = (value: string): string =>
     models.find((option) => option.value === value)?.name.replace(/ \(.*\)$/, '') ||
     CLAUDE_MODELS.find((option) => option.value === value)?.label ||
     value ||
     'Default'
-  const shownEffort = effort || defaultEffort
+  // A model that takes no effort shows none.
+  const shownEffort = efforts.length ? effort || defaultEffort : null
   const warning = conductor ? weakOrchestrator(current, shownEffort) : null
   // The glyph names the agent.
   const label = [modelName(current), shownEffort ? reasoningEffortLabel(shownEffort) : null]
@@ -2068,58 +2083,68 @@ function ModelPicker({
             </p>
           )}
           <div className="px-2 pb-1 pt-3 text-[11px] uppercase tracking-wide text-faint">Model</div>
-          {models.map((option) => {
+          {models.map((option, index) => {
             const selected = option.value === model || (!model && option.value === '')
             return (
-              <button
-                key={option.value || 'default'}
-                type="button"
-                role="menuitemradio"
-                aria-checked={selected}
-                title={option.description}
-                className={item(selected)}
-                onClick={() => onModel(option.value)}
-              >
-                <span className="w-3 shrink-0">{selected && <Icon name="check" size={11} />}</span>
-                <span className="truncate">{option.name}</span>
-                {conductor && weakOrchestrator(option.value || defaultModel) && (
-                  <span className="ml-auto shrink-0 text-[11px] text-faint">weak conductor</span>
+              <Fragment key={option.value || 'default'}>
+                {option.group && option.group !== models[index - 1]?.group && (
+                  <div className="px-2 pb-0.5 pt-1.5 text-[11px] text-faint">{option.group}</div>
                 )}
-              </button>
+                <button
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  title={option.description}
+                  className={item(selected)}
+                  onClick={() => onModel(option.value)}
+                >
+                  <span className="w-3 shrink-0">{selected && <Icon name="check" size={11} />}</span>
+                  <span className="truncate">{option.name}</span>
+                  {conductor && weakOrchestrator(option.value || defaultModel) && (
+                    <span className="ml-auto shrink-0 text-[11px] text-faint">weak conductor</span>
+                  )}
+                </button>
+              </Fragment>
             )
           })}
           <div className="px-2 pb-1 pt-3 text-[11px] uppercase tracking-wide text-faint">Effort</div>
-          <div className="flex flex-wrap gap-0.5 rounded-[8px] bg-surface p-0.5">
-            {defaultEffort && (
-              <button
-                type="button"
-                aria-pressed={!effort}
-                title={`Follow Settings: ${reasoningEffortLabel(defaultEffort)}`}
-                className={`h-6 flex-1 whitespace-nowrap rounded-[6px] px-1.5 text-[12px] ${
-                  !effort ? pressed : 'text-muted hover:text-ink'
-                }`}
-                onClick={() => onEffort('')}
-              >
-                Settings
-              </button>
-            )}
-            {efforts.map((id) => {
-              const on = effort === id || (!defaultEffort && shownEffort === id)
-              return (
+          {efforts.length === 0 ? (
+            <p data-testid="model-picker-no-effort" className="px-2 text-[11.5px] leading-4 text-faint">
+              This model takes no effort setting.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-0.5 rounded-[8px] bg-surface p-0.5">
+              {defaultEffort && (
                 <button
-                  key={id}
                   type="button"
-                  aria-pressed={on}
+                  aria-pressed={!effort}
+                  title={`Follow Settings: ${reasoningEffortLabel(defaultEffort)}`}
                   className={`h-6 flex-1 whitespace-nowrap rounded-[6px] px-1.5 text-[12px] ${
-                    on ? pressed : 'text-muted hover:text-ink'
+                    !effort ? pressed : 'text-muted hover:text-ink'
                   }`}
-                  onClick={() => onEffort(id)}
+                  onClick={() => onEffort('')}
                 >
-                  {reasoningEffortLabel(id)}
+                  Settings
                 </button>
-              )
-            })}
-          </div>
+              )}
+              {efforts.map((id) => {
+                const on = effort === id || (!defaultEffort && shownEffort === id)
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={on}
+                    className={`h-6 flex-1 whitespace-nowrap rounded-[6px] px-1.5 text-[12px] ${
+                      on ? pressed : 'text-muted hover:text-ink'
+                    }`}
+                    onClick={() => onEffort(id)}
+                  >
+                    {reasoningEffortLabel(id)}
+                  </button>
+                )
+              })}
+            </div>
+          )}
           {started && (
             <p className="px-2 pt-2 text-[11.5px] leading-4 text-faint">
               A new model or effort takes over from the next reply, with the conversation kept.

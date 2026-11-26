@@ -36,8 +36,11 @@ import type {
   KnowledgeSnapshot,
   PermissionMode,
   PlanVerdict,
+  ProviderBackend,
+  ProviderModel,
   PublicSettings,
   SaveBotSkillInput,
+  SaveProviderInput,
   SecretScope,
   SkillListing,
   SkillPreview,
@@ -50,6 +53,13 @@ import type {
   VoiceModelStatus,
   VoiceSettings
 } from '../shared/types'
+
+/** A main-process error arrives as `{ error }`, so it is thrown here with its own words. */
+async function unwrap<T>(answer: Promise<{ value: T } | { error: string }>): Promise<T> {
+  const result = await answer
+  if ('error' in result) throw new Error(result.error)
+  return result.value
+}
 
 const api = {
   getWorkspace: () => ipcRenderer.invoke('workspace:get'),
@@ -177,6 +187,16 @@ const api = {
     conciseReplies?: boolean
   }) =>
     ipcRenderer.invoke('settings:set', input),
+  saveProvider: (input: SaveProviderInput): Promise<PublicSettings> =>
+    unwrap(ipcRenderer.invoke('provider:save', input)),
+  removeProvider: (id: string): Promise<PublicSettings> => unwrap(ipcRenderer.invoke('provider:remove', id)),
+  /** The provider's models. With `id` and no `apiKey` it uses the stored key. */
+  listProviderModels: (input: {
+    id?: string
+    baseUrl: string
+    backend: ProviderBackend
+    apiKey?: string
+  }): Promise<ProviderModel[]> => unwrap(ipcRenderer.invoke('provider:listModels', input)),
   getVoiceModelStatus: () => ipcRenderer.invoke('voice:modelStatus') as Promise<VoiceModelStatus>,
   ensureVoiceModel: () => ipcRenderer.invoke('voice:ensureModel') as Promise<VoiceModelStatus>,
   ensureMic: () => ipcRenderer.invoke('voice:ensureMic') as Promise<boolean>,

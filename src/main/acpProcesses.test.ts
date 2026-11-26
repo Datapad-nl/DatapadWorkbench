@@ -42,7 +42,9 @@ const fake = vi.hoisted(() => ({
   projects: {} as Record<string, string>,
   /** Saved secrets by scope: a project id or `bot:<id>`. */
   secrets: {} as Record<string, Record<string, string>>,
-  secretListeners: [] as Array<(scope: string) => void>
+  secretListeners: [] as Array<(scope: string) => void>,
+  /** The efforts each provider model offers, by model key. */
+  providerEfforts: {} as Record<string, string[]>
 }))
 
 /** An ACP agent that answers every request and gives each session/new a fresh id. */
@@ -148,6 +150,13 @@ vi.mock('./secrets', () => ({
   secretScopes: (chat: { projectId: string; botId?: string }) =>
     [chat.projectId, chat.botId ? `bot:${chat.botId}` : ''].filter(Boolean)
 }))
+// No inference providers: Grok runs on its own models.
+vi.mock('./providers', async (importOriginal) => ({
+  clampEffort: (await importOriginal<typeof import('./providers')>()).clampEffort,
+  onProvidersChanged: () => () => {},
+  providerEnv: async () => ({ vars: {}, stamp: '' }),
+  providerModelEfforts: async (model: string) => fake.providerEfforts[model] ?? null
+}))
 
 import {
   abortAgent,
@@ -180,6 +189,7 @@ afterEach(() => {
   fake.conciseReplies = false
   fake.projects = {}
   fake.secrets = {}
+  fake.providerEfforts = {}
   fake.steerOutcome = 'injected'
   fake.hold.clear()
 })
@@ -238,10 +248,24 @@ describe('agent processes for bots', () => {
     expect(configCalls(shared)).toEqual([])
     expect(configCalls(own)).toEqual([
       ['model', 'grok-4.6'],
-      ['reasoning_effort', { value: 'low' }]
+      ['reasoning_effort', 'low']
     ])
     // The model comes from claudeModelFor, which reads the bot itself.
     expect(configCalls(claude)).toEqual([['effort', 'high']])
+  })
+
+  it('gives a provider model the nearest effort it offers, and none when it offers none', async () => {
+    fake.providerEfforts = { 'wb-or-sonnet': ['low', 'medium', 'high'], 'wb-or-llama': [] }
+    fake.bots['chat-5'] = { agent: 'grok', model: 'wb-or-sonnet', effort: 'max' }
+    fake.bots['chat-6'] = { id: 'other', agent: 'grok', model: 'wb-or-llama', effort: 'high' }
+    await newSession('/project', null, 'grok', 'chat-5', BOT)
+    await newSession('/project', null, 'grok', 'chat-6', BOT)
+    const calls = fake.procs.flatMap(configCalls)
+    expect(calls).toEqual([
+      ['model', 'wb-or-sonnet'],
+      ['reasoning_effort', 'high'],
+      ['model', 'wb-or-llama']
+    ])
   })
 
   it('passes a bot folder to Claude Code as a plugin on its shared process', async () => {

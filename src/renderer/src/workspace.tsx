@@ -28,6 +28,7 @@ import type {
   UserQuestionRequest,
   ProjectIndex,
   PublicSettings,
+  SaveProviderInput,
   UpdateProjectInput,
   VoiceSettings,
   WorkspaceSnapshot
@@ -196,6 +197,8 @@ type WorkspaceContextValue = {
     maxSubagents?: number
     conciseReplies?: boolean
   }) => Promise<void>
+  saveProvider: (input: SaveProviderInput) => Promise<void>
+  removeProvider: (id: string) => Promise<void>
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null)
@@ -517,12 +520,21 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
 
   useEffect(() => window.workbench.onGitSummaries(setGitSummaries), [])
 
-  // The CLI probes finish after the first snapshot. Only their part of the push is news.
+  // The CLI probes finish after the first snapshot, and a provider save or removal pushes too.
+  // Only those parts of the push are news.
   useEffect(
     () =>
       window.workbench.onSettingsChanged((next) =>
         setSettings((current) =>
-          current ? { ...current, grokCli: next.grokCli, claude: next.claude, cliChecking: next.cliChecking } : next
+          current
+            ? {
+                ...current,
+                grokCli: next.grokCli,
+                claude: next.claude,
+                cliChecking: next.cliChecking,
+                providers: next.providers
+              }
+            : next
         )
       ),
     []
@@ -1107,6 +1119,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     []
   )
 
+  const saveProvider = useCallback(async (input: SaveProviderInput) => {
+    const next = await window.workbench.saveProvider(input)
+    setSettings((current) => keepCliInfo(current, next))
+  }, [])
+
+  const removeProvider = useCallback(async (id: string) => {
+    const next = await window.workbench.removeProvider(id)
+    setSettings((current) => keepCliInfo(current, next))
+  }, [])
+
   const value = useMemo<WorkspaceContextValue>(
     () => ({
       projects,
@@ -1164,7 +1186,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       rewindChat,
       permissions,
       questions,
-      saveSettings
+      saveSettings,
+      saveProvider,
+      removeProvider
     }),
     [
       projects,
@@ -1219,7 +1243,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
       rewindChat,
       permissions,
       questions,
-      saveSettings
+      saveSettings,
+      saveProvider,
+      removeProvider
     ]
   )
 

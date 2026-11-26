@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
   CLAUDE_MODELS,
-  GROK_REASONING_EFFORTS,
   REASONING_EFFORTS,
+  grokModelChoices,
+  grokModelEfforts,
   normalizeChatAgent,
   normalizeReasoningEffort,
   reasoningEffortLabel,
@@ -21,6 +22,7 @@ import { BotSchedules } from './BotSchedules'
 import { BotSkills } from './BotSkills'
 import { useWorkspace, type BotTab } from '../workspace'
 import { IconButton } from './icons'
+import { GrokModelOptions } from './Modals'
 import { Toggle } from './Toggle'
 
 function errorText(error: unknown, fallback: string): string {
@@ -153,17 +155,15 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
     }
   }, [onClaude, draft.model])
 
-  const models: Array<{ value: string; label: string }> =
-    onClaude
-      ? (claudeOptions?.models.map((option) => ({ value: option.value, label: option.name })) ?? CLAUDE_MODELS)
-      : [
-          { value: '', label: 'Default' },
-          ...(settings?.grokCli.models ?? []).map((model) => ({ value: model, label: model }))
-        ]
+  const grokChoices = grokModelChoices(settings?.grokCli.models ?? [], settings?.providers ?? [])
+  const models: Array<{ value: string; label: string }> = onClaude
+    ? (claudeOptions?.models.map((option) => ({ value: option.value, label: option.name })) ?? CLAUDE_MODELS)
+    : [{ value: '', label: 'Default' }, ...grokChoices.map((choice) => ({ value: choice.value, label: choice.name }))]
   const modelKnown = models.some((option) => option.value === draft.model)
   const efforts: readonly ReasoningEffort[] = onClaude
     ? (claudeOptions?.efforts ?? REASONING_EFFORTS)
-    : GROK_REASONING_EFFORTS
+    : grokModelEfforts(grokChoices, draft.model || (settings?.model ?? ''))
+  const noEffort = !onClaude && efforts.length === 0
   const draftEffort = normalizeReasoningEffort(draft.effort)
   const settingEffort = settings?.effort ? `, ${reasoningEffortLabel(settings.effort)}` : ''
 
@@ -341,11 +341,18 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
                 className={field}
               >
                 {modelKnown ? null : <option value={draft.model}>{draft.model}</option>}
-                {models.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
+                {onClaude ? (
+                  models.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value="">Default</option>
+                    <GrokModelOptions choices={grokChoices} />
+                  </>
+                )}
               </select>
             </label>
             <label className="block text-[12px] text-muted">
@@ -353,8 +360,9 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
               <select
                 data-testid="bot-effort"
                 value={draft.effort}
+                disabled={noEffort}
                 onChange={(event) => edit({ effort: event.target.value })}
-                className={field}
+                className={`${field} disabled:opacity-50`}
               >
                 <option value="">{`As in Settings${settingEffort}`}</option>
                 {draftEffort && !efforts.includes(draftEffort) && (
@@ -366,6 +374,7 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
                   </option>
                 ))}
               </select>
+              {noEffort && <span className="mt-1 block text-[11px] text-faint">This model takes no effort setting.</span>}
             </label>
           </div>
 
