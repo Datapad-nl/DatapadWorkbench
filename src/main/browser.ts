@@ -4,6 +4,7 @@ import { join } from 'path'
 import type { BrowserAnnotationHit, BrowserBounds, BrowserState, BrowserTab } from '../shared/types'
 import { ANNOTATE_CANCEL, ANNOTATE_CLEANUP, ANNOTATE_PICKER } from './annotatePicker'
 import { addTab, closeTab, emptyTabList, parseSavedTabs, selectTab, type SavedTab, type TabList } from './browserTabs'
+import { allowedNavigation, pageTitle, sameAddress, sanitizeUrl } from './browserUrl'
 import { id as newId } from './ids'
 
 const PARTITION = 'persist:workbench-browser'
@@ -41,22 +42,11 @@ function persistPath(): string {
   return join(app.getPath('userData'), 'workbench', 'browser.json')
 }
 
-export function sanitizeUrl(input: string): string | null {
-  const trimmed = input.trim()
-  if (!trimmed) return null
-  const raw = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) ? trimmed : `https://${trimmed}`
-  try {
-    const parsed = new URL(raw)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
-    return parsed.href
-  } catch {
-    return null
-  }
-}
+export { sanitizeUrl, sanitizeWebUrl } from './browserUrl'
 
 let permissionsLocked = false
 
-function guestSession(): Electron.Session {
+export function guestSession(): Electron.Session {
   const ses = session.fromPartition(PARTITION)
   // Pages in the pane are untrusted, so they get no camera, microphone, location, clipboard or the like.
   if (!permissionsLocked) {
@@ -183,7 +173,7 @@ async function savePersisted(scope: string, tabId: string, url: string): Promise
   if (!tab || !clean) return
   tab.url = clean
   const wc = liveContents(tabId)
-  if (wc) tab.title = wc.getTitle()
+  if (wc) tab.title = pageTitle(wc.getURL(), wc.getTitle())
   await writePersisted()
 }
 
@@ -276,17 +266,17 @@ function wireContents(scope: string, tabId: string, page: Page): void {
   }
 
   wc.setWindowOpenHandler((details) => {
-    const url = sanitizeUrl(details.url)
+    const url = allowedNavigation(wc.getURL(), details.url)
     if (url) void navigateBrowser(scope, url)
     return { action: 'deny' }
   })
 
   wc.on('will-navigate', (event, url) => {
-    if (!sanitizeUrl(url)) event.preventDefault()
+    if (!allowedNavigation(wc.getURL(), url)) event.preventDefault()
   })
 
   wc.on('will-redirect', (event, url) => {
-    if (!sanitizeUrl(url)) event.preventDefault()
+    if (!allowedNavigation(wc.getURL(), url)) event.preventDefault()
   })
 
   const onChange = (): void => {
@@ -312,7 +302,7 @@ function wireContents(scope: string, tabId: string, page: Page): void {
   wc.on('did-navigate-in-page', onChange)
   wc.on('page-title-updated', () => {
     const tab = findTab(scope, tabId)
-    if (tab) tab.title = wc.getTitle()
+    if (tab) tab.title = pageTitle(wc.getURL(), wc.getTitle())
     changed()
   })
   wc.on('did-start-loading', () => {
@@ -424,7 +414,12 @@ export function attachBrowser(window: BrowserWindow): void {
 function describeTab(tab: SavedTab): BrowserTab {
   const wc = liveContents(tab.id)
   if (!wc) return { id: tab.id, url: tab.url, title: tab.title, loading: false }
-  return { id: tab.id, url: sanitizeUrl(wc.getURL()) ?? tab.url, title: wc.getTitle(), loading: wc.isLoading() }
+  return {
+    id: tab.id,
+    url: sanitizeUrl(wc.getURL()) ?? tab.url,
+    title: pageTitle(wc.getURL(), wc.getTitle()),
+    loading: wc.isLoading()
+  }
 }
 
 export function getBrowserState(scope: string | null): BrowserState {
@@ -434,7 +429,7 @@ export function getBrowserState(scope: string | null): BrowserState {
   const url = wc?.getURL() ?? ''
   return {
     url: sanitizeUrl(url) ?? tab?.url ?? '',
-    title: wc ? wc.getTitle() : (tab?.title ?? ''),
+    title: wc ? pageTitle(url, wc.getTitle()) : (tab?.title ?? ''),
     canGoBack: wc?.navigationHistory.canGoBack() ?? false,
     canGoForward: wc?.navigationHistory.canGoForward() ?? false,
     loading: wc?.isLoading() ?? false,
@@ -566,6 +561,19 @@ export async function navigateBrowser(scope: string | null, input: string): Prom
     // aborted or superseded navigations reject
   }
   return getBrowserState(scope)
+}
+
+/**
+ * Shows `url` in the scope: in the tab that already has it, loaded again since the file may have changed,
+ * else in the active tab when it is empty, else in a new tab.
+ */
+export async function openInBrowserTab(scope: string | null, url: string): Promise<boolean> {
+  if (!scope) return false
+  const existing = tabList(scope).tabs.find((tab) => tab.url && sameAddress(tab.url, url))
+  if (existing) selectBrowserTab(scope, existing.id)
+  else if (activeTab(scope).url) await newBrowserTab(scope)
+  await navigateBrowser(scope, url)
+  return true
 }
 
 export function goBack(scope: string | null): BrowserState {

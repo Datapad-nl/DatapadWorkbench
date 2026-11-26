@@ -61,6 +61,7 @@ import { AgentReply } from './AgentReply'
 import { AgentGlyph, Icon, IconButton, type IconName } from './icons'
 import { ZoomImage } from './ImageLightbox'
 import { Markdown } from './Markdown'
+import { recheckChatFiles } from '../fileLinks'
 import { ProjectOrientation } from './OrientationCard'
 import { SubagentsPanel } from './SubagentsPanel'
 import wordmark from '../assets/wordmark.png'
@@ -1212,6 +1213,13 @@ function MessageList({
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
   }, [chat.messages, plan, progress, streaming])
+
+  // A turn often writes the files its reply named before they existed.
+  const wasStreaming = useRef(streaming)
+  useEffect(() => {
+    if (wasStreaming.current && !streaming) recheckChatFiles(chatId)
+    wasStreaming.current = streaming
+  }, [chatId, streaming])
 
   const empty =
     chat.messages.length === 0 &&

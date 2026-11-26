@@ -33,6 +33,7 @@ import {
   unreadableProjectsMovedTo
 } from './store'
 import { applyWindowChrome, getThemeState } from './themes'
+import { attachFileViewProtocol } from './fileView'
 import { attachMediaProtocol } from './media'
 import { attachVisualProtocol } from './visuals'
 import { attachVoiceProtocol, ensureMicAccess, getMicAccess, registerVoiceScheme } from './voice'
@@ -208,6 +209,7 @@ app.whenReady().then(async () => {
   attachVoiceProtocol()
   attachMediaProtocol()
   attachVisualProtocol()
+  attachFileViewProtocol()
   void ensureMicAccess()
   await prepareBrowser()
   // The app still opens if the browser tools' server can't start. The next chat to start tries again.

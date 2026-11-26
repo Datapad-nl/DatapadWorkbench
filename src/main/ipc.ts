@@ -63,7 +63,7 @@ import {
   navigateBrowser,
   newBrowserTab,
   reloadBrowser,
-  sanitizeUrl,
+  sanitizeWebUrl,
   selectBrowserTab,
   setBrowserBounds,
   setBrowserScope,
@@ -72,6 +72,7 @@ import {
   stopBrowser,
   toggleBrowserDevTools
 } from './browser'
+import { chatFilesResolvable, openChatFile } from './fileView'
 import { openChatMedia } from './media'
 import { searchMcpRegistry } from './mcpRegistry'
 import { transcribeYoutube } from './youtube'
@@ -1039,6 +1040,13 @@ export function registerIpc(show: () => boolean): void {
   ipcMain.handle('browser:clearData', () => clearBrowserData())
   ipcMain.handle('browser:annotateStart', () => startBrowserAnnotate())
   ipcMain.handle('browser:annotateCancel', () => cancelBrowserAnnotate())
+  ipcMain.handle('browser:openFile', (_event, input: { chatId?: string; src?: string }) =>
+    openChatFile(String(input?.chatId ?? ''), String(input?.src ?? ''))
+  )
+  ipcMain.handle('files:resolvable', (_event, input: { chatId?: string; srcs?: unknown }) => {
+    const srcs = Array.isArray(input?.srcs) ? input.srcs.slice(0, 200).map((src) => String(src ?? '')) : []
+    return chatFilesResolvable(String(input?.chatId ?? ''), srcs)
+  })
   ipcMain.handle('youtube:transcribe', (_event, input: { url?: string; lang?: string }) =>
     transcribeYoutube(String(input?.url ?? ''), input?.lang)
   )
@@ -1139,7 +1147,7 @@ export function registerIpc(show: () => boolean): void {
   })
 
   ipcMain.handle('shell:openExternal', async (_event, url: string) => {
-    const clean = sanitizeUrl(String(url ?? ''))
+    const clean = sanitizeWebUrl(String(url ?? ''))
     if (!clean) return false
     await shell.openExternal(clean)
     return true

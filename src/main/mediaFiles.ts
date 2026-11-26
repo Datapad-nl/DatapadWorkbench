@@ -33,7 +33,15 @@ function candidatesFor(roots: string[], src: string): string[] {
   return roots.map((root) => join(root, rel))
 }
 
-export function resolveMediaFile(roots: string[], rawSrc: string): string | null {
+/**
+ * The real file `src` names inside one of `roots`, and the root it is in, when `accept` takes it. A path,
+ * encoded or symlinked, that ends outside every root resolves to nothing, as does a directory.
+ */
+export function resolveRootFile(
+  roots: string[],
+  rawSrc: string,
+  accept: (file: string) => boolean = () => true
+): { root: string; file: string } | null {
   const src = rawSrc.trim()
   if (!src || src.length > 4096 || /^(https?:|data:|blob:)/i.test(src)) return null
   const realRoots = roots.map((root) => real(root)).filter((root): root is string => Boolean(root))
@@ -47,9 +55,14 @@ export function resolveMediaFile(roots: string[], rawSrc: string): string | null
       continue
     }
     const target = real(normalized)
-    if (!target || !mediaExtension(target)) continue
-    if (!realRoots.some((root) => inside(root, target))) continue
-    return target
+    if (!target || !accept(target)) continue
+    const root = realRoots.find((item) => inside(item, target))
+    if (!root) continue
+    return { root, file: target }
   }
   return null
+}
+
+export function resolveMediaFile(roots: string[], rawSrc: string): string | null {
+  return resolveRootFile(roots, rawSrc, (file) => Boolean(mediaExtension(file)))?.file ?? null
 }

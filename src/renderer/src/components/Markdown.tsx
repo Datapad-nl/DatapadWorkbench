@@ -1,7 +1,9 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { localLinkSrc, looksLikeFilePath } from '../../../shared/fileView'
 import { isMediaSrc, isRemoteSrc, isVideoSrc, mediaUrl } from '../../../shared/media'
+import { useFileResolvable } from '../fileLinks'
 import { NOTE_HREF } from '../noteLinks'
 import { Icon } from './icons'
 import { ZoomImage } from './ImageLightbox'
@@ -34,6 +36,26 @@ function LocalMedia({
     return <video src={url} controls className={`${FRAME} cursor-pointer`} />
   }
   return <ZoomImage src={url} alt={alt || ''} className={FRAME} onOpenFile={open} />
+}
+
+// Inline code in a link stays part of the link rather than becoming a second thing to click.
+const InLink = createContext(false)
+
+/** Inline code naming a file of the chat's project, which opens in the browser panel once it is known to exist. */
+function FilePathCode({ chatId, src, children }: { chatId: string; src: string; children: ReactNode }): React.JSX.Element {
+  const inLink = useContext(InLink)
+  const exists = useFileResolvable(chatId, src, !inLink)
+  if (!exists) return <code>{children}</code>
+  return (
+    <button
+      type="button"
+      title="Open in browser panel"
+      onClick={() => void window.workbench.openFile(chatId, src)}
+      className="inline cursor-pointer text-left text-accent underline-offset-2 hover:underline"
+    >
+      <code>{children}</code>
+    </button>
+  )
 }
 
 type Visual = { id: string; title?: string }
@@ -172,22 +194,34 @@ function mediaComponents(chatId: string): Components {
       if (isRemoteSrc(href)) {
         return (
           <a href={href} target="_blank" rel="noreferrer">
-            {children}
+            <InLink.Provider value>{children}</InLink.Provider>
           </a>
         )
       }
       if (isMediaSrc(href)) {
         return <LocalMedia chatId={chatId} src={href} alt={plainText(children)} />
       }
+      const file = localLinkSrc(href)
       return (
         <a
           href={href}
           onClick={(event) => {
             event.preventDefault()
+            if (file) void window.workbench.openFile(chatId, file)
           }}
         >
-          {children}
+          <InLink.Provider value>{children}</InLink.Provider>
         </a>
+      )
+    },
+    // Fenced code is a `pre` above and its text ends in a newline, so only inline code is ever a path.
+    code: ({ className, children }) => {
+      const text = plainText(children)
+      if (className || !looksLikeFilePath(text)) return <code className={className}>{children}</code>
+      return (
+        <FilePathCode chatId={chatId} src={text}>
+          {children}
+        </FilePathCode>
       )
     }
   }

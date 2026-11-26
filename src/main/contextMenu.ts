@@ -1,6 +1,6 @@
 import { Menu, clipboard, ipcMain, shell } from 'electron'
 import type { BrowserWindow, ContextMenuParams, MenuItemConstructorOptions, WebContents } from 'electron'
-import { activeBrowserScope, navigateBrowser, sanitizeUrl } from './browser'
+import { activeBrowserScope, navigateBrowser, sanitizeUrl, sanitizeWebUrl } from './browser'
 
 const SEARCH_URL = 'https://www.google.com/search?q='
 
@@ -50,7 +50,9 @@ function menuFor(contents: WebContents, params: ContextMenuParams): MenuItemCons
   if (link) {
     sections.push([
       { label: 'Open Link', click: () => void navigateBrowser(activeBrowserScope(), link) },
-      { label: 'Open Link in Default Browser', click: () => void shell.openExternal(link) },
+      ...(sanitizeWebUrl(link)
+        ? [{ label: 'Open Link in Default Browser', click: () => void shell.openExternal(link) }]
+        : []),
       { label: 'Copy Link', click: () => clipboard.writeText(link) }
     ])
   }

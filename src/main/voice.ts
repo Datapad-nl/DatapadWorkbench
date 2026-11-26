@@ -6,6 +6,7 @@ import { pathToFileURL } from 'url'
 import { pipeline } from 'stream/promises'
 import { Readable, Transform } from 'stream'
 import type { VoiceModelStatus } from '../shared/types'
+import { fileViewSchemePrivilege } from './fileView'
 import { mediaSchemePrivilege } from './media'
 import { visualSchemePrivilege } from './visuals'
 
@@ -136,7 +137,8 @@ export function registerVoiceScheme(): void {
       }
     },
     mediaSchemePrivilege(),
-    visualSchemePrivilege()
+    visualSchemePrivilege(),
+    fileViewSchemePrivilege()
   ])
 }
 

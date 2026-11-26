@@ -399,6 +399,10 @@ const api = {
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url) as Promise<boolean>,
   openMedia: (chatId: string, src: string) =>
     ipcRenderer.invoke('media:open', { chatId, src }) as Promise<boolean>,
+  openFile: (chatId: string, src: string) =>
+    ipcRenderer.invoke('browser:openFile', { chatId, src }) as Promise<boolean>,
+  filesResolvable: (chatId: string, srcs: string[]) =>
+    ipcRenderer.invoke('files:resolvable', { chatId, srcs }) as Promise<boolean[]>,
   getUsage: () => ipcRenderer.invoke('usage:get') as Promise<UsageSnapshot>,
   getClaudeUsage: () => ipcRenderer.invoke('usage:claude') as Promise<ClaudeUsage>,
   getClaudeOptions: (model: string) =>
