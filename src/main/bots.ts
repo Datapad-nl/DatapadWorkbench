@@ -54,8 +54,10 @@ export function isBotFolder(path: string): boolean {
 function withFolder(bot: StoredBot): Bot {
   // Bots saved before effort was a setting follow the global one. Those saved before the bot's chat have none yet.
   // Those saved before MCP servers were chosen per bot get none, until they are switched on.
+  // Those saved under Grok on a provider's model, before the app's own agent ran those, are on that agent.
   return {
     ...bot,
+    agent: normalizeChatAgent(bot.agent, bot.model),
     effort: bot.effort ?? '',
     conciseReplies: bot.conciseReplies === true,
     mcpServers: bot.mcpServers ?? [],
@@ -405,14 +407,15 @@ export async function ensureChiefBot(agent: ChatAgent): Promise<{ bot: Bot; crea
   })
 }
 
-export async function createBot(name: string): Promise<Bot> {
+/** A new bot runs on the given agent with no model of its own, so it follows the model set in Settings. */
+export async function createBot(name: string, agent: ChatAgent = 'grok'): Promise<Bot> {
   return withBotsLock(async () => {
     const bots = await loadBots()
     const timestamp = now()
     const bot: StoredBot = {
       id: id(),
       name: name.trim() || 'New bot',
-      agent: 'grok',
+      agent,
       model: '',
       effort: '',
       conciseReplies: false,

@@ -1,3 +1,5 @@
+import type { ChatAgent } from './types'
+
 /** How many workers of one chat run at the same time, unless Settings says otherwise. */
 export const DEFAULT_MAX_SUBAGENTS = 4
 const MOST_SUBAGENTS = 10
@@ -36,12 +38,12 @@ export const CONDUCTOR_EDIT_REFUSED =
 /**
  * The conductor's role: it thinks, specifies, delegates and checks; workers started with `delegate` do the work.
  * A conductor chat gets this with every session, and /conduct sends it ahead of the job.
- * `workerModel` is the model Settings fixes for every worker; empty lets the conductor pick per task.
+ * `workerModel` is the model every worker runs on (see `conductorWorkerModel`); empty lets the conductor pick per task.
  * `maxWorkers` is how many workers Settings lets run at the same time.
  */
 export function conductorRule(workerModel: string, maxWorkers: number): string {
   const model = workerModel
-    ? `Every worker runs on ${workerModel}, as set in Settings.`
+    ? `Every worker runs on ${workerModel}.`
     : 'Pick the model for each worker with `model`: `fable` for a really hard task, such as a bug nobody has found, a design with many parts or a long change across the codebase; `opus` for work that needs judgement; `sonnet` for routine work; and `haiku` when a small, fast model is enough for the job. Fable costs the most, so keep it for the tasks that need it.'
   return [
     'You are the conductor of this job. You think, specify, delegate and check. You do not write code or change files yourself, not even a one-line fix: file edits are refused in this chat. Workers do all of the work.',
@@ -53,6 +55,14 @@ export function conductorRule(workerModel: string, maxWorkers: number): string {
     `6. Decide. If every criterion passes, accept the task and give out the next one. If one fails, send the same worker back with \`nudge\`: name the criterion, what you saw, and what to do. After ${MAX_NUDGES} nudges on the same failed criterion, give the task to a fresh worker with a sharper brief or a stronger model, or ask me.`,
     'Handle anything that does not need me. Stop only when you need a decision from me, or when the whole job is done. Then report, per task, what was done and how you checked it.'
   ].join('\n\n')
+}
+
+/**
+ * The model a conductor's workers run on, as `delegate` starts them: the one Settings fixes, else on a
+ * provider the conductor's own, so a provider chat's workers stay on that provider.
+ */
+export function conductorWorkerModel(subagentModel: string, agent: ChatAgent, chatModel: string): string {
+  return subagentModel || (agent === 'workbench' ? chatModel : '')
 }
 
 /**

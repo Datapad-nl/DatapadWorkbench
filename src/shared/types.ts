@@ -223,15 +223,21 @@ export type Checkpoint = {
   files: string[]
 }
 
-export type ChatAgent = 'grok' | 'claude'
+/** `workbench` is the app's own agent, which runs the providers' models. */
+export type ChatAgent = 'grok' | 'claude' | 'workbench'
 
-export function normalizeChatAgent(value: unknown): ChatAgent {
-  return value === 'claude' ? 'claude' : 'grok'
+/** `model` is the stored one: a provider's (wb-) model saved under Grok, as before the app's own agent, is on that agent. */
+export function normalizeChatAgent(value: unknown, model?: unknown): ChatAgent {
+  if (value === 'claude' || value === 'workbench') return value
+  return typeof model === 'string' && model.startsWith('wb-') ? 'workbench' : 'grok'
 }
 
 export function chatAgentLabel(agent: ChatAgent): string {
-  return agent === 'claude' ? 'Claude' : 'Grok'
+  return agent === 'claude' ? 'Claude' : agent === 'workbench' ? 'Workbench' : 'Grok'
 }
+
+/** The app's own agent process: not started yet or stopped on purpose, answering, or gone or failed to start. */
+export type WorkbenchAgentStatus = 'idle' | 'running' | 'failed'
 
 export type Chat = {
   id: string
@@ -414,7 +420,7 @@ export function normalizeReasoningEffort(value: unknown): ReasoningEffort | null
   return null
 }
 
-/** The wire protocol of an inference provider, as Grok Build's `api_backend` names it. */
+/** The wire protocol of an inference provider. */
 export type ProviderBackend = 'chat_completions' | 'responses' | 'messages'
 
 export type ProviderModel = {
@@ -424,9 +430,11 @@ export type ProviderModel = {
   contextWindow?: number
   /** Effort levels the model takes. Empty: no effort control. */
   efforts: ReasoningEffort[]
+  /** False for a model that takes text only, so no image is sent to it. Unset: images are sent. */
+  images?: boolean
 }
 
-/** An inference provider whose models Grok chats can run on. Its key never leaves the main process. */
+/** An inference provider whose models the app's own agent runs. Its key reaches only the main process and that agent. */
 export type Provider = {
   /** Slug, unique, [a-z0-9-], such as openrouter. */
   id: string
@@ -464,7 +472,7 @@ export function slugify(text: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
-/** The key a provider's model has in Grok's catalog and in Chat.model / Bot.model: wb-<providerId>-<slug of model id>. */
+/** The key of a provider's model in Chat.model / Bot.model: wb-<providerId>-<slug of model id>. */
 export function providerModelKey(providerId: string, modelId: string): string {
   return `wb-${providerId}-${slugify(modelId)}`
 }
@@ -491,6 +499,44 @@ export function grokModelChoices(grokModels: string[], providers: Provider[]): G
     }))
   )
   return [...own, ...added]
+}
+
+/**
+ * What a chat runs on, as the user picks it: Claude, Grok, or a provider whose models the app's own agent runs.
+ * `key` is 'claude', 'grok', 'provider-<id>', or 'workbench' for that agent with no provider left.
+ */
+export type ChatProviderChoice = { key: string; agent: ChatAgent; provider: Provider | null; name: string }
+
+/** Claude, Grok, then each provider with at least one model. */
+export function chatProviderChoices(providers: Provider[]): ChatProviderChoice[] {
+  return [
+    { key: 'claude', agent: 'claude', provider: null, name: 'Claude' },
+    { key: 'grok', agent: 'grok', provider: null, name: 'Grok' },
+    ...providers
+      .filter((provider) => provider.models.length > 0)
+      .map((provider) => ({ key: `provider-${provider.id}`, agent: 'workbench' as const, provider, name: provider.name }))
+  ]
+}
+
+/**
+ * The choice an agent and model are on. On the app's own agent: the provider of the model, else for no
+ * model the first provider, as that agent then runs the first provider's first model. A model whose
+ * provider was removed is on none, so the chat does not look as if it runs on another provider.
+ */
+export function chatProviderOf(agent: ChatAgent, model: string, providers: Provider[]): ChatProviderChoice {
+  const choices = chatProviderChoices(providers)
+  if (agent === 'claude') return choices[0]
+  if (agent === 'grok') return choices[1]
+  const listed = choices.slice(2)
+  // A listed model first, then the longest id, as one provider's id can start another's.
+  return (
+    listed.find((choice) => choice.provider?.models.some((item) => providerModelKey(choice.provider!.id, item.id) === model)) ??
+    listed
+      .filter((choice) => model.startsWith(`wb-${choice.provider!.id}-`))
+      .sort((a, b) => b.key.length - a.key.length)[0] ??
+    (model.startsWith('wb-') ? { key: 'workbench', agent: 'workbench', provider: null, name: 'Removed provider' } : null) ??
+    listed[0] ?? { key: 'workbench', agent: 'workbench', provider: null, name: chatAgentLabel('workbench') }
+  )
 }
 
 /** The effort levels a Grok model value takes: its choice's; none for a provider model no longer listed; else Grok's own. */
@@ -527,7 +573,7 @@ export type PublicSettings = {
   claudeModel: string
   /** Claude Code model of a conductor chat. Empty means `claudeModel`. */
   orchestratorModel: string
-  /** Claude Code model of every worker. Empty lets the conductor pick one per task. */
+  /** Model of every worker: Claude Code's, or a provider's (wb-), which runs on that provider. Empty lets the conductor pick one per task. */
   subagentModel: string
   /** How many workers of one chat run at the same time. */
   maxSubagents: number
@@ -572,6 +618,29 @@ export type UsageSnapshot = {
   onDemandCap: number | null
   onDemandUsed: number | null
   unifiedBilling: boolean
+}
+
+/**
+ * Which plans the usage panel shows. Grok's is shown when signed in, or as before when there is no Claude,
+ * unless the user has only providers: their own key has no plan, so asking Grok for one only fails.
+ */
+export function usagePlans(
+  settings: Pick<PublicSettings, 'claude' | 'grokBuildSignedIn' | 'defaultAgent' | 'hasKey' | 'providers'>
+): { grok: boolean; claude: boolean; claudeFirst: boolean } {
+  const claude = settings.claude.signedIn === true
+  const providersOnly = !settings.hasKey && settings.providers.length > 0
+  const grok = settings.grokBuildSignedIn === true || (!claude && !providersOnly)
+  return { grok, claude, claudeFirst: claude && (settings.defaultAgent === 'claude' || !grok) }
+}
+
+/** The plan the status bar meter shows: none for a provider's chat, which runs on the user's own key. */
+export function usageMeterPlan(
+  plans: { grok: boolean; claude: boolean; claudeFirst: boolean },
+  agent: ChatAgent | undefined
+): 'grok' | 'claude' | null {
+  if (agent === 'workbench') return null
+  if (plans.claudeFirst) return 'claude'
+  return plans.grok ? 'grok' : null
 }
 
 export function normalizeVoiceSettings(value: unknown): VoiceSettings {

@@ -39,6 +39,7 @@ import type {
   ProviderBackend,
   ProviderModel,
   PublicSettings,
+  WorkbenchAgentStatus,
   SaveBotSkillInput,
   SaveProviderInput,
   SecretScope,
@@ -424,6 +425,14 @@ const api = {
   filesResolvable: (chatId: string, srcs: string[]) =>
     ipcRenderer.invoke('files:resolvable', { chatId, srcs }) as Promise<boolean[]>,
   getUsage: () => ipcRenderer.invoke('usage:get') as Promise<UsageSnapshot>,
+  getWorkbenchAgentStatus: () => ipcRenderer.invoke('workbenchAgent:status') as Promise<WorkbenchAgentStatus>,
+  onWorkbenchAgentStatus: (listener: (status: WorkbenchAgentStatus) => void) => {
+    const wrapped = (_event: unknown, payload: WorkbenchAgentStatus): void => listener(payload)
+    ipcRenderer.on('workbenchAgent:status', wrapped)
+    return () => {
+      ipcRenderer.removeListener('workbenchAgent:status', wrapped)
+    }
+  },
   getClaudeUsage: () => ipcRenderer.invoke('usage:claude') as Promise<ClaudeUsage>,
   getClaudeOptions: (model: string) =>
     ipcRenderer.invoke('claude:options', model) as Promise<ClaudeOptions | null>,

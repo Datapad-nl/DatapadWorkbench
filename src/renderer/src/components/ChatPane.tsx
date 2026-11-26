@@ -35,19 +35,23 @@ import {
   slashCommandsFor,
   type SlashDef
 } from '../../../shared/slash'
-import { DEFAULT_MAX_SUBAGENTS, NO_WORKERS_TO_CONDUCT, conductorPrompt, weakOrchestrator } from '../../../shared/conductor'
+import { DEFAULT_MAX_SUBAGENTS, NO_WORKERS_TO_CONDUCT, conductorPrompt, conductorWorkerModel, weakOrchestrator } from '../../../shared/conductor'
 import { contextLabel, handoffAdvised, handoffPrompt } from '../../../shared/handoff'
 import { resolveProjectColor } from '../../../shared/projectColor'
 import { botMentionParts, mentionedBots, splitBotMentions } from '../../../shared/botMentions'
 import { plainReply } from '../../../shared/steps'
 import {
   CLAUDE_MODELS,
+  DEFAULT_MODEL,
   REASONING_EFFORTS,
   chatAgentLabel,
+  chatProviderChoices,
+  chatProviderOf,
   formatGrokCli,
   grokModelChoices,
   grokModelEfforts,
   nextPermissionMode,
+  providerModelKey,
   normalizeChatAgent,
   normalizePermissionMode,
   normalizeReasoningEffort,
@@ -92,7 +96,7 @@ type SlashRun = {
   chatId: string
   projectId: string
   agent: ChatAgent
-  /** The model Settings fixes for every subagent. Empty lets the conductor pick. */
+  /** The model every subagent runs on: Settings', else a provider chat's own. Empty lets the conductor pick. */
   workerModel: string
   maxWorkers: number
   title: string
@@ -346,6 +350,11 @@ export function ChatPane({
   const stream = activeChatId ? streams[activeChatId] : undefined
   const streamingNow = stream?.status === 'streaming'
   const progress = useChatProgress(activeChat?.id ?? null, Boolean(streamingNow))
+  // A chat on a provider's model is named after the provider. A bot's chat runs on the bot's model, else
+  // its own, else Settings'.
+  const activeAgent = normalizeChatAgent(activeChat?.agent)
+  const activeModel = (activeBot?.agent === activeAgent && activeBot.model) || activeChat?.model || settings?.model || ''
+  const runsOn = chatProviderOf(activeAgent, activeModel, settings?.providers ?? [])
 
   return (
     <section
@@ -439,6 +448,7 @@ export function ChatPane({
             chat={activeChat}
             chatId={activeChat.id}
             agent={normalizeChatAgent(activeChat.agent)}
+            agentName={runsOn.name}
             projectId={activeChat.projectId}
             projectName={activeProject?.name ?? 'this project'}
             botName={activeBot?.name}
@@ -489,7 +499,11 @@ export function ChatPane({
                 chatId: activeChat.id,
                 projectId: activeChat.projectId,
                 agent: normalizeChatAgent(activeChat.agent),
-                workerModel: settings?.subagentModel ?? '',
+                workerModel: conductorWorkerModel(
+                  settings?.subagentModel ?? '',
+                  activeAgent,
+                  activeModel.startsWith('wb-') ? activeModel : ''
+                ),
                 maxWorkers: settings?.maxSubagents ?? DEFAULT_MAX_SUBAGENTS,
                 title: activeChat.title,
                 sessionHint: settings
@@ -535,17 +549,16 @@ export function ChatPane({
             }}
             onMode={(mode) => void setChatMode(activeChat.id, mode)}
             agent={normalizeChatAgent(activeChat.agent)}
+            agentName={runsOn.name}
             agentPicker={
               <ModelPicker
                 agent={normalizeChatAgent(activeChat.agent)}
-                onAgent={
-                  settings?.claude.signedIn || normalizeChatAgent(activeChat.agent) === 'claude'
-                    ? (agent) =>
-                        void setChatAgent(activeChat.id, agent).catch((error: unknown) =>
-                          alert(errorText(error, 'Could not switch agents'))
-                        )
-                    : null
+                onAgent={(agent, model) =>
+                  void setChatAgent(activeChat.id, agent, model).catch((error: unknown) =>
+                    alert(errorText(error, 'Could not switch agents'))
+                  )
                 }
+                claudeReady={Boolean(settings?.claude.signedIn)}
                 started={Boolean(activeChat.grokSessionId) || activeChat.messages.length > 0}
                 busy={Boolean(streamingNow)}
                 model={activeChat.model ?? ''}
@@ -1156,19 +1169,20 @@ function MessageTime({ iso }: { iso: string }): React.JSX.Element | null {
 }
 
 function AssistantHeader({
-  agent,
+  agentName,
   bot,
   meta,
   createdAt
 }: {
-  agent: ChatAgent
+  /** Claude, Grok or the provider the chat runs on. */
+  agentName: string
   bot?: Bot
   meta?: string
   createdAt?: string
 }): React.JSX.Element {
   return (
     <div className="flex h-7 items-center gap-2">
-      <span className="text-[13px] font-semibold text-ink">{bot ? bot.name : chatAgentLabel(agent)}</span>
+      <span className="text-[13px] font-semibold text-ink">{bot ? bot.name : agentName}</span>
       {meta && <span className="text-[11px] tabular-nums text-faint">{meta}</span>}
       {createdAt && <MessageTime iso={createdAt} />}
     </div>
@@ -1179,6 +1193,7 @@ function MessageList({
   chat,
   chatId,
   agent,
+  agentName,
   projectId,
   projectName,
   botName,
@@ -1197,6 +1212,7 @@ function MessageList({
   chat: { messages: Message[]; botId?: string }
   chatId: string
   agent: ChatAgent
+  agentName: string
   projectId: string
   projectName: string
   /** Set for a bot's chat, which works in the bot's folder rather than a project. */
@@ -1365,7 +1381,7 @@ function MessageList({
                         </div>
                       ) : (
                         <AssistantHeader
-                          agent={agent}
+                          agentName={agentName}
                           bot={chatBot}
                           meta={side === 'btw' ? 'side answer' : undefined}
                           createdAt={message.createdAt}
@@ -1401,7 +1417,7 @@ function MessageList({
               </div>
             )
           })}
-          {streaming && <LiveReply chatId={chatId} agent={agent} bot={chatBot} progress={progress} bottom={bottom} />}
+          {streaming && <LiveReply chatId={chatId} agent={agent} agentName={agentName} bot={chatBot} progress={progress} bottom={bottom} />}
           {error && <div className="text-[13px] text-danger">{error}</div>}
           {plan && (plan.entries.length > 0 || plan.awaitingApproval || plan.markdown?.trim()) && (
             <PlanCard key={chatId} plan={plan} chatId={chatId} canApprove={canApprove} onApprove={onApprove} />
@@ -1417,12 +1433,14 @@ function MessageList({
 function LiveReply({
   chatId,
   agent,
+  agentName,
   bot,
   progress,
   bottom
 }: {
   chatId: string
   agent: ChatAgent
+  agentName: string
   bot?: Bot
   progress: string
   bottom: React.RefObject<HTMLDivElement | null>
@@ -1436,7 +1454,7 @@ function LiveReply({
     <article className="flex gap-3">
       {bot ? <BotAvatar bot={bot} size={28} /> : <AgentTile agent={agent} />}
       <div className="min-w-0 flex-1">
-        <AssistantHeader agent={agent} bot={bot} />
+        <AssistantHeader agentName={agentName} bot={bot} />
         <div className="mt-1 text-[14.5px] leading-[1.65]">
           {draft ? <AgentReply text={draft} chatId={chatId} live /> : null}
         </div>
@@ -1902,16 +1920,18 @@ function ModeToggle({
   )
 }
 
-type ModelChoice = { value: string; name: string; description?: string; group?: string }
+type ModelChoice = { value: string; name: string; description?: string }
 
 /**
- * The chat's agent, model and effort. A model or effort change goes to the live session, which keeps
- * the conversation. An agent change on a started chat goes on in a new session that gets the
- * conversation handed over.
+ * The chat's provider, model and effort. A provider is Claude, Grok, or one whose models the app's own
+ * agent runs. A model or effort change goes to the live session, which keeps the conversation, and so does
+ * a move between providers on the app's own agent. A move to another agent on a started chat goes on in
+ * a new session that gets the conversation handed over.
  */
 function ModelPicker({
   agent,
   onAgent,
+  claudeReady,
   started,
   busy,
   model,
@@ -1927,8 +1947,10 @@ function ModelPicker({
   onEffort
 }: {
   agent: ChatAgent
-  /** Null when only one agent is signed in. */
-  onAgent: ((agent: ChatAgent) => void) | null
+  /** `model` is set with the agent. */
+  onAgent: (agent: ChatAgent, model?: string) => void
+  /** Claude Code is signed in, so a chat can move to it. */
+  claudeReady: boolean
   started: boolean
   busy: boolean
   /** The chat's own model and effort. Empty follows Settings. */
@@ -1939,7 +1961,7 @@ function ModelPicker({
   defaultEffort: ReasoningEffort | null
   grokModels: string[]
   providers: Provider[]
-  /** The Grok model Settings sets, which an empty Grok model follows. */
+  /** The model Settings sets: Grok's, or a provider's, which an empty model on that agent follows. */
   grokDefaultModel: string
   conductor: boolean
   /** A bot's chat: its page sets all three. */
@@ -1980,17 +2002,35 @@ function ModelPicker({
     }
   }, [open])
 
-  const grokChoices = grokModelChoices(grokModels, providers)
+  const providerChoices = grokModelChoices([], providers)
+  const grokOwn = grokModelChoices(grokModels, [])
+  const entries = chatProviderChoices(providers)
+  const entry = chatProviderOf(agent, model || grokDefaultModel, providers)
+  // Grok's Default is the model in Settings, so it is one of Grok's own only while that model is.
+  const grokDefaultOwn = !grokDefaultModel.startsWith('wb-')
+  // A chat on a provider runs on its own model, else the one in Settings. One that was removed stays picked,
+  // shown as removed, so the chat does not move to another model unasked.
+  const wanted = agent === 'workbench' ? [model, grokDefaultModel].find((value) => value.startsWith('wb-')) : undefined
+  const removed = wanted !== undefined && !providerChoices.some((option) => option.value === wanted)
   const models: ModelChoice[] =
     agent === 'claude'
       ? (claude?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label })))
-      : [{ value: '', name: 'Default' }, ...grokChoices]
+      : agent === 'workbench'
+        ? [
+            ...(removed && wanted ? [{ value: wanted, name: 'Removed model' }] : []),
+            ...grokModelChoices([], entry.provider ? [entry.provider] : [])
+          ]
+        : [...(grokDefaultOwn ? [{ value: '', name: 'Default' }] : []), ...grokOwn]
+  // Without a model picked anywhere, the app's own agent runs the first.
+  const picked = agent === 'workbench' ? (wanted ?? (models[0]?.value || '')) : model
   const efforts: readonly ReasoningEffort[] =
     agent === 'claude'
       ? claude?.efforts.length
         ? claude.efforts
         : REASONING_EFFORTS
-      : grokModelEfforts(grokChoices, model || grokDefaultModel)
+      : agent === 'workbench'
+        ? grokModelEfforts(providerChoices, picked)
+        : grokModelEfforts(grokOwn, model)
   const modelName = (value: string): string =>
     models.find((option) => option.value === value)?.name.replace(/ \(.*\)$/, '') ||
     CLAUDE_MODELS.find((option) => option.value === value)?.label ||
@@ -1998,12 +2038,15 @@ function ModelPicker({
     'Default'
   // A model that takes no effort shows none.
   const shownEffort = efforts.length ? effort || defaultEffort : null
-  const warning = conductor ? weakOrchestrator(current, shownEffort) : null
+  const warning = removed
+    ? 'This chat’s model was removed in Settings → Providers. Pick another model.'
+    : conductor
+      ? weakOrchestrator(current, shownEffort)
+      : null
   // The glyph names the agent.
-  const label = [modelName(current), shownEffort ? reasoningEffortLabel(shownEffort) : null]
+  const label = [modelName(agent === 'claude' ? current : picked), shownEffort ? reasoningEffortLabel(shownEffort) : null]
     .filter(Boolean)
     .join(' · ')
-  const other: ChatAgent = agent === 'claude' ? 'grok' : 'claude'
   const pressed = 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-accent-line)]'
 
   if (locked) {
@@ -2014,7 +2057,7 @@ function ModelPicker({
         className="flex h-7 shrink-0 items-center gap-1.5 px-1.5 text-[12.5px] text-muted"
       >
         <AgentGlyph agent={agent} size={12} />
-        {chatAgentLabel(agent)}
+        {entry.name}
       </div>
     )
   }
@@ -2031,7 +2074,7 @@ function ModelPicker({
         data-testid="chat-agent"
         aria-haspopup="menu"
         aria-expanded={open}
-        title={warning ?? `${chatAgentLabel(agent)}: model and effort of this chat`}
+        title={warning ?? `${entry.name}: model and effort of this chat`}
         className={`flex h-7 max-w-[260px] items-center gap-1.5 rounded-[7px] px-1.5 text-[12.5px] hover:bg-hover ${
           warning ? 'text-danger' : 'text-muted hover:text-ink'
         }`}
@@ -2052,59 +2095,68 @@ function ModelPicker({
               data-testid="orchestrator-warning"
               className="mb-2 rounded-[6px] bg-surface px-2 py-1.5 text-[12px] leading-5 text-danger"
             >
-              This chat is a conductor. {warning} It will not orchestrate well on this choice.
+              {removed ? warning : `This chat is a conductor. ${warning} It will not orchestrate well on this choice.`}
             </div>
           )}
-          <div className="px-2 pb-1 text-[11px] uppercase tracking-wide text-faint">Agent</div>
-          <div className="flex gap-0.5 rounded-[8px] bg-surface p-0.5">
-            {(['claude', 'grok'] as const).map((id) => (
-              <button
-                key={id}
-                type="button"
-                aria-pressed={agent === id}
-                disabled={id !== agent && (!onAgent || busy)}
-                className={`flex h-6 flex-1 items-center justify-center gap-1.5 rounded-[6px] text-[12.5px] disabled:opacity-40 ${
-                  agent === id ? pressed : 'text-muted hover:text-ink'
-                }`}
-                onClick={() => {
-                  if (id !== agent && onAgent) onAgent(id)
-                }}
-              >
-                <AgentGlyph agent={id} size={11} />
-                {chatAgentLabel(id)}
-              </button>
-            ))}
+          <div className="px-2 pb-1 text-[11px] uppercase tracking-wide text-faint">Provider</div>
+          <div className="flex flex-wrap gap-0.5 rounded-[8px] bg-surface p-0.5">
+            {entries.map((next) => {
+              const on = next.key === entry.key
+              return (
+                <button
+                  key={next.key}
+                  type="button"
+                  data-testid={`model-picker-${next.key}`}
+                  aria-pressed={on}
+                  disabled={next.agent !== agent && (busy || (next.agent === 'claude' && !claudeReady))}
+                  className={`flex h-6 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-[6px] px-2 text-[12.5px] disabled:opacity-40 ${
+                    on ? pressed : 'text-muted hover:text-ink'
+                  }`}
+                  onClick={() => {
+                    if (on) return
+                    // A provider starts on its first model. Grok starts on Default, or its first model while Settings is on a provider.
+                    // Another provider on the app's own agent is only another model.
+                    const nextModel = next.provider
+                      ? providerModelKey(next.provider.id, next.provider.models[0].id)
+                      : next.agent === 'grok' && !grokDefaultOwn
+                        ? (grokOwn[0]?.value ?? DEFAULT_MODEL)
+                        : ''
+                    if (next.agent === agent) onModel(nextModel)
+                    else onAgent(next.agent, nextModel || undefined)
+                  }}
+                >
+                  {!next.provider && <AgentGlyph agent={next.agent} size={11} />}
+                  {next.name}
+                </button>
+              )
+            })}
           </div>
-          {started && onAgent && (
+          {started && (
             <p className="px-2 pt-1 text-[11.5px] leading-4 text-faint">
               {busy
                 ? 'Switch agents once this turn ends.'
-                : `Switching goes on in a new ${chatAgentLabel(other)} session, which gets this conversation.`}
+                : 'Switching between Claude, Grok and a provider goes on in a new session, which gets this conversation.'}
             </p>
           )}
           <div className="px-2 pb-1 pt-3 text-[11px] uppercase tracking-wide text-faint">Model</div>
-          {models.map((option, index) => {
-            const selected = option.value === model || (!model && option.value === '')
+          {models.map((option) => {
+            const selected = option.value === picked
             return (
-              <Fragment key={option.value || 'default'}>
-                {option.group && option.group !== models[index - 1]?.group && (
-                  <div className="px-2 pb-0.5 pt-1.5 text-[11px] text-faint">{option.group}</div>
+              <button
+                key={option.value || 'default'}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selected}
+                title={option.description}
+                className={item(selected)}
+                onClick={() => onModel(option.value)}
+              >
+                <span className="w-3 shrink-0">{selected && <Icon name="check" size={11} />}</span>
+                <span className="truncate">{option.name}</span>
+                {conductor && weakOrchestrator(option.value || defaultModel) && (
+                  <span className="ml-auto shrink-0 text-[11px] text-faint">weak conductor</span>
                 )}
-                <button
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={selected}
-                  title={option.description}
-                  className={item(selected)}
-                  onClick={() => onModel(option.value)}
-                >
-                  <span className="w-3 shrink-0">{selected && <Icon name="check" size={11} />}</span>
-                  <span className="truncate">{option.name}</span>
-                  {conductor && weakOrchestrator(option.value || defaultModel) && (
-                    <span className="ml-auto shrink-0 text-[11px] text-faint">weak conductor</span>
-                  )}
-                </button>
-              </Fragment>
+              </button>
             )
           })}
           <div className="px-2 pb-1 pt-3 text-[11px] uppercase tracking-wide text-faint">Effort</div>
@@ -2348,6 +2400,7 @@ function Composer({
   onStop,
   onMode,
   agent,
+  agentName,
   agentPicker,
   onPermission,
   onQuestion,
@@ -2372,6 +2425,8 @@ function Composer({
   onStop: () => void
   onMode: (mode: PermissionMode) => void
   agent: ChatAgent
+  /** Claude, Grok or the provider the chat runs on. */
+  agentName: string
   /** The agent, model and effort picker. */
   agentPicker: ReactNode
   onPermission: (requestId: string, decision: 'allow' | 'deny' | 'wait') => Promise<void>
@@ -3011,8 +3066,8 @@ function Composer({
             streaming
               ? 'Steer the running task…  /btw asks an aside'
               : mode === 'plan'
-                ? `Ask ${chatAgentLabel(agent)} to plan a change…`
-                : `Ask ${chatAgentLabel(agent)} anything…`
+                ? `Ask ${agentName} to plan a change…`
+                : `Ask ${agentName} anything…`
           }
           className="w-full resize-none bg-transparent px-1 text-[14.5px] leading-[1.6] text-ink outline-none placeholder:text-faint focus-visible:outline-none disabled:opacity-60"
           onChange={(event) => {

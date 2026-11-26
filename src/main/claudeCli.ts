@@ -81,12 +81,12 @@ export async function startClaudeAdapter(): Promise<AgentProcess> {
   // Ask rather than trust the cache: the first chat after launch starts before anything filled it.
   const info = await getClaudeCliInfo().catch(() => null)
   if (info?.signedIn) delete env.ANTHROPIC_API_KEY
-  return forkAgent(hostScriptPath(), entry, env)
+  return forkAgent(hostScriptPath(), [entry], env, 'Claude Code')
 }
 
 /** A utility process behind the shape of a child process: its stdin goes over the parent port. */
-function forkAgent(script: string, entry: string, env: NodeJS.ProcessEnv): AgentProcess {
-  const child = utilityProcess.fork(script, [entry], { stdio: 'pipe', env, serviceName: 'Claude Code' })
+export function forkAgent(script: string, args: string[], env: NodeJS.ProcessEnv, serviceName: string): AgentProcess {
+  const child = utilityProcess.fork(script, args, { stdio: 'pipe', env, serviceName })
   const events = new EventEmitter()
   let killed = false
   let spawned = false

@@ -57,6 +57,12 @@ describe('bots', () => {
     expect(isBotFolder(stub.dir)).toBe(false)
   })
 
+  it('creates a bot on the agent it is given, following the model set in Settings', async () => {
+    expect(await createBot('Scout')).toMatchObject({ agent: 'grok', model: '' })
+    expect(await createBot('Scout', 'workbench')).toMatchObject({ agent: 'workbench', model: '' })
+    expect(await createBot('Scout', 'claude')).toMatchObject({ agent: 'claude', model: '' })
+  })
+
   it('creates a bot whose folder is a plugin both agents load', async () => {
     const bot = await createBot('Master Chief')
     expect(bot).toMatchObject({ name: 'Master Chief', agent: 'grok', model: '', avatar: null, allowedTools: [] })

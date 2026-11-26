@@ -1,8 +1,8 @@
 import { execFile } from 'child_process'
 import { existsSync } from 'fs'
-import { homedir } from 'os'
 import { join } from 'path'
 import { DEFAULT_MODEL, type GrokChannel, type GrokCliInfo } from '../shared/types'
+import { grokHome } from './sessions'
 
 const TTL_MS = 60_000
 
@@ -13,7 +13,7 @@ let cachedAt = 0
 let generation = 0
 
 export function grokBinary(): string {
-  const homeBin = join(homedir(), '.grok', 'bin', 'grok')
+  const homeBin = join(grokHome(), 'bin', 'grok')
   if (process.env.GROK_BIN && existsSync(process.env.GROK_BIN)) return process.env.GROK_BIN
   if (existsSync(homeBin)) return homeBin
   return 'grok'

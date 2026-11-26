@@ -1,6 +1,5 @@
 import { app } from 'electron'
 import { access, mkdir, readFile, writeFile } from 'fs/promises'
-import { homedir } from 'os'
 import { join } from 'path'
 import type {
   Project,
@@ -11,6 +10,7 @@ import type {
   UserQuestion
 } from '../shared/types'
 import { id, now } from './ids'
+import { grokHome } from './sessions'
 import { generateIntakeQuestions, type GeneratedIntake } from './intakeQuestions'
 import { scanProject, type ProjectScan, type ScanField } from './projectScan'
 import { askUserQuestions, cancelSessionQuestions, type QuestionOutcome } from './questions'
@@ -51,7 +51,7 @@ function profilesPath(): string {
 }
 
 function memoryPath(): string {
-  return join(homedir(), '.grok', 'memory', 'MEMORY.md')
+  return join(grokHome(), 'memory', 'MEMORY.md')
 }
 
 async function loadIntakeFile(): Promise<Required<IntakeFile>> {

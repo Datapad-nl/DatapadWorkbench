@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { GROK_REASONING_EFFORTS, grokModelChoices, grokModelEfforts, providerModelKey, type Provider } from './types'
+import {
+  GROK_REASONING_EFFORTS,
+  chatProviderChoices,
+  chatProviderOf,
+  grokModelChoices,
+  grokModelEfforts,
+  normalizeChatAgent,
+  providerModelKey,
+  usageMeterPlan,
+  usagePlans,
+  type Provider
+} from './types'
 
 describe('providerModelKey', () => {
   it('is wb-, the provider id and the model id as a slug', () => {
@@ -50,5 +61,107 @@ describe('grokModelChoices', () => {
     expect(grokModelEfforts(choices, 'grok-4.6')).toEqual(GROK_REASONING_EFFORTS)
     expect(grokModelEfforts(choices, 'grok-code-fast')).toEqual(GROK_REASONING_EFFORTS)
     expect(grokModelEfforts(choices, '')).toEqual(GROK_REASONING_EFFORTS)
+  })
+})
+
+describe('chatProviderOf', () => {
+  const provider = (id: string, name: string, models: string[]): Provider => ({
+    id,
+    name,
+    baseUrl: 'https://example.com/v1',
+    backend: 'chat_completions',
+    hasKey: true,
+    keyPreview: null,
+    models: models.map((model) => ({ id: model, name: model, efforts: [] }))
+  })
+  const providers = [provider('open', 'Open', ['a']), provider('open-router', 'OpenRouter', ['x/y']), provider('empty', 'Empty', [])]
+
+  it('offers Claude, Grok and each provider with models, on the app’s own agent', () => {
+    expect(chatProviderChoices(providers).map((choice) => [choice.key, choice.agent, choice.name])).toEqual([
+      ['claude', 'claude', 'Claude'],
+      ['grok', 'grok', 'Grok'],
+      ['provider-open', 'workbench', 'Open'],
+      ['provider-open-router', 'workbench', 'OpenRouter']
+    ])
+  })
+
+  it('finds the provider of a chat on the app’s own agent from its model key', () => {
+    expect(chatProviderOf('workbench', 'wb-open-router-x-y', providers).name).toBe('OpenRouter')
+    expect(chatProviderOf('workbench', 'wb-open-a', providers).name).toBe('Open')
+    // A model no longer listed stays with its provider.
+    expect(chatProviderOf('workbench', 'wb-open-router-gone', providers).name).toBe('OpenRouter')
+  })
+
+  it('is the first provider for no model, and a bare entry with no provider', () => {
+    expect(chatProviderOf('workbench', '', providers).key).toBe('provider-open')
+    expect(chatProviderOf('workbench', '', [])).toEqual({
+      key: 'workbench',
+      agent: 'workbench',
+      provider: null,
+      name: 'Workbench'
+    })
+  })
+
+  it('is no provider for a model whose provider was removed', () => {
+    expect(chatProviderOf('workbench', 'wb-gone-a', providers)).toEqual({
+      key: 'workbench',
+      agent: 'workbench',
+      provider: null,
+      name: 'Removed provider'
+    })
+    expect(chatProviderOf('workbench', 'wb-open-a', []).name).toBe('Removed provider')
+  })
+
+  it('is Grok for Grok and Claude for Claude, whatever the model', () => {
+    expect(chatProviderOf('grok', '', providers).key).toBe('grok')
+    expect(chatProviderOf('grok', 'grok-4.6', providers).key).toBe('grok')
+    expect(chatProviderOf('grok', 'wb-open-a', providers).key).toBe('grok')
+    expect(chatProviderOf('claude', 'wb-open-a', providers).key).toBe('claude')
+  })
+})
+
+describe('normalizeChatAgent', () => {
+  it('keeps Claude and the app’s own agent', () => {
+    expect(normalizeChatAgent('claude', 'wb-open-a')).toBe('claude')
+    expect(normalizeChatAgent('workbench')).toBe('workbench')
+  })
+
+  it('reads a provider’s model saved under Grok as the app’s own agent', () => {
+    expect(normalizeChatAgent('grok', 'wb-open-a')).toBe('workbench')
+    expect(normalizeChatAgent(undefined, 'wb-open-a')).toBe('workbench')
+  })
+
+  it('is Grok for anything else', () => {
+    expect(normalizeChatAgent('grok', 'grok-4.6')).toBe('grok')
+    expect(normalizeChatAgent(undefined)).toBe('grok')
+    expect(normalizeChatAgent('other', 42)).toBe('grok')
+  })
+})
+
+describe('usage plans', () => {
+  const claudeIn = { signedIn: true } as Parameters<typeof usagePlans>[0]['claude']
+  const claudeOut = { signedIn: false } as Parameters<typeof usagePlans>[0]['claude']
+  const provider = { id: 'openrouter' } as Provider
+  const base = { claude: claudeOut, grokBuildSignedIn: false, defaultAgent: 'grok' as const, hasKey: false, providers: [] as Provider[] }
+
+  it('shows Grok and Claude as before', () => {
+    expect(usagePlans({ ...base, grokBuildSignedIn: true })).toEqual({ grok: true, claude: false, claudeFirst: false })
+    expect(usagePlans({ ...base, claude: claudeIn })).toEqual({ grok: false, claude: true, claudeFirst: true })
+    expect(usagePlans({ ...base, claude: claudeIn, grokBuildSignedIn: true })).toEqual({ grok: true, claude: true, claudeFirst: false })
+    expect(usagePlans(base).grok).toBe(true)
+    expect(usagePlans({ ...base, hasKey: true, providers: [provider] }).grok).toBe(true)
+    expect(usagePlans({ ...base, grokBuildSignedIn: true, providers: [provider] }).grok).toBe(true)
+  })
+
+  it('shows no plan to a user with only providers', () => {
+    expect(usagePlans({ ...base, providers: [provider] })).toEqual({ grok: false, claude: false, claudeFirst: false })
+    expect(usageMeterPlan(usagePlans({ ...base, providers: [provider] }), 'grok')).toBeNull()
+  })
+
+  it('shows no plan meter for a provider chat', () => {
+    const plans = usagePlans({ ...base, grokBuildSignedIn: true, claude: claudeIn })
+    expect(usageMeterPlan(plans, 'workbench')).toBeNull()
+    expect(usageMeterPlan(plans, 'grok')).toBe('grok')
+    expect(usageMeterPlan(usagePlans({ ...base, claude: claudeIn }), 'claude')).toBe('claude')
   })
 })

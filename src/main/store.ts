@@ -329,7 +329,8 @@ async function rememberProjectPath(path: string | null | undefined): Promise<voi
 async function loadSettingsFile(): Promise<SettingsFile> {
   const file = await readJson<Partial<SettingsFile>>(settingsPath(), {})
   return {
-    defaultAgent: normalizeChatAgent(file.defaultAgent),
+    // Settings on a provider's model under Grok, as saved before the app's own agent, are on that agent.
+    defaultAgent: normalizeChatAgent(file.defaultAgent, file.model),
     claudeModel: file.claudeModel?.trim() ?? '',
     orchestratorModel: file.orchestratorModel?.trim() ?? '',
     subagentModel: file.subagentModel?.trim() ?? '',
@@ -578,16 +579,35 @@ export async function claudeModelFor(chatId: string | undefined): Promise<string
 export async function grokModelFor(chatId: string | undefined): Promise<string> {
   const chat = chatId ? await readChat(chatId) : null
   const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
-  const own = (bot?.agent === 'grok' && bot.model) || chat?.model
+  // A provider's model is never Grok's: it runs on the app's own agent.
+  const own = [bot?.agent === 'grok' ? bot.model : '', chat?.model].find((model) => model && !model.startsWith('wb-'))
   if (own) return own
   const file = await loadSettingsFile()
-  if (!file.model || file.model === DEFAULT_MODEL) return ''
-  const added = (file.providers ?? []).flatMap((provider) =>
+  if (!file.model || file.model === DEFAULT_MODEL || file.model.startsWith('wb-')) return ''
+  const grokModels = (peekGrokCliInfo() ?? (await getGrokCliInfo().catch(() => null)))?.models ?? []
+  return grokModels.includes(file.model) ? file.model : ''
+}
+
+/**
+ * The provider model a chat on the app's own agent runs on: its bot's, its own, else the one in Settings,
+ * else the first provider's first model. A picked model that is no longer listed is `removed`, with no
+ * model, so the chat is not moved onto another provider's model unasked.
+ */
+export async function workbenchModelChoice(chatId: string | undefined): Promise<{ model: string; removed: boolean }> {
+  const chat = chatId ? await readChat(chatId) : null
+  const bot = chat?.botId ? await getBot(chat.botId).catch(() => null) : null
+  const file = await loadSettingsFile()
+  const listed = (file.providers ?? []).flatMap((provider) =>
     provider.models.map((model) => providerModelKey(provider.id, model.id))
   )
-  if (added.includes(file.model)) return file.model
-  const grokModels = (peekGrokCliInfo() ?? (await getGrokCliInfo().catch(() => null)))?.models ?? []
-  return !file.model.startsWith('wb-') && grokModels.includes(file.model) ? file.model : ''
+  const picked = [bot?.agent === 'workbench' ? bot.model : '', chat?.model, file.model].find((model) => model?.startsWith('wb-'))
+  if (picked) return listed.includes(picked) ? { model: picked, removed: false } : { model: '', removed: true }
+  return { model: listed[0] ?? '', removed: false }
+}
+
+/** The provider model a chat on the app's own agent runs on. '' when there is none or its model was removed. */
+export async function workbenchModelFor(chatId: string | undefined): Promise<string> {
+  return (await workbenchModelChoice(chatId)).model
 }
 
 /** The effort a chat runs at: its bot's, its own, else the setting. */
@@ -758,7 +778,10 @@ export async function removeProject(projectId: string): Promise<void> {
 }
 
 async function readChat(chatId: string): Promise<Chat | null> {
-  return readJson<Chat | null>(chatPath(chatId), null)
+  const chat = await readJson<Chat | null>(chatPath(chatId), null)
+  // A chat saved under Grok on a provider's model, before the app's own agent ran those, is on that agent.
+  if (chat?.agent !== 'claude' && chat?.model?.startsWith('wb-')) chat.agent = 'workbench'
+  return chat
 }
 
 export async function chatMediaRoots(chatId: string): Promise<string[]> {
@@ -780,7 +803,8 @@ export async function getChat(chatId: string): Promise<Chat> {
   const chat = await readChat(chatId)
   if (!chat) throw new Error('Chat not found')
   const onGrok = normalizeChatAgent(chat.agent) === 'grok'
-  if (chat.messages.length === 0 && chat.grokSessionId) {
+  // The app's own agent has no session files to import from: its chats keep their messages.
+  if (chat.messages.length === 0 && chat.grokSessionId && chat.agent !== 'workbench') {
     const project = (await loadProjects()).find((item) => item.id === chat.projectId)
     const cwd = chat.worktreePath || project?.path
     if (cwd) {
@@ -879,7 +903,8 @@ export async function listChats(): Promise<ChatSummary[]> {
           projectId: chat.projectId,
           botId: chat.botId,
           title: chat.title,
-          agent: normalizeChatAgent(chat.agent),
+          agent: normalizeChatAgent(chat.agent, chat.model),
+          model: chat.model,
           grokSessionId: chat.grokSessionId ?? null,
           createdAt: chat.createdAt,
           updatedAt: chat.updatedAt,

@@ -127,7 +127,9 @@ import {
   closeSession,
   fetchUsage,
   getClaudeOptions,
-  grokCommands
+  getWorkbenchAgentStatus,
+  grokCommands,
+  onWorkbenchAgentStatus
 } from './acp'
 import { addBotSkill, listBotSkills, removeBotSkill, saveBotSkill } from './botSkills'
 import { addBotDocuments, listBotDocuments, outlinePrompt, removeBotDocument } from './botDocuments'
@@ -173,6 +175,7 @@ import {
   renameChat,
   saveAttachment,
   searchChats,
+  getDefaultAgent,
   getMaxSubagents,
   getMcpServers,
   getPublicSettings,
@@ -516,7 +519,9 @@ export function registerIpc(show: () => boolean): void {
   })
 
   ipcMain.handle('bot:list', () => listBots())
-  ipcMain.handle('bot:create', (_event, name: unknown) => createBot(typeof name === 'string' ? name : ''))
+  ipcMain.handle('bot:create', async (_event, name: unknown) =>
+    createBot(typeof name === 'string' ? name : '', await getDefaultAgent())
+  )
   ipcMain.handle('bot:update', async (_event, input: UpdateBotInput) => {
     const before = await getBot(input.id).catch(() => null)
     const bot = await updateBot(input)
@@ -1166,6 +1171,10 @@ export function registerIpc(show: () => boolean): void {
   })
 
   ipcMain.handle('usage:get', async () => fetchUsage())
+  ipcMain.handle('workbenchAgent:status', () => getWorkbenchAgentStatus())
+  onWorkbenchAgentStatus((status) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('workbenchAgent:status', status)
+  })
   ipcMain.handle('usage:claude', async () => fetchClaudeUsage())
 
   ipcMain.handle('app:quit', () => {

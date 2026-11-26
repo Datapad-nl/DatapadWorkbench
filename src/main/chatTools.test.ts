@@ -79,7 +79,9 @@ vi.mock('./store', () => ({
   saveHandoff: async (chatId: string, markdown: string) => {
     stub.handoffs.push(markdown)
     return `/data/handoffs/${chatId}.md`
-  }
+  },
+  // As the store reads it: the chat's own provider model, else Settings'.
+  workbenchModelFor: async (chatId?: string) => (chatId && stub.chats.get(chatId)?.model) || 'wb-settings-model'
 }))
 
 import {
@@ -197,6 +199,28 @@ describe('workers', () => {
     expect(await delegated({ agent: 'grok' })).toMatchObject({ agent: 'grok', model: '' })
   })
 
+  it("runs a provider chat's worker on that chat's model, unless another agent or model is asked for", async () => {
+    started()
+    chat('boss', { agent: 'workbench', model: 'wb-or-sonnet' })
+    stub.subagentModel = ''
+    expect(await delegated({})).toMatchObject({ agent: 'workbench', model: 'wb-or-sonnet', parentChatId: 'boss' })
+    expect(await delegated({ model: 'haiku' })).toMatchObject({ agent: 'claude', model: 'haiku' })
+    expect(await delegated({ agent: 'grok' })).toMatchObject({ agent: 'grok', model: '' })
+    chat('boss', { agent: 'claude' })
+    expect(await delegated({ agent: 'workbench' })).toMatchObject({ agent: 'workbench', model: 'wb-settings-model' })
+    expect(await delegated({})).toMatchObject({ agent: undefined, model: '' })
+  })
+
+  it('runs every worker on a provider model set in Settings, unless Claude Code or Grok is asked for', async () => {
+    started()
+    chat('boss', { agent: 'claude' })
+    stub.subagentModel = 'wb-or-sonnet'
+    expect(await delegated({ model: 'haiku' })).toMatchObject({ agent: 'workbench', model: 'wb-or-sonnet' })
+    expect(await delegated({ agent: 'claude', model: 'haiku' })).toMatchObject({ agent: 'claude', model: 'haiku' })
+    expect(await delegated({ agent: 'grok' })).toMatchObject({ agent: 'grok', model: '' })
+    stub.subagentModel = ''
+  })
+
   it('refuses a worker past the limit in Settings, until one has reported back', async () => {
     let running = true
     registerChatTools({
@@ -305,6 +329,10 @@ describe('workers', () => {
       expect(await agentHook('picks', { tool_use_id: 'm2', ...call })).toEqual({
         hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { prompt: 'rename the flag' } }
       })
+      // A provider model is for `delegate`'s workers, not Claude Code's own agents.
+      stub.subagentModel = 'wb-or-sonnet'
+      stub.maxSubagents = 3
+      expect(await agentHook('picks', { tool_use_id: 'm3', ...call })).toEqual({})
     })
   })
 

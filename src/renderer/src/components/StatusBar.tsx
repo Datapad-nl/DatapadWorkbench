@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react'
-import { chatAgentLabel } from '../../../shared/types'
+import {
+  chatProviderOf,
+  usageMeterPlan,
+  usagePlans,
+  type WorkbenchAgentStatus
+} from '../../../shared/types'
 import { useBots } from '../bots'
 import { useWorkspace } from '../workspace'
 import { Icon } from './icons'
@@ -41,17 +46,24 @@ export function StatusBar(): React.JSX.Element {
   } = useWorkspace()
   const { bots } = useBots()
   const [usage, setUsage] = useState<Usage | null>(null)
-  // Same order as the usage panel: the default agent's plan, or Claude's when it is the only one.
+  const [workbenchStatus, setWorkbenchStatus] = useState<WorkbenchAgentStatus>('idle')
   const claudeOn = settings?.claude.signedIn === true
-  const onClaude =
-    claudeOn && (settings?.defaultAgent === 'claude' || settings?.grokBuildSignedIn !== true)
+  const activeChat = activeChatId ? chatsById[activeChatId] : undefined
+  // A chat without an agent field predates Claude support, so it runs Grok.
+  const agent = activeChat ? (activeChat.agent ?? 'grok') : settings?.defaultAgent
+  // Same order as the usage panel: the default agent's plan, or Claude's when it is the only one.
+  const meterPlan = settings ? usageMeterPlan(usagePlans(settings), agent) : null
 
   useEffect(() => {
     let cancelled = false
 
     async function load(): Promise<void> {
       try {
-        if (onClaude) {
+        if (!meterPlan) {
+          if (!cancelled) setUsage(null)
+          return
+        }
+        if (meterPlan === 'claude') {
           const next = await window.workbench.getClaudeUsage()
           const top = next.limits.reduce<(typeof next.limits)[number] | null>(
             (best, limit) => (!best || limit.usedPercent > best.usedPercent ? limit : best),
@@ -82,15 +94,33 @@ export function StatusBar(): React.JSX.Element {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [showUsage, onClaude])
+  }, [showUsage, meterPlan])
 
-  const activeChat = activeChatId ? chatsById[activeChatId] : undefined
-  // A chat without an agent field predates Claude support, so it runs Grok.
-  const agent = activeChat ? (activeChat.agent ?? 'grok') : settings?.defaultAgent
-  const connected =
-    agent === 'claude' ? claudeOn : agent === 'grok' ? settings?.grokBuildSignedIn === true : false
-  // A bot's chat works in the bot's folder, whatever project the sidebar is on; a run asked with @ in its project's.
+  useEffect(() => {
+    void window.workbench.getWorkbenchAgentStatus().then(setWorkbenchStatus)
+    return window.workbench.onWorkbenchAgentStatus(setWorkbenchStatus)
+  }, [])
+
+  // A provider's chat is named after the provider and runs on the app's own agent, which needs no sign-in.
+  // A bot's chat runs on the bot's model, else its own, else Settings'.
   const bot = activeChat?.botId ? bots.find((item) => item.id === activeChat.botId) : undefined
+  const runsOn = agent
+    ? chatProviderOf(
+        agent,
+        (bot?.agent === agent && bot.model) || activeChat?.model || settings?.model || '',
+        settings?.providers ?? []
+      )
+    : null
+  // The app's own agent is connected until its process fails; it starts with the first chat.
+  const connected =
+    agent === 'claude'
+      ? claudeOn
+      : agent === 'workbench'
+        ? runsOn?.provider != null && workbenchStatus !== 'failed'
+        : agent === 'grok'
+          ? settings?.grokBuildSignedIn === true
+          : false
+  // A bot's chat works in the bot's folder, whatever project the sidebar is on; a run asked with @ in its project's.
   const project = projects.find((item) => item.id === (bot ? activeChat?.projectId : activeProjectId)) ?? null
   const folder = project?.path ?? bot?.folder
   const indexLabel = project ? INDEX_LABEL[indexes[project.id]?.state ?? ''] : undefined
@@ -105,7 +135,7 @@ export function StatusBar(): React.JSX.Element {
       <span className="flex shrink-0 items-center gap-1.5" data-testid="agent-status">
         <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-ok' : 'bg-danger'}`} />
         {connected ? 'Connected' : 'Disconnected'}
-        {agent && <span className="text-faint">· {chatAgentLabel(agent)} agent</span>}
+        {runsOn && <span className="text-faint">· {runsOn.name} agent</span>}
       </span>
       {indexLabel && (
         <span className="flex shrink-0 items-center gap-1.5">

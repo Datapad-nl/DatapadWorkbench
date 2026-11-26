@@ -19,13 +19,19 @@ import {
   deleteChat,
   ensureStore,
   getApiKey,
+  getChat,
   getConciseReplies,
+  getDefaultAgent,
+  grokModelFor,
   listChats,
   mutateChat,
   saveAttachment,
   setThemeId,
-  updateSettings
+  updateSettings,
+  workbenchModelChoice,
+  workbenchModelFor
 } from './store'
+import { getBot } from './bots'
 
 let chats = ''
 
@@ -62,6 +68,14 @@ describe('listChats', () => {
     const list = await listChats()
     expect(list.map((chat) => chat.title)).toEqual(['Newer', 'Older'])
     expect(list[0]).toMatchObject({ id: 'b', projectId: 'p1', agent: 'grok', messageCount: 2, schedule: null, pr: null })
+  })
+
+  it('carries the chat\'s model, so the list can tag an unopened chat', async () => {
+    writeFileSync(
+      join(chats, 'a.json'),
+      JSON.stringify({ ...JSON.parse(chatJson('a', 'Routed', '2026-01-01T00:00:00.000Z')), model: 'wb-or-nemotron' })
+    )
+    expect((await listChats())[0]?.model).toBe('wb-or-nemotron')
   })
 
   it('does not read a file again while its inode, time and size are the same', async () => {
@@ -178,5 +192,66 @@ describe('API key at rest', () => {
     await ensureStore()
     expect(JSON.parse(readFileSync(settings(), 'utf8'))).toMatchObject({ apiKey: 'xai-test-1234' })
     expect(await getApiKey()).toBe('xai-test-1234')
+  })
+})
+
+describe('provider models from before the app\'s own agent', () => {
+  const settings = (): string => join(stub.dir, 'workbench', 'settings.json')
+  const providers = [
+    { id: 'or', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', backend: 'chat_completions', apiKey: '', models: [{ id: 'a/b', name: 'B', efforts: [] }, { id: 'c', name: 'C', efforts: [] }] }
+  ]
+  const chat = (id: string, fields: Record<string, unknown>): void =>
+    writeFileSync(join(chats, `${id}.json`), JSON.stringify({ ...JSON.parse(chatJson(id, id, '2026-01-01T00:00:00.000Z')), ...fields }))
+
+  it('reads a Grok chat, bot or Settings on a wb- model as on the app\'s own agent', async () => {
+    chat('a', { agent: 'grok', model: 'wb-or-a-b' })
+    chat('b', { model: 'wb-or-c' })
+    chat('c', { agent: 'claude', model: 'wb-or-c' })
+    chat('d', { agent: 'grok', model: 'grok-4.6' })
+    expect((await getChat('a')).agent).toBe('workbench')
+    expect((await getChat('b')).agent).toBe('workbench')
+    expect((await getChat('c')).agent).toBe('claude')
+    expect((await getChat('d')).agent).toBe('grok')
+    expect(Object.fromEntries((await listChats()).map((item) => [item.id, item.agent]))).toEqual({
+      a: 'workbench',
+      b: 'workbench',
+      c: 'claude',
+      d: 'grok'
+    })
+    writeFileSync(
+      join(stub.dir, 'workbench', 'bots.json'),
+      JSON.stringify({ bots: [{ id: 'b1', name: 'Scout', agent: 'grok', model: 'wb-or-c', instructions: '', allowedTools: [], avatar: null }] })
+    )
+    expect((await getBot('b1')).agent).toBe('workbench')
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'grok', model: 'wb-or-c', providers }))
+    expect(await getDefaultAgent()).toBe('workbench')
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'grok', model: 'grok-4.6', providers }))
+    expect(await getDefaultAgent()).toBe('grok')
+  })
+
+  it('gives the app\'s own agent a listed model: the chat\'s, else Settings\', else the first, and Grok none of them', async () => {
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'workbench', model: 'wb-or-c', providers }))
+    chat('own', { agent: 'workbench', model: 'wb-or-a-b' })
+    chat('none', { agent: 'workbench' })
+    expect(await workbenchModelFor('own')).toBe('wb-or-a-b')
+    expect(await workbenchModelFor('none')).toBe('wb-or-c')
+    expect(await grokModelFor('none')).toBe('')
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'workbench', model: 'grok-4.6', providers }))
+    expect(await workbenchModelFor('none')).toBe('wb-or-a-b')
+    writeFileSync(settings(), JSON.stringify({ model: 'grok-4.6' }))
+    expect(await workbenchModelFor('none')).toBe('')
+  })
+
+  it('runs a chat whose model was removed on none, not on another provider\'s model', async () => {
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'workbench', model: 'wb-or-c', providers }))
+    chat('gone', { agent: 'workbench', model: 'wb-gone-x' })
+    chat('none', { agent: 'workbench' })
+    expect(await workbenchModelChoice('gone')).toEqual({ model: '', removed: true })
+    expect(await workbenchModelFor('gone')).toBe('')
+    expect(await workbenchModelChoice('none')).toEqual({ model: 'wb-or-c', removed: false })
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'workbench', model: 'wb-gone-x', providers }))
+    expect(await workbenchModelChoice('none')).toEqual({ model: '', removed: true })
+    writeFileSync(settings(), JSON.stringify({ defaultAgent: 'workbench', model: 'wb-or-c' }))
+    expect(await workbenchModelChoice('none')).toEqual({ model: '', removed: true })
   })
 })

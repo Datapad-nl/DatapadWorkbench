@@ -16,7 +16,7 @@ import type {
   PlanVerdict,
   Project
 } from '../shared/types'
-import { chatAgentLabel, normalizeChatAgent, normalizePermissionMode } from '../shared/types'
+import { normalizeChatAgent, normalizePermissionMode } from '../shared/types'
 import { askedFromPrompt, carryOverPrompt } from '../shared/carryOver'
 import { contextFromUpdate } from '../shared/handoff'
 import {
@@ -58,6 +58,7 @@ import {
 } from './acp'
 import { emitNotice, finishTurn, lookupSession, startTurn } from './activity'
 import { attachmentTitle, isFileAttachment, promptForAttachments } from './attachments'
+import { asideEndReply, parseAsideReply } from './asideReply'
 import { promptForBotAnswers, promptForBotRun, promptForBotsMentioned } from './botPrompt'
 import { listBotDocuments } from './botDocuments'
 import { botRun } from './botRuns'
@@ -93,7 +94,17 @@ import { cancelContinuation } from './secretTools'
 import { clearGrokPlanApproval, grokBuildSignedIn, readGrokPlan } from './sessions'
 import { chatWorkingDir, isolateChatIfNeeded } from './git'
 import { projectSessionRules } from './intake'
-import { getApiKey, getChat, listChats, listProjects, mutateChat, skipSessionImport } from './store'
+import {
+  getApiKey,
+  getChat,
+  listChats,
+  listProjects,
+  mutateChat,
+  skipSessionImport,
+  workbenchModelChoice,
+  workbenchModelFor
+} from './store'
+import { chatAgentName } from './providers'
 import { saveVisual, visualFromUpdate } from './visuals'
 import { sdkSignal, selfTurnAction, type SelfTurnSignal } from './selfTurn'
 import { STEP_BREAK, plainReply } from '../shared/steps'
@@ -831,7 +842,7 @@ export async function rewindChat(chatId: string, checkpointId: string, cwd: stri
 }
 
 /**
- * Move a chat to the other agent. A fresh chat just switches. A started one leaves its session behind:
+ * Move a chat to another agent. A fresh chat just switches. A started one leaves its session behind:
  * the next turn opens a session on the new agent and hands it the conversation so far.
  */
 export async function switchChatAgent(chatId: string, agent: ChatAgent): Promise<Chat> {
@@ -1090,11 +1101,17 @@ export async function saveMessageToBots(
 }
 
 /** Null when the chat's agent can run, otherwise what the user has to do. */
-async function agentSignInError(agent: ChatAgent): Promise<string | null> {
+async function agentSignInError(agent: ChatAgent, chatId: string): Promise<string | null> {
   if (agent === 'claude') {
     return (await getClaudeCliInfo()).signedIn
       ? null
       : 'Run `claude auth login` so Claude Code can pick up this chat.'
+  }
+  // The app's own agent has no sign-in: it runs on a provider's key.
+  if (agent === 'workbench') {
+    const { model, removed } = await workbenchModelChoice(chatId)
+    if (removed) return 'This chat’s model was removed in Settings → Providers. Pick another model for this chat.'
+    return model ? null : 'Add a provider with a model in Settings → Providers.'
   }
   return grokBuildSignedIn() || (await getApiKey())
     ? null
@@ -1182,7 +1199,7 @@ async function promptTurn(turn: Turn, followUp?: FollowUp): Promise<Chat | null>
   // A project with secrets on Grok Build runs on a process of its own, which a stop must target.
   const env = await step(turn, grokProcEnv(agent, chat.id))
   turn.agent = agentKey(agent, pluginDir, env)
-  const signInError = await step(turn, agentSignInError(agent))
+  const signInError = await step(turn, agentSignInError(agent, chat.id))
   if (signInError) throw new Error(signInError)
   await step(turn, ensureAgent(agent, pluginDir, env))
   const project = (await step(turn, listProjects())).find((item) => item.id === chat.projectId)
@@ -1384,17 +1401,6 @@ function stripBtwPrefix(text: string): string {
   return trimmed
 }
 
-function parseAsideReply(text: string): { steer: boolean; reply: string } {
-  const trimmed = text.trim()
-  const match = trimmed.match(/^STEER\b:?[ \t]*([\s\S]*)$/i)
-  if (!match) return { steer: false, reply: trimmed }
-  const rest = match[1].trim()
-  return {
-    steer: true,
-    reply: rest || 'Noted — I’ll apply that to the current task.'
-  }
-}
-
 function emitAsideDelta(chatId: string, messageId: string): (chunk: string) => void {
   let buffer = ''
   let ready = false
@@ -1491,7 +1497,8 @@ function steerPrompt(notes: SteerNote[]): string {
   ].join('\n')
 }
 
-function asideContext(chat: Chat, skipMessageId?: string): string {
+/** `agentName` labels the chat's replies as the user sees them: its provider, Claude or Grok. */
+function asideContext(chat: Chat, agentName: string, skipMessageId?: string): string {
   const lines: string[] = [`Chat: ${chat.title}`]
   const plan = livePlans.get(chat.id) ?? chat.plan
   if (plan) {
@@ -1504,7 +1511,7 @@ function asideContext(chat: Chat, skipMessageId?: string): string {
     (message) => message.id !== skipMessageId && message.content.trim()
   )
   for (const message of recent.slice(-8)) {
-    const who = message.role === 'user' ? 'User' : chatAgentLabel(normalizeChatAgent(chat.agent))
+    const who = message.role === 'user' ? 'User' : agentName
     const tag =
       message.kind === 'btw' ? ' (aside)' : message.kind === 'steer' ? ' (steer)' : ''
     lines.push(`${who}${tag}: ${clipText(plainReply(message.content), ASIDE_MESSAGE_MAX)}`)
@@ -1512,7 +1519,7 @@ function asideContext(chat: Chat, skipMessageId?: string): string {
   const turn = turns.get(chat.id)
   const live = turn ? plainReply(turn.draft).trim() : ''
   if (live) {
-    lines.push(`${chatAgentLabel(normalizeChatAgent(chat.agent))} (in progress): ${clipText(live, 3_000)}`)
+    lines.push(`${agentName} (in progress): ${clipText(live, 3_000)}`)
   }
   else if (!turn) lines.push('The main task is not currently running.')
   return clipText(lines.join('\n'), ASIDE_CONTEXT_MAX)
@@ -1646,7 +1653,7 @@ async function runAside(
     group.delete(abort)
     if (group.size === 0 && asideAborts.get(chatId) === group) asideAborts.delete(chatId)
   }
-  const signInError = await agentSignInError(agent).catch((error: unknown) => errorMessage(error))
+  const signInError = await agentSignInError(agent, chatId).catch((error: unknown) => errorMessage(error))
   if (signInError || abort.signal.aborted) {
     release()
     const failed = await mutateChat(chatId, (chat) => {
@@ -1666,17 +1673,25 @@ async function runAside(
 
   const cwd = chatFolder(started, project)
   let assembled = ''
+  // A stop throws, so the text streamed so far is kept here.
+  let streamed = ''
   let steer = false
   try {
     const latest = await getChat(chatId).catch(() => started)
     const attached = promptForAttachments(promptForBotsMentioned(question, bots), attachments)
+    const model = agent === 'workbench' ? await workbenchModelFor(chatId).catch(() => '') : ''
+    const emitDelta = emitAsideDelta(chatId, replyId)
     assembled = await promptIsolated(
       cwd,
-      asidePrompt(attached.text, asideContext(latest, replyId)),
+      asidePrompt(attached.text, asideContext(latest, await chatAgentName(agent, model), replyId)),
       attached.images,
-      emitAsideDelta(chatId, replyId),
+      (chunk) => {
+        streamed += chunk
+        emitDelta(chunk)
+      },
       abort.signal,
-      { agent, timeoutMs: ASIDE_TIMEOUT_MS }
+      // On the app's own agent an aside runs on the chat's model.
+      { agent, timeoutMs: ASIDE_TIMEOUT_MS, model: model || undefined }
     )
     const parsed = parseAsideReply(assembled)
     steer = parsed.steer
@@ -1686,10 +1701,7 @@ async function runAside(
     })
     emitLive({ type: 'aside-done', chatId, chat: done })
   } catch (error) {
-    const message =
-      assembled.trim() ||
-      (error instanceof Error && /cancel/i.test(error.message) ? '(stopped)' : errorMessage(error))
-    const parsed = assembled.trim() ? parseAsideReply(assembled) : { steer: false, reply: message }
+    const parsed = asideEndReply(assembled || streamed, error, errorMessage(error))
     steer = parsed.steer && parsed.reply !== '(stopped)'
     const done = await mutateChat(chatId, (chat) => {
       const reply = chat.messages.find((item) => item.id === replyId)

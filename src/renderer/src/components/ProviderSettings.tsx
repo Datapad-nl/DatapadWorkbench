@@ -35,7 +35,7 @@ function segment(on: boolean): string {
   return `rounded px-2.5 py-1 text-[11px] ${on ? 'bg-raised text-ink' : 'text-muted hover:text-ink'}`
 }
 
-/** Inference providers whose models Grok chats run on. The main process keeps the keys and writes Grok's config. */
+/** Inference providers whose models run on the app's own agent. The main process keeps the keys. */
 export function ProviderSettings(): React.JSX.Element {
   const [editing, setEditing] = useState<Provider | 'new' | null>(null)
   if (editing) {
@@ -64,9 +64,9 @@ function ListView({ onEdit }: { onEdit: (provider: Provider | 'new') => void }):
 
   return (
     <>
-      <p className="mt-1 text-[12.5px] leading-5 text-muted">
-        Models from providers run through Grok Build. The app writes them to a marked block in Grok&apos;s config file (
-        <span className="font-mono">~/.grok/config.toml</span>).
+      <p className="mt-1 text-[12.5px] leading-5 text-ink-2">
+        Add a provider with its API key, and its models appear next to Grok and Claude in chats, bots and Settings.
+        They run on the app's own agent, so they need neither Grok Build nor Claude Code, nor a sign-in.
       </p>
       {providers.length ? (
         <ul data-testid="providers-list" className="mt-4 divide-y divide-line rounded-lg border border-line bg-canvas">
@@ -146,6 +146,8 @@ function EditView({ provider, onBack }: { provider: Provider | null; onBack: () 
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? first.baseUrl)
   const [backend, setBackend] = useState<ProviderBackend>(provider?.backend ?? first.backend)
   const [apiKey, setApiKey] = useState('')
+  // Saving with this on and no new key clears the saved one.
+  const [dropKey, setDropKey] = useState(false)
   const [chosen, setChosen] = useState<ProviderModel[]>(provider?.models ?? [])
   const [fetched, setFetched] = useState<ProviderModel[] | null>(null)
   const [filter, setFilter] = useState('')
@@ -214,7 +216,7 @@ function EditView({ provider, onBack }: { provider: Provider | null; onBack: () 
         name,
         baseUrl,
         backend,
-        apiKey: apiKey.trim() ? apiKey.trim() : undefined,
+        apiKey: apiKey.trim() ? apiKey.trim() : dropKey ? '' : undefined,
         models: chosen
       })
       onBack()
@@ -291,20 +293,34 @@ function EditView({ provider, onBack }: { provider: Provider | null; onBack: () 
       <label className="mt-3 block text-[12px] text-muted">
         API key
         {needsKey ? <span className="text-red-400"> *</span> : null}
-        {provider?.hasKey ? (
-          <span className="mt-0.5 block text-[11px] leading-4">Leave empty to keep the saved key.</span>
-        ) : null}
         <input
           type="password"
           data-testid="provider-key"
           autoComplete="off"
           spellCheck={false}
           className={`${INPUT} font-mono`}
-          placeholder={provider?.keyPreview ?? (needsKey ? 'API key' : 'Optional')}
+          placeholder={(!dropKey && provider?.keyPreview) || (needsKey ? 'API key' : 'Optional')}
           value={apiKey}
           onChange={(event) => setApiKey(event.target.value)}
         />
       </label>
+      {provider?.hasKey ? (
+        <div className="mt-1 flex items-center gap-2 text-[11px] leading-4 text-muted">
+          <span>
+            {dropKey
+              ? 'The saved key is removed when you save.'
+              : 'Leave empty to keep the saved key, or type a new one to replace it.'}
+          </span>
+          <button
+            type="button"
+            data-testid="provider-remove-key"
+            className={`${SMALL_BUTTON} ml-auto`}
+            onClick={() => setDropKey((value) => !value)}
+          >
+            {dropKey ? 'Keep key' : 'Remove key'}
+          </button>
+        </div>
+      ) : null}
 
       <div className="mt-5 flex items-center gap-2">
         <div className="text-[12px] font-medium text-ink">Models</div>

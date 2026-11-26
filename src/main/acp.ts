@@ -1,7 +1,7 @@
 import { spawn } from 'child_process'
 import readline from 'readline'
 import { onlyMcpServers, toAcpMcpServers } from '../shared/mcp'
-import { agentToolRule, conductorRule } from '../shared/conductor'
+import { agentToolRule, conductorRule, conductorWorkerModel } from '../shared/conductor'
 import { SHORT_REPLIES_RULE } from '../shared/replyStyle'
 import { isToolAllowed, toolCallName } from '../shared/botTools'
 import { BROWSER_SESSION_RULE, agentHookSettings, browserMcpServers } from './browserAgent'
@@ -39,7 +39,7 @@ import {
   skipOutcome
 } from './questions'
 import { tmpdir } from 'os'
-import { isAbsolute, resolve, sep } from 'path'
+import { isAbsolute, join, resolve, sep } from 'path'
 import {
   normalizeReasoningEffort,
   type AgentCommand,
@@ -47,7 +47,8 @@ import {
   type ClaudeOptions,
   type ReasoningEffort,
   type UsagePeriodKind,
-  type UsageSnapshot
+  type UsageSnapshot,
+  type WorkbenchAgentStatus
 } from '../shared/types'
 import {
   chatBot,
@@ -62,11 +63,13 @@ import {
   getMcpServers,
   getSubagentModel,
   grokModelFor,
-  skipNewSession
+  skipNewSession,
+  workbenchModelFor
 } from './store'
 import { readGrokPlan } from './sessions'
 import { envFingerprint, onSecretsChanged, secretEnv, secretScopes } from './secrets'
-import { clampEffort, onProvidersChanged, providerEnv, providerModelEfforts } from './providers'
+import { agentProviders, clampEffort, onProvidersChanged, providerModelEfforts } from './providers'
+import { startWorkbenchAgent } from './workbenchAgent'
 
 type JsonRpc = {
   jsonrpc?: string
@@ -74,7 +77,17 @@ type JsonRpc = {
   method?: string
   params?: unknown
   result?: unknown
-  error?: { message?: string; code?: number }
+  error?: { message?: string; code?: number; data?: unknown }
+}
+
+/**
+ * What a failed request says. Grok answers a failed turn with "Internal error" and puts the model
+ * endpoint's own words, such as a provider's 401 or 402, in `data.message`, followed by a block of details.
+ */
+function rpcErrorMessage(error: NonNullable<JsonRpc['error']>): string {
+  const data = error.data as { message?: unknown } | null | undefined
+  const detail = typeof data?.message === 'string' ? data.message.split('\n\n')[0].trim() : ''
+  return detail || error.message || JSON.stringify(error)
 }
 
 export type SessionMode = {
@@ -287,9 +300,8 @@ async function botWritesSharedMemory(sessionId: string, params: PermissionParams
 }
 
 /**
- * A chat's secrets and the providers' keys, for the environment of a Grok process. `id` is the scopes,
- * joined by `+`, and a fingerprint of the values and of the providers' config, so a change to either gets
- * a process of its own.
+ * A chat's secrets, for the environment of a Grok process. `id` is the scopes, joined by `+`, and a
+ * fingerprint of the values, so changed secrets get a process of their own.
  */
 export type ProcEnv = { id: string; vars: Record<string, string> }
 
@@ -297,10 +309,11 @@ export type ProcEnv = { id: string; vars: Record<string, string> }
  * One ACP agent process. Grok Build and Claude Code each get their own, and so does every bot on
  * Grok Build, because Grok takes a bot's skills (`--plugin-dir`) for the whole process. So does every
  * project with secrets on Grok Build, which takes environment variables only for the whole process.
+ * The app's own agent takes skills and secrets per session, so all its chats share one.
  */
 type Conn = {
   agent: ChatAgent
-  /** `grok`, `claude`, or `grok@<bot folder>`, each with `#<env id>` when it runs with secrets. */
+  /** `grok`, `claude`, `workbench`, or `grok@<bot folder>`, each with `#<env id>` when it runs with secrets. */
   key: AgentKey
   pluginDir: string | null
   env: ProcEnv | null
@@ -346,10 +359,12 @@ function makeConn(agent: ChatAgent, pluginDir: string | null = null, env: ProcEn
 
 const conns = new Map<AgentKey, Conn>([
   ['grok', makeConn('grok')],
-  ['claude', makeConn('claude')]
+  ['claude', makeConn('claude')],
+  ['workbench', makeConn('workbench')]
 ])
 const grokConn = conns.get('grok') as Conn
 const claudeConn = conns.get('claude') as Conn
+const workbenchConn = conns.get('workbench') as Conn
 
 function connFor(agent: ChatAgent, pluginDir?: string | null, env?: ProcEnv | null): Conn {
   const key = agentKey(agent, pluginDir, env)
@@ -401,12 +416,11 @@ async function spawnAgent(
   secrets?: ProcEnv | null
 ): Promise<AgentProcess> {
   if (agent === 'claude') return startClaudeAdapter()
+  if (agent === 'workbench') return startWorkbenchAgent()
   const plugin = pluginDir ? ['--plugin-dir', pluginDir] : []
-  // A process without a chat's environment, such as the shared one, still gets the providers' keys.
-  const providers = secrets ? {} : (await providerEnv().catch(() => null))?.vars
   return spawn(grokBinary(), ['agent', '--no-leader', ...plugin, 'stdio'], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...providers, ...secrets?.vars }
+    env: secrets ? { ...process.env, ...secrets.vars } : process.env
   })
 }
 
@@ -417,22 +431,11 @@ async function chatSecrets(chatId?: string): Promise<{ scopes: string[]; env: Re
   return { scopes, env: await secretEnv(...scopes) }
 }
 
-/** The environment of the Grok process for a chat with secrets or when there are providers. Null on the shared process. */
+/** The environment of the Grok process for a chat with secrets. Null on the shared process. */
 export async function grokProcEnv(agent: ChatAgent, chatId?: string): Promise<ProcEnv | null> {
   if (agent !== 'grok') return null
-  const chat = chatId ? await getChat(chatId).catch(() => null) : null
-  return procEnvFor(chat ? secretScopes(chat) : [])
-}
-
-async function procEnvFor(scopes: string[]): Promise<ProcEnv | null> {
-  const [secrets, providers] = await Promise.all([secretEnv(...scopes), providerEnv()])
-  const vars = { ...providers.vars, ...secrets }
-  if (Object.keys(vars).length === 0 && !providers.stamp) return null
-  // Chats without secrets share one process, whatever their scopes.
-  const named = Object.keys(secrets).length > 0 ? scopes : []
-  // The stamp is no variable: only the fingerprint takes it. Secret names cannot start with #.
-  const id = `${named.join('+')}:${envFingerprint({ ...vars, '#providers': providers.stamp })}`
-  return { id, vars }
+  const { scopes, env } = await chatSecrets(chatId)
+  return Object.keys(env).length > 0 ? { id: `${scopes.join('+')}:${envFingerprint(env)}`, vars: env } : null
 }
 
 /** Session rules that name the chat's secrets, so the agent uses them and does not ask again. */
@@ -550,10 +553,13 @@ function flushInbound(conn: Conn): void {
   }
 }
 
+/** The agent's name in errors. */
+function agentName(agent: ChatAgent): string {
+  return agent === 'claude' ? 'Claude Code' : agent === 'workbench' ? 'The Workbench agent' : 'Grok Build'
+}
+
 function send(conn: Conn, payload: object): void {
-  if (!conn.proc?.stdin.writable) {
-    throw new Error(conn.agent === 'claude' ? 'Claude Code is not running' : 'Grok Build is not running')
-  }
+  if (!conn.proc?.stdin.writable) throw new Error(`${agentName(conn.agent)} is not running`)
   conn.proc.stdin.write(`${JSON.stringify(payload)}\n`)
 }
 
@@ -960,7 +966,7 @@ function handleMessage(conn: Conn, message: JsonRpc): void {
   if (waiter.timer) clearTimeout(waiter.timer)
   conn.pending.delete(message.id)
   if (message.error) {
-    waiter.reject(new Error(message.error.message || JSON.stringify(message.error)))
+    waiter.reject(new Error(rpcErrorMessage(message.error)))
     return
   }
   waiter.resolve(message.result)
@@ -994,7 +1000,8 @@ async function handshake(agent: ChatAgent, call: Call, clientName: string): Prom
 
   const steering = init._meta?.steering?.supported === true
   // Claude Code signs in from the user's `claude auth login`. Its adapter has no authenticate step.
-  if (agent === 'claude') return steering
+  // The app's own agent runs on the providers' keys, which it is sent next.
+  if (agent !== 'grok') return steering
 
   const methods = new Set((init.authMethods ?? []).map((method) => method.id))
   const apiKey = await getApiKey()
@@ -1089,11 +1096,12 @@ function attachProcess(conn: Conn, child: AgentProcess): void {
     conn.proc = null
     conn.ready = null
     releaseAgentState(conn, reason)
+    if (conn === workbenchConn) setWorkbenchStatus('failed')
   }
-  child.on('exit', () => gone(conn.agent === 'claude' ? 'Claude Code exited' : 'Grok Build exited'))
+  child.on('exit', () => gone(`${agentName(conn.agent)} exited`))
   // A binary that cannot start emits only 'error'. Without this the app would crash and nothing would release.
   child.on('error', (error) => {
-    gone(`${conn.agent === 'claude' ? 'Claude Code' : 'Grok Build'} failed to start: ${error.message}`)
+    gone(`${agentName(conn.agent)} failed to start: ${error.message}`)
   })
 }
 
@@ -1151,11 +1159,14 @@ export async function ensureAgent(
       (method, params, timeoutMs) => request(conn, method, params, timeoutMs),
       'Datapad Workbench'
     )
+    if (agent === 'workbench') await sendProviders(conn)
   })()
   conn.ready = ready
   try {
     await ready
+    if (conn === workbenchConn) setWorkbenchStatus('running')
   } catch (error) {
+    if (conn === workbenchConn) setWorkbenchStatus('failed')
     // Only clean up our own attempt. A later start may already own the connection.
     const mine = child as AgentProcess | null
     if (conn.ready === ready) conn.ready = null
@@ -1167,6 +1178,36 @@ export async function ensureAgent(
     throw error
   }
 }
+
+let workbenchStatus: WorkbenchAgentStatus = 'idle'
+const WORKBENCH_STATUS_LISTENERS = new Set<(status: WorkbenchAgentStatus) => void>()
+
+function setWorkbenchStatus(status: WorkbenchAgentStatus): void {
+  if (status === workbenchStatus) return
+  workbenchStatus = status
+  for (const listener of WORKBENCH_STATUS_LISTENERS) listener(status)
+}
+
+/** Whether the app's own agent process runs, for the status bar: it has no sign-in to show instead. */
+export function getWorkbenchAgentStatus(): WorkbenchAgentStatus {
+  return workbenchStatus
+}
+
+export function onWorkbenchAgentStatus(listener: (status: WorkbenchAgentStatus) => void): () => void {
+  WORKBENCH_STATUS_LISTENERS.add(listener)
+  return () => {
+    WORKBENCH_STATUS_LISTENERS.delete(listener)
+  }
+}
+
+/** The app's own agent holds the providers, keys included, only in memory: it is sent them after each start and change. */
+async function sendProviders(conn: Conn): Promise<void> {
+  send(conn, { jsonrpc: '2.0', method: '_workbench/providers', params: { providers: await agentProviders() } })
+}
+
+onProvidersChanged(() => {
+  if (workbenchConn.proc) void sendProviders(workbenchConn).catch(() => undefined)
+})
 
 /** Claude Code's messages that say when a turn it started itself begins and ends (see selfTurn.ts). */
 const SELF_TURN_MESSAGES = [{ type: 'system', subtype: 'session_state_changed' }, { type: 'result' }]
@@ -1212,14 +1253,31 @@ async function sessionConfig(
   const chat = chatId ? await getChat(chatId).catch(() => null) : null
   const conductor = chat?.conductor
   const maxSubagents = await getMaxSubagents()
+  const providerModel = agent === 'workbench' ? await workbenchModelFor(chatId).catch(() => '') : ''
   // With no workers allowed a conductor could do nothing, so it gets the rule that has it do the work itself.
-  const role = conductor && maxSubagents > 0 ? conductorRule(subagentModel, maxSubagents) : null
+  const role =
+    conductor && maxSubagents > 0
+      ? conductorRule(conductorWorkerModel(subagentModel, agent, providerModel), maxSubagents)
+      : null
+  // Claude Code's own agents take only its models. A provider model in Settings is for `delegate`'s workers.
+  const claudeAgentModel = subagentModel.startsWith('wb-') ? '' : subagentModel
   // A user's own chat, not a bot's chat and not a worker.
   const orchestrate = !bot && !chat?.parentChatId
   // A bot's chat follows the bot's own switch; a user's own chat follows Settings; a worker never gets it.
   const short = bot ? bot.conciseReplies : chatId && orchestrate && (await getConciseReplies())
   const withStyle = short ? `${rules}\n\n${SHORT_REPLIES_RULE}` : rules
-  if (agent !== 'claude') return { ...config, ...sessionRules(agent, role ? `${withStyle}\n\n${role}` : withStyle) }
+  if (agent === 'grok') return { ...config, ...sessionRules(agent, role ? `${withStyle}\n\n${role}` : withStyle) }
+  if (agent === 'workbench') {
+    // The app's own agent takes the model, the secrets for its shell and a bot's skills per session.
+    const effort = await workbenchEffort(chatId ? await effortFor(chatId).catch(() => null) : await getEffort(), providerModel)
+    const workbench = {
+      ...(providerModel ? { model: providerModel } : {}),
+      ...(effort ? { effort } : {}),
+      ...(Object.keys(secrets).length > 0 ? { env: secrets } : {}),
+      ...(pluginDir ? { skillsDir: join(pluginDir, 'skills') } : {})
+    }
+    return { ...config, _meta: { rules: role ? `${withStyle}\n\n${role}` : withStyle, workbench } }
+  }
   // A bot's own skills come with the session, as a plugin in the bot's folder.
   const plugins = pluginDir ? { plugins: [{ type: 'local', path: pluginDir }] } : {}
   if (!chatId) {
@@ -1233,14 +1291,14 @@ async function sessionConfig(
   // A worker and a bot's chat do their task themselves; a user's chat orchestrates its agents.
   const session = sessionRules(
     agent,
-    `${withStyle}\n\n${role ?? agentToolRule(subagentModel, maxSubagents, orchestrate)}`
+    `${withStyle}\n\n${role ?? agentToolRule(claudeAgentModel, maxSubagents, orchestrate)}`
   )
   const meta = (session._meta as { claudeCode: Record<string, unknown> }).claudeCode
   // Claude Code takes environment variables per session: the chat's secrets, for its shell.
   // Its MCP idle limit is off, last so no secret overrides it: `delegate`, `ask_bot` and `request_secret` wait as long as the work takes.
   const env = {
     ...secrets,
-    ...(subagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: subagentModel } : {}),
+    ...(claudeAgentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: claudeAgentModel } : {}),
     CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: '0'
   }
   return {
@@ -1273,8 +1331,16 @@ async function applySessionEffort(sessionId: string, effort: ReasoningEffort | n
     }
     return
   }
-  const value = await grokEffort(effort, await grokModelFor(sessionChatIds.get(sessionId)).catch(() => ''))
-  if (!value) return
+  if (conn.agent === 'workbench') {
+    const value = await workbenchEffort(effort, await workbenchModelFor(sessionChatIds.get(sessionId)).catch(() => ''))
+    if (!value) return
+    await request(conn, 'session/set_config_option', { sessionId, configId: 'reasoning_effort', value }, 8_000).catch(
+      () => undefined
+    )
+    return
+  }
+  // Grok Build tops out at Extra high, so Claude's Max maps to it.
+  const value = effort === 'max' ? 'xhigh' : effort
   const set = (option: unknown): Promise<unknown> =>
     request(conn, 'session/set_config_option', { sessionId, configId: 'reasoning_effort', value: option }, 8_000)
   try {
@@ -1285,11 +1351,10 @@ async function applySessionEffort(sessionId: string, effort: ReasoningEffort | n
   }
 }
 
-/** Grok Build tops out at Extra high, so Claude's Max maps to it. A provider's model gets its nearest level, or none. */
-async function grokEffort(effort: ReasoningEffort, model: string): Promise<ReasoningEffort | null> {
-  const offered = await providerModelEfforts(model).catch(() => null)
-  if (offered) return clampEffort(effort, offered)
-  return effort === 'max' ? 'xhigh' : effort
+/** A provider's model gets the level nearest to `effort` of its own, or none when it lists none. */
+async function workbenchEffort(effort: ReasoningEffort | null, model: string): Promise<ReasoningEffort | null> {
+  const offered = effort && model ? await providerModelEfforts(model).catch(() => null) : null
+  return effort && offered ? clampEffort(effort, offered) : null
 }
 
 export async function applyEffortToLiveSessions(effort: ReasoningEffort | null): Promise<void> {
@@ -1420,8 +1485,10 @@ async function applySessionSettings(agent: ChatAgent, sessionId: string, chatId?
   if (chatId) sessionChatIds.set(sessionId, chatId)
   // A chat runs at its bot's effort, else its own, else the setting. A Grok chat without a model of
   // its own or its bot's keeps Grok's default.
+  // The app's own agent does not keep a loaded session's model, so it is set every time.
   if (agent !== 'claude') {
-    await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, await grokModelFor(chatId).catch(() => ''))
+    const model = agent === 'workbench' ? workbenchModelFor(chatId) : grokModelFor(chatId)
+    await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, await model.catch(() => ''))
   }
   await applySessionEffort(sessionId, chatId ? await effortFor(chatId).catch(() => null) : await getEffort())
   if (agent !== 'claude') return
@@ -1438,7 +1505,9 @@ export async function applyChatToLiveSession(chatId: string): Promise<void> {
   const model =
     agent === 'claude'
       ? (await claudeModelFor(chatId).catch(() => '')) || 'default'
-      : (await grokModelFor(chatId).catch(() => '')) || ((await getGrokCliInfo().catch(() => null))?.models[0] ?? '')
+      : agent === 'workbench'
+        ? await workbenchModelFor(chatId).catch(() => '')
+        : (await grokModelFor(chatId).catch(() => '')) || ((await getGrokCliInfo().catch(() => null))?.models[0] ?? '')
   await applyClaudeModel(connCall(connForSession(sessionId)), sessionId, model)
   // After the model: the effort levels a model offers differ.
   await applySessionEffort(sessionId, await effortFor(chatId).catch(() => null))
@@ -1486,35 +1555,18 @@ export async function reloadSecretSessions(scope: string): Promise<void> {
       if (chat && secretScopes(chat).includes(scope)) sessionsToReload.add(sessionId)
     })
   )
-  await stopStaleGrokProcesses((scopes) => scopes.includes(scope))
-}
-
-/** An idle Grok process that holds old values stops now; a busy one once its last session left it. */
-async function stopStaleGrokProcesses(affected: (scopes: string[]) => boolean): Promise<void> {
+  // An idle Grok process that holds the old values stops now; a busy one once its last session left it.
   for (const conn of [...conns.values()]) {
-    if (conn.agent !== 'grok') continue
-    const id = conn.env?.id ?? null
-    const scopes = id ? id.slice(0, id.lastIndexOf(':')).split('+').filter(Boolean) : []
-    if (!affected(scopes)) continue
-    const current = (await procEnvFor(scopes))?.id ?? null
+    const id = conn.env?.id
+    const scopes = id ? id.slice(0, id.lastIndexOf(':')).split('+') : []
+    if (!scopes.includes(scope)) continue
+    const env = await secretEnv(...scopes)
+    const current = Object.keys(env).length > 0 ? `${scopes.join('+')}:${envFingerprint(env)}` : null
     if (id !== current && conn.pending.size === 0) abortAgent(conn.key)
   }
 }
 
 onSecretsChanged((scope) => void reloadSecretSessions(scope))
-
-/**
- * After a provider was saved or removed: a Grok process reads its config and keys only at start, so
- * every live Grok chat loads its session again on its next turn, on a process with the new ones.
- */
-async function reloadProviderSessions(): Promise<void> {
-  for (const conn of conns.values()) {
-    if (conn.agent === 'grok' && conn.proc) for (const sessionId of conn.liveSessions) sessionsToReload.add(sessionId)
-  }
-  await stopStaleGrokProcesses(() => true)
-}
-
-onProvidersChanged(() => void reloadProviderSessions())
 
 /**
  * A session that moved to another process leaves its old one. A Grok process kept for old secrets is stopped
@@ -1784,6 +1836,7 @@ export function abortAgent(key: AgentKey = 'grok', generation?: number): void {
     // already gone
   }
   releaseAgentState(conn, 'cancelled')
+  if (conn === workbenchConn) setWorkbenchStatus('idle')
 }
 
 export async function promptIsolated(
@@ -1792,7 +1845,8 @@ export async function promptIsolated(
   images: Array<{ mimeType: string; data: string }> = [],
   onText?: (chunk: string) => void,
   signal?: AbortSignal,
-  options?: { timeoutMs?: number; rules?: string; agent?: ChatAgent }
+  /** `tools: false` gives the app's own agent no tools at all; the others are only told so in the rules. */
+  options?: { timeoutMs?: number; rules?: string; agent?: ChatAgent; model?: string; tools?: boolean }
 ): Promise<string> {
   if (signal?.aborted) throw new Error('cancelled')
   const agent = options?.agent ?? 'grok'
@@ -1903,7 +1957,7 @@ export async function promptIsolated(
     if (waiter.timer) clearTimeout(waiter.timer)
     waiters.delete(message.id)
     if (message.error) {
-      waiter.reject(new Error(message.error.message || JSON.stringify(message.error)))
+      waiter.reject(new Error(rpcErrorMessage(message.error)))
       return
     }
     waiter.resolve(message.result)
@@ -1938,9 +1992,19 @@ export async function promptIsolated(
 
   try {
     await handshake(agent, call, 'Datapad Workbench-aside')
+    if (agent === 'workbench') write({ jsonrpc: '2.0', method: '_workbench/providers', params: { providers: await agentProviders() } })
     const rules =
       options?.rules ??
       'Read-only aside on the current main task. Use the provided context. You may read project files. Do not edit files or run mutating commands.'
+    // The app's own agent writes no transcript of an ephemeral session, and starts on the given model.
+    const workbench =
+      agent === 'workbench'
+        ? {
+            model: options?.model || (await workbenchModelFor(undefined).catch(() => '')),
+            ephemeral: true,
+            ...(options?.tools === false ? { tools: false } : {})
+          }
+        : null
     // Grok keeps every session under its folder. This one must not come back as a chat.
     const created = await skipNewSession(call<{ sessionId: string }>(
       'session/new',
@@ -1949,11 +2013,15 @@ export async function promptIsolated(
         mcpServers: [],
         ...sessionRules(agent, rules),
         // Side questions are throwaway: keep them out of the user's Claude Code history.
-        ...(agent === 'claude' ? { _meta: { claudeCode: { options: { persistSession: false } } } } : {})
+        ...(agent === 'claude' ? { _meta: { claudeCode: { options: { persistSession: false } } } } : {}),
+        ...(workbench ? { _meta: { rules, workbench } } : {})
       },
       30_000
     ))
-    if (agent === 'claude') await applyClaudeModel(call, created.sessionId, await getClaudeModel())
+    // Grok without a model given keeps its default. The app's own agent has its model already.
+    if (agent !== 'workbench') {
+      await applyClaudeModel(call, created.sessionId, agent === 'claude' ? await getClaudeModel() : (options?.model ?? ''))
+    }
     const prompt: Array<{ type: string; text?: string; mimeType?: string; data?: string }> = []
     if (text.trim()) prompt.push({ type: 'text', text })
     for (const image of images) {

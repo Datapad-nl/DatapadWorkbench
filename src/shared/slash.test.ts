@@ -25,6 +25,18 @@ describe('slashCommandsFor', () => {
     expect(ids('claude')).not.toContain('goal')
   })
 
+  it("offers a provider chat the commands its agent announced, and none of Grok's own", () => {
+    const list = slashCommandsFor('workbench', [{ name: 'compact', description: 'Summarise the conversation so far' }])
+    expect(list.filter((def) => def.id === 'compact')).toEqual([
+      expect.objectContaining({ kind: 'agent', hint: 'Summarise the conversation so far' })
+    ])
+    expect(parseSlashLine('/compact keep the plan', list)?.def).toMatchObject({ id: 'compact', kind: 'agent' })
+    for (const id of ['imagine', 'login', 'docs', 'memory', 'loop', 'goal']) {
+      expect(list.map((def) => def.id)).not.toContain(id)
+    }
+    expect(list.some((def) => def.kind === 'unavailable')).toBe(false)
+  })
+
   it("uses the agent's own version over our prompt", () => {
     const list = slashCommandsFor('claude', [{ name: 'compact', description: 'Clear history but keep a summary' }])
     const compact = list.filter((def) => def.id === 'compact')

@@ -7,6 +7,8 @@ type FakeProc = EventEmitter & {
   args: string[]
   env: Record<string, string | undefined> | undefined
   calls: Call[]
+  /** The notifications the app sent, which want no answer. */
+  notes: Call[]
   /** The answers the app sent to the agent's own requests. */
   replies: Array<{ id: unknown; result?: unknown }>
   stdin: PassThrough
@@ -44,7 +46,20 @@ const fake = vi.hoisted(() => ({
   secrets: {} as Record<string, Record<string, string>>,
   secretListeners: [] as Array<(scope: string) => void>,
   /** The efforts each provider model offers, by model key. */
-  providerEfforts: {} as Record<string, string[]>
+  providerEfforts: {} as Record<string, string[]>,
+  /** The first provider's first model, or null for no provider. */
+  firstProviderModel: null as string | null,
+  /** The providers the app's own agent is told about. */
+  agentProviders: [] as unknown[],
+  providerListeners: [] as Array<() => void>,
+  /** The sign-in methods Grok offers: `cached_token` after `grok login`. */
+  authMethods: ['cached_token'],
+  /** Errors the agent answers a method with, by method. */
+  errors: {} as Record<string, unknown>,
+  /** The worker model in Settings. */
+  subagentModel: '',
+  /** The modes the agent answers session/new and session/load with, if any. */
+  modes: null as { currentModeId: string; availableModes: Array<{ id: string; name: string }> } | null
 }))
 
 /** An ACP agent that answers every request and gives each session/new a fresh id. */
@@ -53,6 +68,7 @@ function fakeAgent(command: string, args: string[], env?: Record<string, string 
   proc.args = [command, ...args]
   proc.env = env
   proc.calls = []
+  proc.notes = []
   proc.replies = []
   proc.stdin = new PassThrough()
   proc.stdout = new PassThrough()
@@ -69,22 +85,31 @@ function fakeAgent(command: string, args: string[], env?: Record<string, string 
     while ((index = buffer.indexOf('\n')) >= 0) {
       const message = JSON.parse(buffer.slice(0, index))
       buffer = buffer.slice(index + 1)
-      if (message.id === undefined) continue
+      if (message.id === undefined) {
+        proc.notes.push({ method: message.method, params: message.params })
+        continue
+      }
       if (!message.method) {
         proc.replies.push(message)
         continue
       }
       proc.calls.push({ method: message.method, params: message.params })
       if (fake.hold.has(message.method)) continue
+      if (fake.errors[message.method]) {
+        proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, error: fake.errors[message.method] })}\n`)
+        continue
+      }
       // Like the real adapters, only Claude Code offers steering into a running turn.
       const result =
         message.method === 'initialize'
           ? command === 'claude-acp'
             ? { _meta: { steering: { supported: true } } }
-            : { authMethods: [{ id: 'cached_token' }] }
+            : { authMethods: fake.authMethods.map((id) => ({ id })) }
           : message.method === 'session/new'
-            ? { sessionId: `s${++fake.sessions}` }
-            : message.method === '_session/steering'
+            ? { sessionId: `s${++fake.sessions}`, ...(fake.modes ? { modes: fake.modes } : {}) }
+            : message.method === 'session/load' && fake.modes
+              ? { modes: fake.modes }
+              : message.method === '_session/steering'
               ? { outcome: fake.steerOutcome }
               : {}
       proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: message.id, result })}\n`)
@@ -100,6 +125,7 @@ vi.mock('child_process', () => ({
 }))
 vi.mock('./grokCli', () => ({ grokBinary: () => 'grok' }))
 vi.mock('./claudeCli', () => ({ startClaudeAdapter: async () => fakeAgent('claude-acp', [], {}) }))
+vi.mock('./workbenchAgent', () => ({ startWorkbenchAgent: () => fakeAgent('workbench-agent', [], {}) }))
 vi.mock('./browserAgent', () => ({
   BROWSER_SESSION_RULE: 'browser rule',
   agentHookSettings: async () => ({}),
@@ -133,11 +159,16 @@ vi.mock('./store', () => ({
     const bot = chatId ? fake.bots[chatId] : null
     return (bot?.agent === 'grok' && bot.model) || ''
   },
+  // The app's own agent: a bot's own model there, else the first provider's first.
+  workbenchModelFor: async (chatId?: string) => {
+    const bot = chatId ? fake.bots[chatId] : null
+    return (bot?.agent === 'workbench' && bot.model) || fake.firstProviderModel || ''
+  },
   effortFor: async (chatId?: string) => (chatId ? fake.bots[chatId]?.effort || null : null),
   getMaxSubagents: async () => fake.maxSubagents,
   getConciseReplies: async () => fake.conciseReplies,
   getMcpServers: async () => fake.mcp,
-  getSubagentModel: async () => null,
+  getSubagentModel: async () => fake.subagentModel,
   skipNewSession: <T,>(value: T) => value
 }))
 vi.mock('./secrets', () => ({
@@ -150,16 +181,21 @@ vi.mock('./secrets', () => ({
   secretScopes: (chat: { projectId: string; botId?: string }) =>
     [chat.projectId, chat.botId ? `bot:${chat.botId}` : ''].filter(Boolean)
 }))
-// No inference providers: Grok runs on its own models.
+// No inference providers unless a test adds some. A test changes them through the listeners.
 vi.mock('./providers', async (importOriginal) => ({
+  agentProviders: async () => fake.agentProviders,
   clampEffort: (await importOriginal<typeof import('./providers')>()).clampEffort,
-  onProvidersChanged: () => () => {},
-  providerEnv: async () => ({ vars: {}, stamp: '' }),
+  firstProviderModelKey: async () => fake.firstProviderModel,
+  onProvidersChanged: (listener: () => void) => {
+    fake.providerListeners.push(listener)
+    return () => {}
+  },
   providerModelEfforts: async (model: string) => fake.providerEfforts[model] ?? null
 }))
 
 import {
   abortAgent,
+  acpModeIdFor,
   agentGeneration,
   agentKey,
   hasLiveSession,
@@ -170,6 +206,7 @@ import {
   sessionAgentKey,
   sessionNeedsReload,
   sessionSupportsSteering,
+  setAcpSessionMode,
   steerSession,
   stopAgents,
   stopIdleAgentProcesses
@@ -190,6 +227,12 @@ afterEach(() => {
   fake.projects = {}
   fake.secrets = {}
   fake.providerEfforts = {}
+  fake.firstProviderModel = null
+  fake.agentProviders = []
+  fake.authMethods = ['cached_token']
+  fake.errors = {}
+  fake.subagentModel = ''
+  fake.modes = null
   fake.steerOutcome = 'injected'
   fake.hold.clear()
 })
@@ -256,10 +299,10 @@ describe('agent processes for bots', () => {
 
   it('gives a provider model the nearest effort it offers, and none when it offers none', async () => {
     fake.providerEfforts = { 'wb-or-sonnet': ['low', 'medium', 'high'], 'wb-or-llama': [] }
-    fake.bots['chat-5'] = { agent: 'grok', model: 'wb-or-sonnet', effort: 'max' }
-    fake.bots['chat-6'] = { id: 'other', agent: 'grok', model: 'wb-or-llama', effort: 'high' }
-    await newSession('/project', null, 'grok', 'chat-5', BOT)
-    await newSession('/project', null, 'grok', 'chat-6', BOT)
+    fake.bots['chat-5'] = { agent: 'workbench', model: 'wb-or-sonnet', effort: 'max' }
+    fake.bots['chat-6'] = { id: 'other', agent: 'workbench', model: 'wb-or-llama', effort: 'high' }
+    await newSession('/project', null, 'workbench', 'chat-5', BOT)
+    await newSession('/project', null, 'workbench', 'chat-6', BOT)
     const calls = fake.procs.flatMap(configCalls)
     expect(calls).toEqual([
       ['model', 'wb-or-sonnet'],
@@ -528,6 +571,28 @@ describe('conductor chats', () => {
     expect(prompt).toContain('do this work yourself')
   })
 
+  it("runs a provider conductor's workers on its own model, unless Settings fixes one", async () => {
+    fake.conductors.add('boss')
+    fake.firstProviderModel = 'wb-openrouter-sonnet'
+    await newSession('/project', null, 'workbench', 'boss')
+    fake.subagentModel = 'opus'
+    await newSession('/project', null, 'workbench', 'boss')
+    const rules = fake.procs[0].calls
+      .filter((call) => call.method === 'session/new')
+      .map((call) => (call.params._meta as { rules: string }).rules)
+    expect(rules[0]).toContain('Every worker runs on wb-openrouter-sonnet.')
+    expect(rules[1]).toContain('Every worker runs on opus.')
+  })
+
+  it("keeps a provider model for workers out of Claude Code's own agents", async () => {
+    fake.subagentModel = 'wb-openrouter-sonnet'
+    await newSession('/project', null, 'claude', 'chat-1')
+    const created = fake.procs[0].calls.find((call) => call.method === 'session/new')
+    const options = (created?.params._meta as { claudeCode: { options: { env: Record<string, string> } } }).claudeCode.options
+    expect(options.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined()
+    expect((created?.params.systemPrompt as { content: Array<{ text: string }> }).content[0].text).not.toContain('wb-openrouter')
+  })
+
   it("refuses a conductor's own file edits, even when its mode lets edits through", async () => {
     fake.conductors.add('boss')
     const sessionId = await newSession('/project', null, 'grok', 'boss')
@@ -786,5 +851,114 @@ describe('stopping idle agents when the window closes', () => {
     expect(fake.procs).toHaveLength(2)
     expect(fake.procs[1].calls.some((call) => call.method === 'session/load' && call.params.sessionId === sessionId)).toBe(true)
     expect(hasLiveSession(sessionId)).toBe(true)
+  })
+})
+
+describe("the app's own agent", () => {
+  const PROVIDERS = [
+    {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      backend: 'chat_completions',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'made-up-key',
+      models: [{ key: 'wb-openrouter-sonnet', id: 'anthropic/sonnet', name: 'Sonnet', efforts: ['low', 'high'] }]
+    }
+  ]
+
+  it('runs every provider chat, bots too, on one process that wants no login, told the providers first', async () => {
+    fake.agentProviders = PROVIDERS
+    fake.firstProviderModel = 'wb-openrouter-sonnet'
+    fake.authMethods = ['xai.api_key', 'grok.com']
+    await newSession('/project', null, 'workbench', 'chat-1')
+    await newSession('/project', 'Be the chief.', 'workbench', 'chat-2', BOT)
+    expect(fake.procs.map((proc) => proc.args)).toEqual([['workbench-agent']])
+    const [proc] = fake.procs
+    expect(proc.calls.some((call) => call.method === 'authenticate')).toBe(false)
+    expect(proc.notes).toEqual([{ method: '_workbench/providers', params: { providers: PROVIDERS } }])
+    expect(proc.calls.map((call) => call.method).slice(0, 2)).toEqual(['initialize', 'session/new'])
+  })
+
+  it('gives a session its model, effort, secrets and a bot\'s skills, and the rules without a Grok identity', async () => {
+    fake.firstProviderModel = 'wb-openrouter-sonnet'
+    fake.providerEfforts = { 'wb-openrouter-sonnet': ['low', 'high'] }
+    fake.projects['chat-1'] = 'p1'
+    fake.secrets.p1 = { STRIPE_KEY: 'sk_live_123' }
+    fake.bots['chat-1'] = { id: 'b1', agent: 'workbench', model: '', effort: 'max' }
+    await newSession('/project', 'Be the chief.', 'workbench', 'chat-1', BOT)
+    const [proc] = fake.procs
+    // Secrets go per session, not into the shared process.
+    expect(proc.env?.STRIPE_KEY).toBeUndefined()
+    const created = proc.calls.find((call) => call.method === 'session/new')
+    const meta = created?.params._meta as { rules: string; workbench: Record<string, unknown> }
+    expect(meta.workbench).toEqual({
+      model: 'wb-openrouter-sonnet',
+      effort: 'high',
+      env: { STRIPE_KEY: 'sk_live_123' },
+      skillsDir: `${BOT}/skills`
+    })
+    expect(meta.rules).toContain('Be the chief.')
+    expect(meta.rules).toContain('STRIPE_KEY')
+    expect(meta.rules).not.toContain('sk_live_123')
+    // The effort goes as a plain string, after the model.
+    expect(configCalls(proc)).toEqual([
+      ['model', 'wb-openrouter-sonnet'],
+      ['reasoning_effort', 'high']
+    ])
+  })
+
+  it('tells the running agent of a provider change without restarting it, and a stopped one nothing', async () => {
+    for (const listener of fake.providerListeners) listener()
+    expect(fake.procs).toHaveLength(0)
+    await newSession('/project', null, 'workbench', 'chat-1')
+    const [proc] = fake.procs
+    fake.agentProviders = PROVIDERS
+    for (const listener of fake.providerListeners) listener()
+    await vi.waitFor(() => expect(proc.notes).toHaveLength(2))
+    expect(proc.notes[1]).toEqual({ method: '_workbench/providers', params: { providers: PROVIDERS } })
+    expect(proc.killed).toBe(false)
+    expect(fake.procs).toHaveLength(1)
+  })
+
+  it('learns the modes of a session it loads, so the chat\'s mode is set on it', async () => {
+    fake.modes = { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }] }
+    await loadSession('old-1', '/project', null, 'workbench', 'chat-1')
+    expect(acpModeIdFor('old-1', 'plan')).toBe('plan')
+    expect(acpModeIdFor('old-1', 'default')).toBe('default')
+    await expect(setAcpSessionMode('old-1', 'plan')).resolves.toBe(true)
+    const [proc] = fake.procs
+    expect(proc.calls.find((call) => call.method === 'session/set_mode')?.params).toEqual({ sessionId: 'old-1', modeId: 'plan' })
+  })
+
+  it("fails a turn with the provider's own words", async () => {
+    const sessionId = await newSession('/project', null, 'workbench', 'chat-1')
+    fake.errors['session/prompt'] = {
+      code: -32000,
+      message: 'Insufficient credits (HTTP 402)',
+      data: { status: 402 }
+    }
+    await expect(promptSession(sessionId, 'hi')).rejects.toThrow('Insufficient credits (HTTP 402)')
+  })
+})
+
+describe('Grok Build', () => {
+  it('asks for the login when Grok has no cached sign-in, whatever providers there are', async () => {
+    fake.authMethods = ['xai.api_key', 'grok.com']
+    fake.firstProviderModel = 'wb-openrouter-nemotron'
+    await expect(newSession('/project', null, 'grok', 'chat-1')).rejects.toThrow('grok login')
+  })
+
+  it("fails a turn with the provider's own words, not Grok's Internal error", async () => {
+    const sessionId = await newSession('/project', null, 'grok', 'chat-1')
+    fake.errors['session/prompt'] = {
+      code: -32603,
+      message: 'Internal error',
+      data: {
+        message:
+          'API error (status 402 Payment Required): Insufficient credits.\n\n  Model:     some/model\n  Auth:      ApiKey',
+        http_status: 402
+      }
+    }
+    await expect(promptSession(sessionId, 'hi')).rejects.toThrow(/^API error \(status 402 Payment Required\): Insufficient credits\.$/)
   })
 })

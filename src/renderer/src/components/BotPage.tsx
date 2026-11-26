@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
 import {
   CLAUDE_MODELS,
+  DEFAULT_MODEL,
   REASONING_EFFORTS,
+  chatProviderChoices,
+  chatProviderOf,
   grokModelChoices,
   grokModelEfforts,
-  normalizeChatAgent,
   normalizeReasoningEffort,
+  providerModelKey,
   reasoningEffortLabel,
   type Bot,
   type ChatAgent,
@@ -22,7 +25,6 @@ import { BotSchedules } from './BotSchedules'
 import { BotSkills } from './BotSkills'
 import { useWorkspace, type BotTab } from '../workspace'
 import { IconButton } from './icons'
-import { GrokModelOptions } from './Modals'
 import { Toggle } from './Toggle'
 
 function errorText(error: unknown, fallback: string): string {
@@ -155,11 +157,27 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
     }
   }, [onClaude, draft.model])
 
-  const grokChoices = grokModelChoices(settings?.grokCli.models ?? [], settings?.providers ?? [])
+  const providers = settings?.providers ?? []
+  const grokDefault = settings?.model ?? ''
+  const grokChoices = grokModelChoices(settings?.grokCli.models ?? [], providers)
+  const grokOwn = grokModelChoices(settings?.grokCli.models ?? [], [])
+  // Claude, Grok or a provider. Without a model of its own the bot runs on Settings' model, and so on its provider.
+  const runsOn = chatProviderOf(draft.agent, draft.model || grokDefault, providers)
+  // Default is Settings' model: Grok lists it while that model is one of Grok's own. A provider lists its models only.
+  const grokDefaultOwn = !grokDefault.startsWith('wb-')
   const models: Array<{ value: string; label: string }> = onClaude
     ? (claudeOptions?.models.map((option) => ({ value: option.value, label: option.name })) ?? CLAUDE_MODELS)
-    : [{ value: '', label: 'Default' }, ...grokChoices.map((choice) => ({ value: choice.value, label: choice.name }))]
-  const modelKnown = models.some((option) => option.value === draft.model)
+    : [
+        ...(runsOn.provider || !grokDefaultOwn ? [] : [{ value: '', label: 'Default' }]),
+        ...grokModelChoices(runsOn.provider ? [] : (settings?.grokCli.models ?? []), runsOn.provider ? [runsOn.provider] : []).map(
+          (choice) => ({ value: choice.value, label: choice.name })
+        )
+      ]
+  // On a provider with no model of its own, the bot shows the model it runs on: Settings' when listed, else the first.
+  const providerModels = runsOn.provider ? grokModelChoices([], [runsOn.provider]).map((choice) => choice.value) : []
+  const shownModel =
+    draft.model || (providerModels.includes(grokDefault) ? grokDefault : (providerModels[0] ?? ''))
+  const modelKnown = models.some((option) => option.value === shownModel)
   const efforts: readonly ReasoningEffort[] = onClaude
     ? (claudeOptions?.efforts ?? REASONING_EFFORTS)
     : grokModelEfforts(grokChoices, draft.model || (settings?.model ?? ''))
@@ -302,32 +320,33 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <div className="text-[12px] text-muted">Agent</div>
-              <div className="mt-1 flex rounded-md bg-canvas p-0.5">
-                {(
-                  [
-                    ['grok', 'Grok Build'],
-                    ['claude', 'Claude Code']
-                  ] as const
-                ).map(([value, label]) => (
+              <div className="text-[12px] text-muted">Provider</div>
+              <div className="mt-1 flex flex-wrap rounded-md bg-canvas p-0.5">
+                {chatProviderChoices(providers).map((choice) => (
                   <button
-                    key={value}
+                    key={choice.key}
                     type="button"
-                    aria-pressed={draft.agent === value}
-                    className={`flex-1 rounded px-2.5 py-1.5 text-[12px] ${
-                      draft.agent === value ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+                    data-testid={`bot-provider-${choice.key}`}
+                    aria-pressed={runsOn.key === choice.key}
+                    className={`flex-1 whitespace-nowrap rounded px-2.5 py-1.5 text-[12px] ${
+                      runsOn.key === choice.key ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
                     }`}
                     onClick={() => {
-                      const agent = normalizeChatAgent(value)
-                      if (agent === draft.agent) return
+                      if (runsOn.key === choice.key) return
+                      // A provider starts on its first model; Grok on Default, or its first model while Settings is on a provider.
+                      const model = choice.provider
+                        ? providerModelKey(choice.provider.id, choice.provider.models[0].id)
+                        : choice.agent === 'grok' && !grokDefaultOwn
+                          ? (grokOwn[0]?.value ?? DEFAULT_MODEL)
+                          : ''
                       edit({
-                        agent,
-                        model: '',
-                        allowedTools: toolsForAgent(allowed, draft.agent, agent).join('\n')
+                        agent: choice.agent,
+                        model,
+                        allowedTools: toolsForAgent(allowed, draft.agent, choice.agent).join('\n')
                       })
                     }}
                   >
-                    {label}
+                    {choice.name}
                   </button>
                 ))}
               </div>
@@ -336,23 +355,16 @@ export function BotPage({ bot }: { bot: Bot }): React.JSX.Element {
               Model
               <select
                 data-testid="bot-model"
-                value={draft.model}
+                value={shownModel}
                 onChange={(event) => edit({ model: event.target.value })}
                 className={field}
               >
-                {modelKnown ? null : <option value={draft.model}>{draft.model}</option>}
-                {onClaude ? (
-                  models.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))
-                ) : (
-                  <>
-                    <option value="">Default</option>
-                    <GrokModelOptions choices={grokChoices} />
-                  </>
-                )}
+                {modelKnown ? null : <option value={shownModel}>{shownModel}</option>}
+                {models.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </label>
             <label className="block text-[12px] text-muted">

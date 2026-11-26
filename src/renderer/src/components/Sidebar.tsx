@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { PROJECT_COLORS, resolveProjectColor } from '../../../shared/projectColor'
-import type { ChatSummary, Project } from '../../../shared/types'
+import { chatProviderOf, normalizeChatAgent, type ChatSummary, type Project } from '../../../shared/types'
 import { BotAvatar, useBots } from '../bots'
 import { useStreamStatuses, useWorkspace } from '../workspace'
 import wordmark from '../assets/wordmark.png'
@@ -521,8 +521,18 @@ function ChatRow({
   /** Branch of the worktree project this chat runs in, when it is folded under its parent. */
   worktreeBranch?: string | null
 }): React.JSX.Element {
-  const { activeChatId, openChat, deleteChat } = useWorkspace()
+  const { activeChatId, openChat, deleteChat, settings, chatsById } = useWorkspace()
+  const { bots } = useBots()
   const streaming = useStreamStatuses()[chat.id]?.status === 'streaming'
+  // Grok is the plain case and goes untagged. A bot's chat runs on the bot's model, else its own, else Settings'.
+  // The list from main leaves the model out, so an opened chat's own is used.
+  const bot = chat.botId ? bots.find((item) => item.id === chat.botId) : undefined
+  const agent = normalizeChatAgent(chat.agent)
+  const runsOn = chatProviderOf(
+    agent,
+    (bot?.agent === agent && bot.model) || chatsById[chat.id]?.model || chat.model || settings?.model || '',
+    settings?.providers ?? []
+  )
   const active = activeChatId === chat.id
   const branch = chat.worktreeBranch ?? worktreeBranch ?? null
   return (
@@ -536,15 +546,20 @@ function ChatRow({
         }`}
       >
         <button
-          className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2 text-left"
+          className="@container flex h-full min-w-0 flex-1 items-center gap-2 overflow-hidden pl-2 text-left"
           title={chat.title}
           data-project={project?.id}
           onClick={() => void openChat(chat.id)}
         >
-          <span className="truncate text-[12.5px]">{chat.title}</span>
-          {chat.agent === 'claude' && (
-            <span data-testid="chat-agent-tag" className="shrink-0 text-[10.5px] text-faint">
-              Claude
+          <span className="min-w-0 truncate text-[12.5px]">{chat.title}</span>
+          {/* The title keeps the room: the tag shrinks first, and a narrow row leaves it out. */}
+          {runsOn.key !== 'grok' && (
+            <span
+              data-testid="chat-agent-tag"
+              className="hidden min-w-[2.75em] shrink-[1000] truncate text-[10.5px] text-faint @[8rem]:block"
+              title={runsOn.name}
+            >
+              {runsOn.name}
             </span>
           )}
           {branch && (
@@ -814,7 +829,8 @@ export function Sidebar(): React.JSX.Element | null {
     settings?.grokBuildSignedIn ? 'SuperGrok' : settings?.hasKey ? 'xAI API key' : null,
     settings?.claude.signedIn
       ? `Claude${settings.claude.subscription ? ` ${settings.claude.subscription}` : ''} connected`
-      : null
+      : null,
+    ...(settings?.providers ?? []).filter((provider) => provider.models.length > 0).map((provider) => provider.name)
   ].filter(Boolean)
   const accountName = account ?? (plans.length ? 'Signed in' : 'Not signed in')
   // A search shows matching bots even in a collapsed section, as it does in a collapsed project.

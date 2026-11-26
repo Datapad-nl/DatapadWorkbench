@@ -2,6 +2,7 @@ import { net } from 'electron'
 import type { ChatAgent, Project } from '../shared/types'
 import { promptIsolated } from './acp'
 import { getClaudeCliInfo } from './claudeCli'
+import { findProviderModel, firstProviderModelKey } from './providers'
 import { grokBuildSignedIn } from './sessions'
 import { getApiKey, getDefaultAgent, getModel } from './store'
 
@@ -43,15 +44,18 @@ async function askViaApi(prompt: string, timeoutMs: number): Promise<string | nu
   }
 }
 
-/** The agent for new chats when it is signed in, else whichever one is. */
+/**
+ * The agent for new chats when it can run, else whichever one can. The app's own agent needs no sign-in,
+ * only a provider's model: it runs when that is picked in Settings, or when neither CLI is signed in.
+ */
 async function signedInAgent(): Promise<ChatAgent | null> {
-  const signedIn: Record<ChatAgent, boolean> = {
-    grok: grokBuildSignedIn(),
-    claude: (await getClaudeCliInfo()).signedIn
-  }
   const preferred = await getDefaultAgent()
-  if (signedIn[preferred]) return preferred
-  return signedIn.grok ? 'grok' : signedIn.claude ? 'claude' : null
+  if (preferred === 'workbench' && (await findProviderModel(await getModel()))) return 'workbench'
+  const signedIn = { grok: grokBuildSignedIn(), claude: (await getClaudeCliInfo()).signedIn }
+  if (preferred !== 'workbench' && signedIn[preferred]) return preferred
+  if (signedIn.grok) return 'grok'
+  if (signedIn.claude) return 'claude'
+  return (await firstProviderModelKey()) ? 'workbench' : null
 }
 
 async function askViaAgent(
@@ -65,6 +69,7 @@ async function askViaAgent(
     return await promptIsolated(project.path, prompt, [], undefined, undefined, {
       agent,
       timeoutMs,
+      tools: false,
       rules:
         'Do not use tools. Do not read or edit files. The prompt already contains the project dossier. Reply with JSON only.'
     })
@@ -75,15 +80,15 @@ async function askViaAgent(
 
 /**
  * Asks the user's model once, without tools, for a JSON reply to a prompt that carries everything it needs.
- * Null when no model is signed in or the call fails.
+ * Null when no model is signed in, no provider's model can stand in, or the call fails.
  */
 export async function askOnce(
   project: Project,
   prompt: string,
   timeouts: AskTimeouts = DEFAULT_TIMEOUTS
 ): Promise<string | null> {
-  const agent = await signedInAgent()
-  // The xAI key only stands in for Grok, so a Claude default goes straight to Claude.
-  const viaApi = agent === 'claude' ? null : await askViaApi(prompt, timeouts.apiMs).catch(() => null)
+  const agent = await signedInAgent().catch(() => null)
+  // The xAI key only stands in for Grok, so a Claude or provider default goes straight to its agent.
+  const viaApi = agent === 'claude' || agent === 'workbench' ? null : await askViaApi(prompt, timeouts.apiMs).catch(() => null)
   return viaApi ?? (agent ? await askViaAgent(project, prompt, agent, timeouts.agentMs) : null)
 }

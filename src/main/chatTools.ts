@@ -50,6 +50,7 @@ import {
   listProjects,
   mutateChat,
   saveHandoff,
+  workbenchModelFor,
 } from "./store";
 
 /**
@@ -156,7 +157,7 @@ export function emitChat(chat: Chat): void {
 }
 
 function agentOf(value: unknown): ChatAgent | undefined {
-  return value === "grok" || value === "claude"
+  return value === "grok" || value === "claude" || value === "workbench"
     ? normalizeChatAgent(value)
     : undefined;
 }
@@ -605,17 +606,26 @@ export async function handoffChat(input: {
 }
 
 /**
- * The agent and Claude Code model of a worker. The model in Settings wins over the one the caller
- * asked for. Only Claude Code picks a model per chat, so a worker with a model runs there.
+ * The agent and model of a worker. The model in Settings wins over the one the caller asked for. A provider
+ * model there runs the worker on the app's own agent, unless Claude Code is asked for. Otherwise a worker
+ * with a model runs on Claude Code, and a provider chat's worker on that chat's model.
  */
-async function workerSetup(input: {
-  agent?: unknown;
-  model?: unknown;
-}): Promise<{ agent?: ChatAgent; model: string }> {
+async function workerSetup(
+  input: { agent?: unknown; model?: unknown; },
+  caller: Chat,
+): Promise<{ agent?: ChatAgent; model: string }> {
   const agent = agentOf(input.agent);
   if (agent === "grok") return { agent, model: "" };
   const asked = typeof input.model === "string" ? input.model.trim() : "";
-  const model = (await getSubagentModel()) || asked;
+  const setting = await getSubagentModel();
+  if (setting.startsWith("wb-")) {
+    return agent === "claude" ? { agent, model: asked } : { agent: "workbench", model: setting };
+  }
+  const sameProvider = !agent && !setting && !asked && normalizeChatAgent(caller.agent) === "workbench";
+  if (agent === "workbench" || sameProvider) {
+    return { agent: "workbench", model: await workbenchModelFor(caller.id) };
+  }
+  const model = setting || asked;
   return { agent: model ? "claude" : agent, model };
 }
 
@@ -745,7 +755,9 @@ export async function agentHook(
       ? (body.tool_input as Record<string, unknown>)
       : {};
   // The model the call names wins over CLAUDE_CODE_SUBAGENT_MODEL, so the one from Settings needs it gone.
-  if (!("model" in input) || !(await getSubagentModel())) return {};
+  // A provider model in Settings is not one of Claude Code's, so then the call keeps its own.
+  const setting = await getSubagentModel();
+  if (!("model" in input) || !setting || setting.startsWith("wb-")) return {};
   const { model: _asked, ...rest } = input;
   return {
     hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: rest },
@@ -777,7 +789,7 @@ async function startWorker(input: DelegateInput): Promise<unknown> {
     caller,
     input,
     `Delegated: ${clip(brief.split("\n")[0], 60)}`,
-    await workerSetup(input),
+    await workerSetup(input, caller),
   );
   const project = (await listProjects()).find(
     (item) => item.id === chat.projectId,

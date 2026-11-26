@@ -14,7 +14,14 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
-  main: {},
+  // The Workbench agent is a process of its own, built next to the main process.
+  main: {
+    build: {
+      rollupOptions: {
+        input: { index: resolve('src/main/index.ts'), workbenchAgent: resolve('src/agent/main.ts') }
+      }
+    }
+  },
   // The voice helper, a page with no window for Telegram's voice notes, has its own preload and page.
   preload: {
     build: {

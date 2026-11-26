@@ -14,8 +14,13 @@ export type GrokSession = {
   updatedAt: string
 }
 
+// Grok Build keeps its sessions and sign-in under GROK_HOME when that is set.
+export function grokHome(): string {
+  return process.env['GROK_HOME'] || join(homedir(), '.grok')
+}
+
 function sessionsRoot(): string {
-  return join(homedir(), '.grok', 'sessions')
+  return join(grokHome(), 'sessions')
 }
 
 function extractText(content: unknown): string {
@@ -156,7 +161,7 @@ export function clearGrokPlanApproval(sessionId: string, options: { keepPlanMode
 
 export function grokBuildSignedIn(): boolean {
   try {
-    const auth = readFileSync(join(homedir(), '.grok', 'auth.json'), 'utf8')
+    const auth = readFileSync(join(grokHome(), 'auth.json'), 'utf8')
     return auth.trim().length > 2
   } catch {
     return false

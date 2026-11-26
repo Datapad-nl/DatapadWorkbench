@@ -164,7 +164,8 @@ type WorkspaceContextValue = {
   newBotChat: (botId: string) => Promise<void>
   deleteChat: (chatId: string) => Promise<void>
   renameChat: (chatId: string, title: string) => Promise<void>
-  setChatAgent: (chatId: string, agent: ChatAgent) => Promise<void>
+  /** `model` is set with the agent, as when a chat moves onto a provider's model. */
+  setChatAgent: (chatId: string, agent: ChatAgent, model?: string) => Promise<void>
   setChatModel: (chatId: string, input: { model?: string; effort?: string }) => Promise<void>
   sendMessage: (
     chatId: string,
@@ -939,15 +940,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): React.
     setChats((current) => current.map((item) => (item.id === chatId ? { ...item, title: chat.title } : item)))
   }, [])
 
-  const setChatAgent = useCallback(async (chatId: string, agent: ChatAgent) => {
-    const chat = await window.workbench.setChatAgent(chatId, agent)
+  const setChatAgent = useCallback(async (chatId: string, agent: ChatAgent, model?: string) => {
+    let chat = await window.workbench.setChatAgent(chatId, agent)
+    if (model) chat = await window.workbench.setChatModel(chatId, { model })
     setChatsById((current) => ({ ...current, [chatId]: chat }))
-    setChats((current) => current.map((item) => (item.id === chatId ? { ...item, agent: chat.agent } : item)))
+    setChats((current) =>
+      current.map((item) => (item.id === chatId ? { ...item, agent: chat.agent, model: chat.model } : item))
+    )
   }, [])
 
   const setChatModel = useCallback(async (chatId: string, input: { model?: string; effort?: string }) => {
     const chat = await window.workbench.setChatModel(chatId, input)
     setChatsById((current) => ({ ...current, [chatId]: chat }))
+    setChats((current) => current.map((item) => (item.id === chatId ? { ...item, model: chat.model } : item)))
   }, [])
 
   const sendMessage = useCallback(

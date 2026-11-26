@@ -4,10 +4,20 @@ import {
   agentToolRule,
   conductorPrompt,
   conductorRule,
+  conductorWorkerModel,
   isFileEditTool,
   normalizeMaxSubagents,
   weakOrchestrator
 } from './conductor'
+
+describe('conductorWorkerModel', () => {
+  it('is the model Settings fixes, else a provider chat’s own, else none', () => {
+    expect(conductorWorkerModel('opus', 'workbench', 'wb-or-x')).toBe('opus')
+    expect(conductorWorkerModel('', 'workbench', 'wb-or-x')).toBe('wb-or-x')
+    expect(conductorWorkerModel('', 'claude', 'sonnet')).toBe('')
+    expect(conductorWorkerModel('', 'grok', '')).toBe('')
+  })
+})
 
 describe('conductorPrompt', () => {
   it('lets the conductor pick a model per worker when Settings fixes none', () => {

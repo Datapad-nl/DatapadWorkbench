@@ -170,8 +170,9 @@ export const BROWSER_TOOLS: McpTool[] = [
 
 const AGENT = {
   type: 'string',
-  enum: ['grok', 'claude'],
-  description: 'grok for Grok Build, claude for Claude Code. Defaults to the agent set in Settings.'
+  enum: ['grok', 'claude', 'workbench'],
+  description:
+    'grok for Grok Build, claude for Claude Code, workbench for a model of the providers set in Settings. Defaults to the agent set in Settings.'
 }
 
 export const WORKBENCH_TOOLS: McpTool[] = [
@@ -201,7 +202,7 @@ export const WORKBENCH_TOOLS: McpTool[] = [
         model: {
           type: 'string',
           description:
-            'Claude Code model for the child, which then runs on Claude Code: fable for a really hard task (it costs the most), opus for work that needs judgement, sonnet for routine work, haiku when a small, fast model is enough. Leave out for the model set in Settings. Settings can fix one model for every child; that one then wins.'
+            'Claude Code model for the child, which then runs on Claude Code: fable for a really hard task (it costs the most), opus for work that needs judgement, sonnet for routine work, haiku when a small, fast model is enough. Leave out for the model set in Settings, or, from a chat on a provider’s model, for that model. Settings can fix one model for every child; that one then wins.'
         },
         title: { type: 'string', description: 'Sidebar title for the child chat' },
         worktree: {

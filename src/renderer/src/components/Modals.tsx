@@ -12,13 +12,16 @@ import {
   type ReasoningEffort,
   DEFAULT_VOICE,
   formatGrokCli,
-  normalizeChatAgent,
+  chatProviderChoices,
+  chatProviderOf,
+  providerModelKey,
   type PublicSettings,
   type SecretScope,
   type UpdateState,
   type UsageSnapshot,
   type VoiceLanguage,
   type VoiceModelStatus,
+  usagePlans,
   VOICE_LANGUAGES
 } from '../../../shared/types'
 import { MAX_SUBAGENTS_CHOICES, weakOrchestrator } from '../../../shared/conductor'
@@ -380,34 +383,16 @@ function MicPicker({
   )
 }
 
-function modelOptions(choices: GrokModelChoice[], current: string): GrokModelChoice[] {
+/** The choices, then each of `extra` not among them, such as the current model. */
+function modelOptions(choices: GrokModelChoice[], extra: string[]): GrokModelChoice[] {
   const list: GrokModelChoice[] = []
   for (const choice of choices) if (!list.some((item) => item.value === choice.value)) list.push(choice)
-  for (const id of [current, DEFAULT_MODEL]) {
+  for (const id of extra) {
     const value = id.trim()
     if (!value || list.some((item) => item.value === value)) continue
     list.push({ value, name: value, group: 'Grok', efforts: grokModelEfforts(list, value) })
   }
   return list
-}
-
-/** Grok model choices as `<option>`s, one `<optgroup>` per group: Grok, then each provider. */
-export function GrokModelOptions({ choices }: { choices: GrokModelChoice[] }): React.JSX.Element {
-  return (
-    <>
-      {[...new Set(choices.map((choice) => choice.group))].map((group) => (
-        <optgroup key={group} label={group}>
-          {choices
-            .filter((choice) => choice.group === group)
-            .map((choice) => (
-              <option key={choice.value} value={choice.value}>
-                {choice.name}
-              </option>
-            ))}
-        </optgroup>
-      ))}
-    </>
-  )
 }
 
 const languageNames = new Intl.DisplayNames(['en'], { type: 'language' })
@@ -656,12 +641,16 @@ function UpdateSection(): React.JSX.Element {
   )
 }
 
-/** Sign-in state for the agent new chats run on. The other agent stays out of sight. */
-function AgentStatus({ settings }: { settings: PublicSettings }): React.JSX.Element {
+/** Sign-in state for the agent new chats run on. The others stay out of sight. `provider` names the provider new chats on the app's own agent run on. */
+function AgentStatus({ settings, provider }: { settings: PublicSettings; provider: string | null }): React.JSX.Element {
   let ok: boolean
   let text: string
   let detail: string | null = null
-  if (settings.cliChecking) {
+  if (settings.defaultAgent === 'workbench') {
+    // The app's own agent needs no CLI and no sign-in, only a provider's key.
+    ok = provider != null
+    text = provider ? `Runs on ${provider} with its own key. No sign-in needed.` : 'Add a provider with a model under Providers.'
+  } else if (settings.cliChecking) {
     ok = true
     text = 'Checking the CLI…'
   } else if (settings.defaultAgent === 'claude') {
@@ -703,12 +692,12 @@ function AgentStatus({ settings }: { settings: PublicSettings }): React.JSX.Elem
 
 /** The sections of Settings, in nav order. A new section is one entry here and one case in `SettingsModal`. */
 const SETTINGS_SECTIONS = [
-  { id: 'agent', label: 'Agent', group: 'Chats', description: 'The agent, model, and effort new chats start with.' },
+  { id: 'agent', label: 'Agent', group: 'Chats', description: 'The provider, model, and effort new chats start with.' },
   {
     id: 'providers',
     label: 'Providers',
     group: 'Chats',
-    description: 'Inference providers whose models Grok chats can run on.',
+    description: 'Models from OpenRouter, OpenAI, Anthropic, Ollama or your own endpoint, on your key.',
     testId: 'settings-providers'
   },
   {
@@ -840,7 +829,14 @@ export function SettingsModal(): React.JSX.Element | null {
   const onClaude = settings.defaultAgent === 'claude'
   const claudeModels: ClaudeOptions['models'] =
     claudeOptions?.models ?? CLAUDE_MODELS.map((option) => ({ value: option.value, name: option.label }))
-  const grokChoices = modelOptions(grokModelChoices(settings.grokCli.models, settings.providers), model)
+  // A subagent can also run on a provider's model, on that provider.
+  const subagentProviderModels = grokModelChoices([], settings.providers)
+  // Claude, Grok or a provider: a provider runs on the app's own agent and lists only its own models.
+  const runsOn = chatProviderOf(settings.defaultAgent, model, settings.providers)
+  const grokOwn = grokModelChoices(settings.grokCli.models, [])
+  const grokChoices = runsOn.provider
+    ? modelOptions(grokModelChoices([], [runsOn.provider]), [model])
+    : modelOptions(grokOwn, [model, DEFAULT_MODEL])
   const efforts: readonly ReasoningEffort[] = onClaude
     ? (claudeOptions?.efforts ?? REASONING_EFFORTS)
     : grokModelEfforts(grokChoices, model)
@@ -879,29 +875,36 @@ export function SettingsModal(): React.JSX.Element | null {
           <div className="divide-y divide-line">
             <div className="pb-3">
               <div className="flex items-center justify-between gap-6">
-                <div className="text-[12px] font-medium text-ink">Agent for new chats</div>
-                <div data-testid="settings-default-agent" className="flex rounded-md bg-canvas p-0.5">
-                  {(
-                    [
-                      ['grok', 'Grok Build'],
-                      ['claude', 'Claude Code']
-                    ] as const
-                  ).map(([value, label]) => (
+                <div className="text-[12px] font-medium text-ink">Provider for new chats</div>
+                <div data-testid="settings-default-agent" className="flex flex-wrap justify-end rounded-md bg-canvas p-0.5">
+                  {chatProviderChoices(settings.providers).map((choice) => (
                     <button
-                      key={value}
+                      key={choice.key}
                       type="button"
-                      aria-pressed={settings.defaultAgent === value}
+                      data-testid={`settings-default-${choice.key}`}
+                      aria-pressed={runsOn.key === choice.key}
                       className={`rounded px-2.5 py-1 text-[11px] ${
-                        settings.defaultAgent === value ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
+                        runsOn.key === choice.key ? 'bg-raised text-ink' : 'text-muted hover:text-ink'
                       }`}
-                      onClick={() => save({ defaultAgent: normalizeChatAgent(value) })}
+                      onClick={() => {
+                        if (runsOn.key === choice.key) return
+                        if (choice.agent === 'claude') return save({ defaultAgent: 'claude' })
+                        // Grok or a provider: a model of that entry, saved at once with the agent.
+                        const next = choice.provider
+                          ? providerModelKey(choice.provider.id, choice.provider.models[0].id)
+                          : model.startsWith('wb-')
+                            ? (grokOwn[0]?.value ?? DEFAULT_MODEL)
+                            : model
+                        setModel(next)
+                        save({ defaultAgent: choice.agent, model: next })
+                      }}
                     >
-                      {label}
+                      {choice.name}
                     </button>
                   ))}
                 </div>
               </div>
-              <AgentStatus settings={settings} />
+              <AgentStatus settings={settings} provider={runsOn.provider?.name ?? null} />
             </div>
             <SettingRow label="Model">
               {onClaude ? (
@@ -933,7 +936,11 @@ export function SettingsModal(): React.JSX.Element | null {
                   }}
                   className={`${SETTINGS_SELECT} font-mono`}
                 >
-                  <GrokModelOptions choices={grokChoices} />
+                  {grokChoices.map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.name}
+                    </option>
+                  ))}
                 </select>
               )}
             </SettingRow>
@@ -959,7 +966,7 @@ export function SettingsModal(): React.JSX.Element | null {
                 ))}
               </select>
             </SettingRow>
-            {onClaude || settings.grokBuildSignedIn ? null : (
+            {settings.defaultAgent !== 'grok' || settings.grokBuildSignedIn ? null : (
               <SettingRow label="xAI API key (instead of grok login)">
                 <input
                   type="password"
@@ -992,8 +999,8 @@ export function SettingsModal(): React.JSX.Element | null {
             <p className="text-[12px] leading-5 text-muted">
               Type /conduct and a job to make a chat the conductor: it plans, writes each task with the checks it
               must pass, gives it to a subagent in its own chat, and checks what comes back against them. It does
-              not change files itself. These are Claude Code models, and a subagent with a model runs on Claude
-              Code.
+              not change files itself. A subagent on a Claude model runs on Claude Code, and one on a provider’s
+              model runs on that provider.
             </p>
             <div className="mt-2 divide-y divide-line">
               {(
@@ -1010,7 +1017,9 @@ export function SettingsModal(): React.JSX.Element | null {
                     className={SETTINGS_SELECT}
                   >
                     <option value="">{unset}</option>
-                    {settings[key] && !claudeModels.some((option) => option.value === settings[key]) ? (
+                    {settings[key] &&
+                    !claudeModels.some((option) => option.value === settings[key]) &&
+                    !(key === 'subagentModel' && subagentProviderModels.some((option) => option.value === settings[key])) ? (
                       <option value={settings[key]}>{settings[key]}</option>
                     ) : null}
                     {claudeModels
@@ -1020,6 +1029,18 @@ export function SettingsModal(): React.JSX.Element | null {
                           {option.name}
                         </option>
                       ))}
+                    {key === 'subagentModel' &&
+                      settings.providers
+                        .filter((provider) => provider.models.length > 0)
+                        .map((provider) => (
+                          <optgroup key={provider.id} label={provider.name}>
+                            {provider.models.map((item) => (
+                              <option key={item.id} value={providerModelKey(provider.id, item.id)}>
+                                {item.name}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
                   </select>
                   {key === 'orchestratorModel' && weakOrchestrator(settings[key]) && (
                     <p
@@ -1417,9 +1438,10 @@ export function UsageModal(): React.JSX.Element | null {
   const [usage, setUsage] = useState<UsageSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const claudeOn = settings?.claude.signedIn === true
-  const grokOn = !claudeOn || settings?.grokBuildSignedIn === true
-  const claudeFirst = claudeOn && (settings?.defaultAgent === 'claude' || !grokOn)
+  const plans = settings ? usagePlans(settings) : { grok: true, claude: false, claudeFirst: false }
+  const claudeOn = plans.claude
+  const grokOn = plans.grok
+  const claudeFirst = plans.claudeFirst
 
   useEffect(() => {
     if (!showUsage || !grokOn) return
@@ -1516,6 +1538,11 @@ export function UsageModal(): React.JSX.Element | null {
         <div className="text-[15px] font-semibold tracking-tight">Usage</div>
         {claudeFirst ? claudeSection : grokSection}
         {claudeFirst ? grokSection : claudeSection}
+        {!grokOn && !claudeOn ? (
+          <p data-testid="usage-none" className="mt-4 text-[12.5px] text-muted">
+            Your providers bill your own key, so there is no plan limit to show. Their own sites show what you used.
+          </p>
+        ) : null}
 
         <div className="mt-5 flex justify-end gap-2">
           <button
@@ -1524,12 +1551,14 @@ export function UsageModal(): React.JSX.Element | null {
           >
             Close
           </button>
-          <button
-            className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
-            onClick={() => void window.workbench.openExternal(claudeFirst ? CLAUDE_USAGE_URL : USAGE_URL)}
-          >
-            Manage billing
-          </button>
+          {grokOn || claudeOn ? (
+            <button
+              className="rounded-lg bg-accent px-3 py-2 text-[12px] font-medium text-accent-ink hover:brightness-110 active:translate-y-px"
+              onClick={() => void window.workbench.openExternal(claudeFirst ? CLAUDE_USAGE_URL : USAGE_URL)}
+            >
+              Manage billing
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

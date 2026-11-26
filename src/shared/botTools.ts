@@ -2,18 +2,18 @@ import type { ChatAgent } from './types'
 
 /**
  * The tools a bot can be allowed to use without asking, under the names each agent gives them:
- * Claude Code in `_meta.claudeCode.toolName`, Grok Build in `_meta["x.ai/tool"].name`.
- * A tool only one agent has leaves the other name out.
+ * Claude Code in `_meta.claudeCode.toolName`, Grok Build and the app's own agent in `_meta["x.ai/tool"].name`.
+ * A tool an agent lacks leaves that agent's name out.
  */
-export const BOT_TOOLS: ReadonlyArray<{ label: string; claude?: string; grok?: string }> = [
-  { label: 'Read files', claude: 'Read', grok: 'read_file' },
-  { label: 'List folders', claude: 'Glob', grok: 'list_dir' },
-  { label: 'Search in files', claude: 'Grep', grok: 'grep' },
-  { label: 'Edit files', claude: 'Edit', grok: 'search_replace' },
-  { label: 'Write files', claude: 'Write', grok: 'write' },
+export const BOT_TOOLS: ReadonlyArray<{ label: string; claude?: string; grok?: string; workbench?: string }> = [
+  { label: 'Read files', claude: 'Read', grok: 'read_file', workbench: 'read_file' },
+  { label: 'List folders', claude: 'Glob', grok: 'list_dir', workbench: 'list_files' },
+  { label: 'Search in files', claude: 'Grep', grok: 'grep', workbench: 'grep' },
+  { label: 'Edit files', claude: 'Edit', grok: 'search_replace', workbench: 'edit_file' },
+  { label: 'Write files', claude: 'Write', grok: 'write', workbench: 'write_file' },
   { label: 'Edit notebooks', claude: 'NotebookEdit' },
-  { label: 'Run commands', claude: 'Bash', grok: 'run_terminal_command' },
-  { label: 'Fetch web pages', claude: 'WebFetch', grok: 'web_fetch' },
+  { label: 'Run commands', claude: 'Bash', grok: 'run_terminal_command', workbench: 'run_command' },
+  { label: 'Fetch web pages', claude: 'WebFetch', grok: 'web_fetch', workbench: 'fetch_url' },
   { label: 'Search the web', claude: 'WebSearch' },
   { label: 'Make images', grok: 'image_gen' },
   { label: 'Edit images', grok: 'image_edit' }
@@ -27,7 +27,7 @@ export function mcpServerTool(server: string): string {
   return `mcp__${server}`
 }
 
-/** The bot's tools under the other agent's names. A tool that agent lacks, or a name not in the list, stays as it is. */
+/** The bot's tools under another agent's names. A tool that agent lacks, or a name not in the list, stays as it is. */
 export function toolsForAgent(tools: string[], from: ChatAgent, to: ChatAgent): string[] {
   const next = tools.map((tool) => {
     const known = BOT_TOOLS.find((item) => item[from] === tool)

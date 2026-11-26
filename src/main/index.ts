@@ -3,7 +3,6 @@ import { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import { startUpdater, stopUpdater } from './updater'
 import { stopAgents } from './acp'
-import { syncGrokConfig } from './providers'
 import icon from '../../resources/icon.png?asset'
 import { startBrowserAgentServer } from './browserAgent'
 import { activeBrowserScope, attachBrowser, navigateBrowser, prepareBrowser, sanitizeUrl } from './browser'
@@ -204,8 +203,6 @@ app.whenReady().then(async () => {
     optimizer.watchWindowShortcuts(window)
   })
   await ensureStore()
-  // Before any Grok process starts, so each reads the providers' models. The app still opens if it fails.
-  await syncGrokConfig().catch((error) => console.error('Grok config not written', error))
   await purgeUnsafeProjects()
   await syncGrokSessions()
   await syncClaudeSessions()

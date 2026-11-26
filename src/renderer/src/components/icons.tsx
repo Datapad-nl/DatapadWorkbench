@@ -1,3 +1,5 @@
+import type { ChatAgent } from '../../../shared/types'
+
 // Line icons on a 16px grid, drawn with currentColor so they follow the theme.
 const PATHS = {
   folder: 'M2 4.5A1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.5h4.8A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z',
@@ -67,7 +69,7 @@ export function Icon({
 }
 
 /** The agent glyphs used in the assistant tile and the empty state. */
-export function AgentGlyph({ agent, size = 14 }: { agent: 'grok' | 'claude'; size?: number }): React.JSX.Element {
+export function AgentGlyph({ agent, size = 14 }: { agent: ChatAgent; size?: number }): React.JSX.Element {
   if (agent === 'claude') {
     // Claude's starburst: twelve rays from the centre.
     const rays = Array.from({ length: 12 }, (_, index) => {
@@ -82,6 +84,8 @@ export function AgentGlyph({ agent, size = 14 }: { agent: 'grok' | 'claude'; siz
       </svg>
     )
   }
+  // The app's own agent, which runs the providers' models, is not Grok's spark.
+  if (agent === 'workbench') return <Icon name="command" size={size} strokeWidth={1.5} />
   return <Icon name="sparkle" size={size} strokeWidth={1.5} />
 }
 
