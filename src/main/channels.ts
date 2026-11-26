@@ -69,6 +69,8 @@ const RETRY_MS = 2_000
 const MAX_RETRY_MS = 60_000
 /** Waits before a failed send is tried again, as when the Mac just woke and the network is not back. */
 const SEND_RETRIES_MS = [2_000, 10_000, 30_000]
+/** Waits before the topics Telegram could not make are tried again, unless Telegram says how long. */
+const TOPICS_RETRY_MS = 60_000
 
 const TOPICS_NEEDED =
   'To give each bot and project its own topic here, turn on Topics in the group settings and make this bot an admin that may manage topics.'
@@ -97,6 +99,8 @@ let lastStatus = ''
 let topicsRefused = false
 /** Why Telegram refused the last topic, shown in Settings until topics are made. */
 let topicsError: string | null = null
+/** Tries the missing topics again. One at a time. */
+let topicsRetry: NodeJS.Timeout | null = null
 let pairing: { code: string; expiresAt: number; tries: number; timer: NodeJS.Timeout } | null = null
 
 /** A question or approval shown on Telegram, by the short id its buttons carry. */
@@ -313,6 +317,7 @@ function unpairState(state: TelegramState): void {
 /** Forgets the user, the group and its topics. The token stays. */
 export async function unpairTelegram(): Promise<TelegramStatus> {
   asks.clear()
+  clearTopicsRetry()
   topicsError = null
   await save(unpairState)
   return report()
@@ -365,6 +370,12 @@ function stopPolling(): void {
   client = null
   botIcon = null
   pollState = 'off'
+  clearTopicsRetry()
+}
+
+function clearTopicsRetry(): void {
+  if (topicsRetry) clearTimeout(topicsRetry)
+  topicsRetry = null
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -618,8 +629,16 @@ async function ensureTopics(tell: boolean): Promise<void> {
           changed()
           if (tell) await deliver({ chat: groupId }, TOPICS_NEEDED)
         } else {
-          sendError = `Could not make a topic: ${messageOf(error)}`
+          // As a 429 or a lost network: the topics still missing are made later, outside the lock.
+          topicsError = `Could not make a topic for ${name}: ${messageOf(error)}. Trying again.`
           changed()
+          clearTopicsRetry()
+          const wait = error instanceof TelegramError && error.retryAfter ? error.retryAfter * 1000 : TOPICS_RETRY_MS
+          topicsRetry = setTimeout(() => {
+            topicsRetry = null
+            void ensureTopics(false).catch(() => {})
+          }, wait)
+          topicsRetry.unref?.()
         }
         return
       }

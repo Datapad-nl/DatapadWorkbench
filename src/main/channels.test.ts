@@ -1132,6 +1132,56 @@ describe('topics', () => {
     expect((await channels.getTelegramStatus()).error).toBeNull()
   })
 
+  it('makes the missing topics after Telegram asks to wait, each once, and shows why until then', async () => {
+    await start()
+    await pairInGroup()
+    stub.bots.set('docs', bot('docs', 'Docs'))
+    stub.bots.set('qa', bot('qa', 'QA'))
+    const { TelegramError } = await import('./telegram')
+    const { createForumTopic } = fake.client
+    let limited = false
+    fake.client.createForumTopic = async (chat, name, icon) => {
+      if (name === 'QA' && !limited) {
+        limited = true
+        throw new TelegramError(429, 'Too Many Requests: retry after 30', undefined, 30)
+      }
+      return createForumTopic(chat, name, icon)
+    }
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await channels.setTelegramReachable({ bots: ['scout', 'lint', 'docs', 'qa'], projects: ['site'] })
+      expect(fake.topics.map(([, name]) => name)).toEqual(['Scout', 'Lint', 'Docs'])
+      expect(Object.keys(await savedTopics())).toHaveLength(3)
+      expect((await channels.getTelegramStatus()).error).toBe(
+        'Could not make a topic for QA: Too Many Requests: retry after 30. Trying again.'
+      )
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(29_000)
+      expect(fake.topics).toHaveLength(3)
+      await vi.advanceTimersByTimeAsync(1_000)
+    } finally {
+      vi.useRealTimers()
+    }
+    await vi.waitFor(async () => expect((await channels.getTelegramStatus()).error).toBeNull())
+    expect(fake.topics.map(([, name]) => name)).toEqual(['Scout', 'Lint', 'Docs', 'QA', 'Site'])
+    expect(Object.keys(await savedTopics())).toHaveLength(5)
+  })
+
+  it('does not try again when Telegram refuses topics', async () => {
+    await start()
+    await pairInGroup()
+    stub.bots.set('docs', bot('docs', 'Docs'))
+    fake.topicsRefused = true
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await channels.setTelegramReachable({ bots: ['scout', 'lint', 'docs'], projects: [] })
+      expect((await channels.getTelegramStatus()).error).toMatch(/^Could not make a topic for Docs: .*Turn on Topics/)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('links a topic made by hand to the bot of its name, and makes no second one', async () => {
     await start()
     await pairInGroup()

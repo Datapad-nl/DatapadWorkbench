@@ -83,12 +83,15 @@ export class TelegramError extends Error {
   readonly code: number
   /** The group became a supergroup with this id: the call is to be made there. */
   readonly migrateTo?: number
+  /** Telegram asks to wait this many seconds before the call is made again. */
+  readonly retryAfter?: number
 
-  constructor(code: number, description: string, migrateTo?: number) {
+  constructor(code: number, description: string, migrateTo?: number, retryAfter?: number) {
     super(description)
     this.name = 'TelegramError'
     this.code = code
     if (migrateTo) this.migrateTo = migrateTo
+    if (retryAfter) this.retryAfter = retryAfter
   }
 }
 
@@ -122,11 +125,22 @@ export function telegramClient(token: string): TelegramClient {
       signal: signal ?? AbortSignal.timeout(30_000)
     })
     const data = (await response.json().catch(() => null)) as
-      | { ok: boolean; result?: T; description?: string; error_code?: number; parameters?: { migrate_to_chat_id?: number } }
+      | {
+          ok: boolean
+          result?: T
+          description?: string
+          error_code?: number
+          parameters?: { migrate_to_chat_id?: number; retry_after?: number }
+        }
       | null
     if (!data?.ok) {
       const code = data?.error_code ?? response.status
-      throw new TelegramError(code, hide(data?.description ?? `Telegram answered ${response.status}`), data?.parameters?.migrate_to_chat_id)
+      throw new TelegramError(
+        code,
+        hide(data?.description ?? `Telegram answered ${response.status}`),
+        data?.parameters?.migrate_to_chat_id,
+        data?.parameters?.retry_after
+      )
     }
     return data.result as T
   }

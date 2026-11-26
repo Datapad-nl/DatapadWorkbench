@@ -96,4 +96,20 @@ describe('errors', () => {
     expect(error).toBeInstanceOf(TelegramError)
     expect(error).toMatchObject({ code: 400, migrateTo: -1001234 })
   })
+
+  it('carries how long Telegram asks to wait', async () => {
+    fake.fetch.mockImplementation(async () =>
+      Response.json({
+        ok: false,
+        error_code: 429,
+        description: 'Too Many Requests: retry after 30',
+        parameters: { retry_after: 30 }
+      })
+    )
+    const error = await telegramClient(TOKEN)
+      .createForumTopic(-1001234, 'Site')
+      .catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(TelegramError)
+    expect(error).toMatchObject({ code: 429, retryAfter: 30 })
+  })
 })
